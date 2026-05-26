@@ -56,33 +56,206 @@ java -jar build/libs/idb-engine.jar
 
 ## 功能示例
 
-### 1. 列出所有数据库/Schema
+> 所有请求均为单行压缩 JSON，以 `\n` 结尾发送到 stdin；响应从 stdout 读取一行。
+
+### SCHEMA — 架构管理
+
+**列出所有数据库/Schema**
 
 ```json
 {"id":"1","category":"SCHEMA","action":"LIST","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"mysql"},"payload":{}}
 ```
 
-### 2. 列出所有表
-
+响应：
 ```json
-{"id":"2","category":"TABLE","action":"LIST","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{}}
+{"id":"1","success":true,"error":null,"data":["information_schema","mysql","test_db"]}
 ```
 
-### 3. 查询表数据（分页）
+**创建数据库**
 
 ```json
-{"id":"3","category":"DATA","action":"LIST","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"users","page":1,"pageSize":20}}
+{"id":"2","category":"SCHEMA","action":"CREATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"mysql"},"payload":{"name":"new_db"}}
 ```
 
-### 4. 执行原生 SQL
+响应：
+```json
+{"id":"2","success":true,"error":null,"data":{"created":"new_db"}}
+```
+
+**删除数据库**
 
 ```json
-{"id":"4","category":"SQL","action":"EXECUTE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"sql":"SELECT * FROM users LIMIT 10"}}
+{"id":"3","category":"SCHEMA","action":"DELETE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"mysql"},"payload":{"name":"old_db"}}
 ```
 
-### 5. 退出程序
+响应：
+```json
+{"id":"3","success":true,"error":null,"data":{"deleted":"old_db"}}
+```
 
-发送 `CMD_EXIT` 或关闭 stdin 流。
+---
+
+### USER — 用户权限管理
+
+**列出所有用户（MySQL）**
+
+```json
+{"id":"4","category":"USER","action":"LIST","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"mysql"},"payload":{}}
+```
+
+响应：
+```json
+{"id":"4","success":true,"error":null,"data":[{"user":"root","host":"localhost"},{"user":"app_user","host":"%"}]}
+```
+
+**列出所有用户（PostgreSQL）**
+
+```json
+{"id":"5","category":"USER","action":"LIST","connection":{"driver":"postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"postgres"},"payload":{}}
+```
+
+响应：
+```json
+{"id":"5","success":true,"error":null,"data":[{"user":"postgres"},{"user":"app_user"}]}
+```
+
+**授予权限**
+
+```json
+{"id":"6","category":"USER","action":"UPDATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"mysql"},"payload":{"user":"app_user","schema":"test_db","privileges":["SELECT","INSERT","UPDATE"],"isGrant":true}}
+```
+
+响应：
+```json
+{"id":"6","success":true,"error":null,"data":{"user":"app_user","action":"granted"}}
+```
+
+**回收权限**
+
+```json
+{"id":"7","category":"USER","action":"UPDATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"mysql"},"payload":{"user":"app_user","schema":"test_db","privileges":["DELETE"],"isGrant":false}}
+```
+
+响应：
+```json
+{"id":"7","success":true,"error":null,"data":{"user":"app_user","action":"revoked"}}
+```
+
+---
+
+### TABLE — 表结构元数据
+
+**列出所有表**
+
+```json
+{"id":"8","category":"TABLE","action":"LIST","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{}}
+```
+
+响应：
+```json
+{"id":"8","success":true,"error":null,"data":[{"name":"users","type":"TABLE"},{"name":"orders","type":"TABLE"}]}
+```
+
+**查看表列结构与主键（payload 含 `tableName` 时自动路由）**
+
+```json
+{"id":"9","category":"TABLE","action":"LIST","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"users"}}
+```
+
+响应：
+```json
+{"id":"9","success":true,"error":null,"data":[{"name":"id","type":"INT","size":10,"nullable":false,"isPrimaryKey":true,"defaultValue":null},{"name":"name","type":"VARCHAR","size":255,"nullable":true,"isPrimaryKey":false,"defaultValue":null},{"name":"email","type":"VARCHAR","size":255,"nullable":true,"isPrimaryKey":false,"defaultValue":null}]}
+```
+
+---
+
+### DATA — 表数据 CRUD
+
+**分页查询（LOB 字段自动截断为 `[LOB Data]`）**
+
+```json
+{"id":"10","category":"DATA","action":"LIST","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"users","page":1,"pageSize":20}}
+```
+
+响应：
+```json
+{"id":"10","success":true,"error":null,"data":[{"id":"1","name":"Alice","avatar":"[LOB Data]"},{"id":"2","name":"Bob","avatar":"[LOB Data]"}]}
+```
+
+**插入一行**
+
+```json
+{"id":"11","category":"DATA","action":"CREATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"users","values":{"name":"Charlie","email":"charlie@example.com"}}}
+```
+
+响应：
+```json
+{"id":"11","success":true,"error":null,"data":{"affectedRows":1}}
+```
+
+**更新一行**
+
+```json
+{"id":"12","category":"DATA","action":"UPDATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"users","changes":{"name":"Alex","email":"alex@example.com"},"where":{"id":"1"}}}
+```
+
+响应：
+```json
+{"id":"12","success":true,"error":null,"data":{"affectedRows":1}}
+```
+
+**删除一行**
+
+```json
+{"id":"13","category":"DATA","action":"DELETE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"users","where":{"id":"1"}}}
+```
+
+响应：
+```json
+{"id":"13","success":true,"error":null,"data":{"affectedRows":1}}
+```
+
+---
+
+### SQL — 原生 SQL 引擎
+
+**查询（返回结果集）**
+
+```json
+{"id":"14","category":"SQL","action":"EXECUTE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"sql":"SELECT id, name FROM users WHERE id > 10 LIMIT 5"}}
+```
+
+响应：
+```json
+{"id":"14","success":true,"error":null,"data":[{"id":"11","name":"Dave"},{"id":"12","name":"Eve"}]}
+```
+
+**更新/DDL（返回受影响行数）**
+
+```json
+{"id":"15","category":"SQL","action":"EXECUTE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"sql":"UPDATE users SET name = 'Frank' WHERE id = 3"}}
+```
+
+响应：
+```json
+{"id":"15","success":true,"error":null,"data":{"affectedRows":1}}
+```
+
+---
+
+### 错误响应示例
+
+连接失败、SQL 语法错误等异常均返回统一错误格式：
+
+```json
+{"id":"99","success":false,"error":"Communications link failure: Unable to connect to host","data":null}
+```
+
+---
+
+### 退出程序
+
+发送 `CMD_EXIT` 或关闭 stdin 流（EOF），进程将清理所有连接池后正常退出。
 
 ## 架构特性
 
@@ -96,7 +269,7 @@ java -jar build/libs/idb-engine.jar
 
 - Kotlin 2.3.21
 - JDK 21
-- HikariCP 6.2.1
-- MySQL Connector/J 9.1.0
-- PostgreSQL JDBC 42.7.4
-- kotlinx.serialization 1.7.3
+- HikariCP 7.0.2
+- MySQL Connector/J 9.7.0
+- PostgreSQL JDBC 42.7.11
+- kotlinx.serialization 1.11.0
