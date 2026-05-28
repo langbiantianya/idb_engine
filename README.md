@@ -314,6 +314,8 @@ java -jar build/libs/idb-engine.jar
 
 ## 架构特性
 
+- **异步非阻塞**：基于 Kotlin 协程实现高并发请求处理
+- **输出串行化**：通过 Channel 确保标准输出不会交错混乱
 - **无状态设计**：每次请求携带完整连接信息
 - **连接池复用**：基于 SHA-256 Hash 缓存 HikariCP 实例
 - **自动资源回收**：10 分钟空闲自动释放连接池
@@ -324,6 +326,7 @@ java -jar build/libs/idb-engine.jar
 
 - Kotlin 2.3.21
 - JDK 21
+- kotlinx-coroutines 1.11.0
 - HikariCP 7.0.2
 - MySQL Connector/J 9.7.0
 - PostgreSQL JDBC 42.7.11
