@@ -38,5 +38,5 @@ data class ConnectionConfig(
 
 @Serializable
 enum class Driver {
-    mysql, postgresql
+    Mysql, Postgresql
 }

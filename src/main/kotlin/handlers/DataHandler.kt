@@ -1,5 +1,6 @@
 package com.kxxnzstdsw.handlers
 
+import com.kxxnzstdsw.dialect.DialectFactory
 import com.kxxnzstdsw.models.ConnectionConfig
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
@@ -8,14 +9,17 @@ import kotlinx.serialization.json.*
 
 object DataHandler {
     suspend fun list(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
-        val tableName = payload["tableName"]?.jsonPrimitive?.content ?: throw IllegalArgumentException("Missing 'tableName'")
+        val tableName = payload["tableName"]?.jsonPrimitive?.content
+            ?: throw IllegalArgumentException("Missing 'tableName'")
         val page = payload["page"]?.jsonPrimitive?.intOrNull ?: 1
         val pageSize = payload["pageSize"]?.jsonPrimitive?.intOrNull ?: 50
         val offset = (page - 1) * pageSize
 
         val connection = PoolManager.getConnection(config)
+        val dialect = DialectFactory.getDialect(config.driver)
+
         return@withContext connection.use { conn ->
-            val sql = "SELECT * FROM `$tableName` LIMIT ? OFFSET ?"
+            val sql = "SELECT * FROM ${dialect.quoteIdentifier(tableName)} LIMIT ? OFFSET ?"
             conn.prepareStatement(sql).use { stmt ->
                 stmt.setInt(1, pageSize)
                 stmt.setInt(2, offset)
@@ -47,14 +51,18 @@ object DataHandler {
     }
 
     suspend fun create(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
-        val tableName = payload["tableName"]?.jsonPrimitive?.content ?: throw IllegalArgumentException("Missing 'tableName'")
-        val values = payload["values"]?.jsonObject ?: throw IllegalArgumentException("Missing 'values'")
+        val tableName = payload["tableName"]?.jsonPrimitive?.content
+            ?: throw IllegalArgumentException("Missing 'tableName'")
+        val values = payload["values"]?.jsonObject
+            ?: throw IllegalArgumentException("Missing 'values'")
 
         val connection = PoolManager.getConnection(config)
+        val dialect = DialectFactory.getDialect(config.driver)
+
         return@withContext connection.use { conn ->
-            val columns = values.keys.joinToString(", ") { "`$it`" }
+            val columns = values.keys.joinToString(", ") { dialect.quoteIdentifier(it) }
             val placeholders = values.keys.joinToString(", ") { "?" }
-            val sql = "INSERT INTO `$tableName` ($columns) VALUES ($placeholders)"
+            val sql = "INSERT INTO ${dialect.quoteIdentifier(tableName)} ($columns) VALUES ($placeholders)"
 
             conn.prepareStatement(sql).use { stmt ->
                 values.values.forEachIndexed { index, value ->
@@ -67,15 +75,20 @@ object DataHandler {
     }
 
     suspend fun update(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
-        val tableName = payload["tableName"]?.jsonPrimitive?.content ?: throw IllegalArgumentException("Missing 'tableName'")
-        val changes = payload["changes"]?.jsonObject ?: throw IllegalArgumentException("Missing 'changes'")
-        val where = payload["where"]?.jsonObject ?: throw IllegalArgumentException("Missing 'where'")
+        val tableName = payload["tableName"]?.jsonPrimitive?.content
+            ?: throw IllegalArgumentException("Missing 'tableName'")
+        val changes = payload["changes"]?.jsonObject
+            ?: throw IllegalArgumentException("Missing 'changes'")
+        val where = payload["where"]?.jsonObject
+            ?: throw IllegalArgumentException("Missing 'where'")
 
         val connection = PoolManager.getConnection(config)
+        val dialect = DialectFactory.getDialect(config.driver)
+
         return@withContext connection.use { conn ->
-            val setClause = changes.keys.joinToString(", ") { "`$it` = ?" }
-            val whereClause = where.keys.joinToString(" AND ") { "`$it` = ?" }
-            val sql = "UPDATE `$tableName` SET $setClause WHERE $whereClause"
+            val setClause = changes.keys.joinToString(", ") { "${dialect.quoteIdentifier(it)} = ?" }
+            val whereClause = where.keys.joinToString(" AND ") { "${dialect.quoteIdentifier(it)} = ?" }
+            val sql = "UPDATE ${dialect.quoteIdentifier(tableName)} SET $setClause WHERE $whereClause"
 
             conn.prepareStatement(sql).use { stmt ->
                 var paramIndex = 1
@@ -92,13 +105,17 @@ object DataHandler {
     }
 
     suspend fun delete(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
-        val tableName = payload["tableName"]?.jsonPrimitive?.content ?: throw IllegalArgumentException("Missing 'tableName'")
-        val where = payload["where"]?.jsonObject ?: throw IllegalArgumentException("Missing 'where'")
+        val tableName = payload["tableName"]?.jsonPrimitive?.content
+            ?: throw IllegalArgumentException("Missing 'tableName'")
+        val where = payload["where"]?.jsonObject
+            ?: throw IllegalArgumentException("Missing 'where'")
 
         val connection = PoolManager.getConnection(config)
+        val dialect = DialectFactory.getDialect(config.driver)
+
         return@withContext connection.use { conn ->
-            val whereClause = where.keys.joinToString(" AND ") { "`$it` = ?" }
-            val sql = "DELETE FROM `$tableName` WHERE $whereClause"
+            val whereClause = where.keys.joinToString(" AND ") { "${dialect.quoteIdentifier(it)} = ?" }
+            val sql = "DELETE FROM ${dialect.quoteIdentifier(tableName)} WHERE $whereClause"
 
             conn.prepareStatement(sql).use { stmt ->
                 where.values.forEachIndexed { index, value ->

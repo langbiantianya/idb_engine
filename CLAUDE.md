@@ -84,7 +84,14 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 ## 5. 功能模块详细设计 (Feature Modules)
 
-为兼容 MySQL 与 PostgreSQL，底层业务统一使用 `java.sql.DatabaseMetaData` 及标准 SQL 方言适配器模式。
+为兼容 MySQL 与 PostgreSQL，采用**方言抽象层 (Dialect Abstraction Layer)** 设计模式：
+
+- **DatabaseDialect 接口**：定义所有数据库特定操作的抽象方法
+- **MySQLDialect / PostgreSQLDialect**：分别实现 MySQL 和 PostgreSQL 的具体方言
+- **DialectFactory**：根据 `ConnectionConfig.driver` 实例化对应的方言实现
+- **Handler 层**：通过 `DialectFactory.getDialect(config.driver)` 获取方言实例，调用统一接口
+
+这种设计使得新增数据库支持（如 Oracle、SQL Server）只需实现 `DatabaseDialect` 接口，无需修改 Handler 层代码。
 
 ### 5.1 架构管理 (Schema Management) — `category: "SCHEMA"`
 
@@ -339,12 +346,17 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 ```
 src/main/kotlin/
-├── Main.kt                    // 入口点，维护 BufferedReader 阻塞式读取循环
+├── Main.kt                    // 入口点，维护协程主循环与 Channel 输出串行化
 ├── dispatcher/
 │   └── RequestDispatcher.kt   // 解析 JSON，分发请求路由
 ├── pool/
 │   └── PoolManager.kt         // HikariCP 动态管理与 SHA-256 缓存
-├── handlers/                  // 业务处理层
+├── dialect/                   // 数据库方言抽象层
+│   ├── DatabaseDialect.kt     // 方言接口定义
+│   ├── MySQLDialect.kt        // MySQL 方言实现
+│   ├── PostgreSQLDialect.kt   // PostgreSQL 方言实现
+│   └── DialectFactory.kt      // 方言工厂（根据 Driver 实例化）
+├── handlers/                  // 业务处理层（调用方言接口）
 │   ├── SchemaHandler.kt
 │   ├── TableHandler.kt
 │   ├── DataHandler.kt
@@ -397,6 +409,7 @@ response := scanner.Text()
 ✅ 已完成：
 - 核心架构与通信协议
 - 异步非阻塞处理（Kotlin 协程 + Channel 输出串行化）
+- 数据库方言抽象层（DatabaseDialect 接口 + MySQL/PostgreSQL 实现）
 - 连接池管理（HikariCP + SHA-256 缓存）
 - 五大业务模块（Schema/Table/Data/User/SQL）全部改为 suspend 函数
 - 长驻运行机制（协程 + BufferedReader + Shutdown Hook）
@@ -405,5 +418,5 @@ response := scanner.Text()
 
 ⏳ 待扩展：
 - GraalVM Native Image 编译
-- 更多数据库方言支持（Oracle, SQL Server）
+- 更多数据库方言支持（Oracle, SQL Server, SQLite）
 - 性能监控与指标上报

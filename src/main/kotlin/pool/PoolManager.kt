@@ -42,8 +42,8 @@ object PoolManager {
 
             // Connection test
             connectionTestQuery = when (config.driver) {
-                Driver.mysql -> "SELECT 1"
-                Driver.postgresql -> "SELECT 1"
+                Driver.Mysql -> "SELECT 1"
+                Driver.Postgresql -> "SELECT 1"
             }
         }
 
@@ -52,8 +52,8 @@ object PoolManager {
 
     private fun buildJdbcUrl(config: ConnectionConfig): String {
         return when (config.driver) {
-            Driver.mysql -> "jdbc:mysql://${config.host}:${config.port}/${config.database}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
-            Driver.postgresql -> "jdbc:postgresql://${config.host}:${config.port}/${config.database}"
+            Driver.Mysql -> "jdbc:mysql://${config.host}:${config.port}/${config.database}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
+            Driver.Postgresql -> "jdbc:postgresql://${config.host}:${config.port}/${config.database}"
         }
     }
 
