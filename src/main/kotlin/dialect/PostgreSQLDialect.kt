@@ -20,16 +20,41 @@ class PostgreSQLDialect : DatabaseDialect {
         schemas
     }
 
-    override suspend fun createSchema(conn: Connection, name: String) = withContext(Dispatchers.IO) {
+    override suspend fun createSchema(conn: Connection, name: String): Boolean = withContext(Dispatchers.IO) {
         conn.createStatement().use { stmt ->
             stmt.execute("CREATE SCHEMA \"$name\"")
         }
+        true
     }
 
-    override suspend fun deleteSchema(conn: Connection, name: String) = withContext(Dispatchers.IO) {
+    override suspend fun deleteSchema(conn: Connection, name: String): Boolean = withContext(Dispatchers.IO) {
         conn.createStatement().use { stmt ->
             stmt.execute("DROP SCHEMA \"$name\" CASCADE")
         }
+        true
+    }
+
+    override suspend fun listTables(conn: Connection, database: String): List<Map<String, String>> = withContext(Dispatchers.IO) {
+        val tables = mutableListOf<Map<String, String>>()
+        conn.createStatement().use { stmt ->
+            stmt.executeQuery(
+                """
+                SELECT table_name, table_type
+                FROM information_schema.tables
+                WHERE table_schema = '$database'
+                AND table_type = 'BASE TABLE'
+                ORDER BY table_name
+                """.trimIndent()
+            ).use { rs ->
+                while (rs.next()) {
+                    tables.add(mapOf(
+                        "name" to rs.getString("table_name"),
+                        "type" to rs.getString("table_type")
+                    ))
+                }
+            }
+        }
+        tables
     }
 
     override suspend fun listUsers(conn: Connection): List<Map<String, String>> = withContext(Dispatchers.IO) {
@@ -52,7 +77,7 @@ class PostgreSQLDialect : DatabaseDialect {
         schema: String,
         privileges: List<String>,
         isGrant: Boolean
-    ) = withContext(Dispatchers.IO) {
+    ): Boolean = withContext(Dispatchers.IO) {
         val privilegeList = privileges.joinToString(", ")
         val sql = if (isGrant) {
             "GRANT $privilegeList ON SCHEMA \"$schema\" TO \"$user\""
@@ -62,6 +87,7 @@ class PostgreSQLDialect : DatabaseDialect {
         conn.createStatement().use { stmt ->
             stmt.execute(sql)
         }
+        true
     }
 
     override fun quoteIdentifier(identifier: String): String = "\"$identifier\""

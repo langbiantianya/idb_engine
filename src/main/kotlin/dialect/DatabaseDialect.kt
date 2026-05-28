@@ -24,6 +24,11 @@ interface DatabaseDialect {
     suspend fun deleteSchema(conn: Connection, name: String): Boolean
 
     /**
+     * List all tables in a specific database/schema
+     */
+    suspend fun listTables(conn: Connection, database: String): List<Map<String, String>>
+
+    /**
      * List all users
      */
     suspend fun listUsers(conn: Connection): List<Map<String, String>>

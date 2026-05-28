@@ -17,16 +17,34 @@ class MySQLDialect : DatabaseDialect {
         schemas
     }
 
-    override suspend fun createSchema(conn: Connection, name: String) = withContext(Dispatchers.IO) {
+    override suspend fun createSchema(conn: Connection, name: String): Boolean = withContext(Dispatchers.IO) {
         conn.createStatement().use { stmt ->
             stmt.execute("CREATE DATABASE `$name`")
         }
+        true
     }
 
-    override suspend fun deleteSchema(conn: Connection, name: String) = withContext(Dispatchers.IO) {
+    override suspend fun deleteSchema(conn: Connection, name: String): Boolean = withContext(Dispatchers.IO) {
         conn.createStatement().use { stmt ->
             stmt.execute("DROP DATABASE `$name`")
         }
+        true
+    }
+
+    override suspend fun listTables(conn: Connection, database: String): List<Map<String, String>> = withContext(Dispatchers.IO) {
+        val tables = mutableListOf<Map<String, String>>()
+        // Use SHOW TABLES for MySQL to properly handle system databases
+        conn.createStatement().use { stmt ->
+            stmt.executeQuery("SHOW FULL TABLES FROM `$database`").use { rs ->
+                while (rs.next()) {
+                    tables.add(mapOf(
+                        "name" to rs.getString(1),
+                        "type" to rs.getString(2)
+                    ))
+                }
+            }
+        }
+        tables
     }
 
     override suspend fun listUsers(conn: Connection): List<Map<String, String>> = withContext(Dispatchers.IO) {
@@ -50,7 +68,7 @@ class MySQLDialect : DatabaseDialect {
         schema: String,
         privileges: List<String>,
         isGrant: Boolean
-    ) = withContext(Dispatchers.IO) {
+    ): Boolean = withContext(Dispatchers.IO) {
         val privilegeList = privileges.joinToString(", ")
         val sql = if (isGrant) {
             "GRANT $privilegeList ON $schema.* TO '$user'"
@@ -60,6 +78,7 @@ class MySQLDialect : DatabaseDialect {
         conn.createStatement().use { stmt ->
             stmt.execute(sql)
         }
+        true
     }
 
     override fun quoteIdentifier(identifier: String): String = "`$identifier`"

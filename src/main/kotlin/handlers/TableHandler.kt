@@ -10,17 +10,10 @@ import kotlinx.serialization.json.*
 object TableHandler {
     suspend fun list(config: ConnectionConfig): JsonElement = withContext(Dispatchers.IO) {
         val connection = PoolManager.getConnection(config)
+        val dialect = DialectFactory.getDialect(config.driver)
+
         return@withContext connection.use { conn ->
-            val tables = mutableListOf<Map<String, String>>()
-            val metaData = conn.metaData
-            metaData.getTables(config.database, null, "%", arrayOf("TABLE")).use { rs ->
-                while (rs.next()) {
-                    tables.add(mapOf(
-                        "name" to rs.getString("TABLE_NAME"),
-                        "type" to rs.getString("TABLE_TYPE")
-                    ))
-                }
-            }
+            val tables = dialect.listTables(conn, config.database)
             Json.encodeToJsonElement(tables)
         }
     }
