@@ -2,14 +2,16 @@ package com.kxxnzstdsw.handlers
 
 import com.kxxnzstdsw.models.ConnectionConfig
 import com.kxxnzstdsw.pool.PoolManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 
 object SqlEngineHandler {
-    fun execute(config: ConnectionConfig, payload: JsonObject): JsonElement {
+    suspend fun execute(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
         val sql = payload["sql"]?.jsonPrimitive?.content ?: throw IllegalArgumentException("Missing 'sql' in payload")
         val connection = PoolManager.getConnection(config)
 
-        return connection.use { conn ->
+        return@withContext connection.use { conn ->
             conn.createStatement().use { stmt ->
                 val hasResultSet = stmt.execute(sql)
 

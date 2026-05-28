@@ -3,12 +3,14 @@ package com.kxxnzstdsw.handlers
 import com.kxxnzstdsw.models.ConnectionConfig
 import com.kxxnzstdsw.models.Driver
 import com.kxxnzstdsw.pool.PoolManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 
 object TableHandler {
-    fun list(config: ConnectionConfig): JsonElement {
+    suspend fun list(config: ConnectionConfig): JsonElement = withContext(Dispatchers.IO) {
         val connection = PoolManager.getConnection(config)
-        return connection.use { conn ->
+        return@withContext connection.use { conn ->
             val tables = mutableListOf<Map<String, String>>()
             val metaData = conn.metaData
             metaData.getTables(config.database, null, "%", arrayOf("TABLE")).use { rs ->
@@ -23,10 +25,10 @@ object TableHandler {
         }
     }
 
-    fun columnList(config: ConnectionConfig, payload: JsonObject): JsonElement {
+    suspend fun columnList(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
         val tableName = payload["tableName"]?.jsonPrimitive?.content ?: throw IllegalArgumentException("Missing 'tableName' in payload")
         val connection = PoolManager.getConnection(config)
-        return connection.use { conn ->
+        return@withContext connection.use { conn ->
             val columns = mutableListOf<JsonObject>()
             val metaData = conn.metaData
 
@@ -62,12 +64,12 @@ object TableHandler {
         }
     }
 
-    fun create(config: ConnectionConfig, payload: JsonObject): JsonElement {
+    suspend fun create(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
         val tableName = payload["tableName"]?.jsonPrimitive?.content ?: throw IllegalArgumentException("Missing 'tableName'")
         val columns = payload["columns"]?.jsonArray ?: throw IllegalArgumentException("Missing 'columns' array")
 
         val connection = PoolManager.getConnection(config)
-        return connection.use { conn ->
+        return@withContext connection.use { conn ->
             val columnDefs = columns.map { col ->
                 val colObj = col.jsonObject
                 val name = colObj["name"]?.jsonPrimitive?.content ?: throw IllegalArgumentException("Column missing 'name'")
@@ -105,12 +107,12 @@ object TableHandler {
         }
     }
 
-    fun update(config: ConnectionConfig, payload: JsonObject): JsonElement {
+    suspend fun update(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
         val tableName = payload["tableName"]?.jsonPrimitive?.content ?: throw IllegalArgumentException("Missing 'tableName'")
         val operation = payload["operation"]?.jsonPrimitive?.content ?: throw IllegalArgumentException("Missing 'operation' (ADD_COLUMN|DROP_COLUMN|MODIFY_COLUMN)")
 
         val connection = PoolManager.getConnection(config)
-        return connection.use { conn ->
+        return@withContext connection.use { conn ->
             val sql = when (operation) {
                 "ADD_COLUMN" -> {
                     val column = payload["column"]?.jsonObject ?: throw IllegalArgumentException("Missing 'column' object")
@@ -155,10 +157,10 @@ object TableHandler {
         }
     }
 
-    fun delete(config: ConnectionConfig, payload: JsonObject): JsonElement {
+    suspend fun delete(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
         val tableName = payload["tableName"]?.jsonPrimitive?.content ?: throw IllegalArgumentException("Missing 'tableName'")
         val connection = PoolManager.getConnection(config)
-        return connection.use { conn ->
+        return@withContext connection.use { conn ->
             val sql = "DROP TABLE ${quoteIdentifier(tableName, config.driver)}"
             conn.createStatement().use { it.execute(sql) }
             buildJsonObject { put("deleted", tableName) }

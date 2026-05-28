@@ -11,7 +11,7 @@ object RequestDispatcher {
     private val logger = LoggerFactory.getLogger(RequestDispatcher::class.java)
     private val json = Json { ignoreUnknownKeys = true }
 
-    fun dispatch(requestJson: String): String {
+    suspend fun dispatch(requestJson: String): String {
         return try {
             val request = json.decodeFromString<Request>(requestJson)
             logger.info("Processing request: ${request.id} - ${request.category}/${request.action}")
@@ -41,7 +41,7 @@ object RequestDispatcher {
         }
     }
 
-    private fun handleSchema(request: Request): JsonElement {
+    private suspend fun handleSchema(request: Request): JsonElement {
         return when (request.action) {
             Action.LIST -> SchemaHandler.list(request.connection)
             Action.CREATE -> SchemaHandler.create(request.connection, request.payload)
@@ -50,7 +50,7 @@ object RequestDispatcher {
         }
     }
 
-    private fun handleTable(request: Request): JsonElement {
+    private suspend fun handleTable(request: Request): JsonElement {
         return when (request.action) {
             Action.LIST -> {
                 if (request.payload.containsKey("tableName")) {
@@ -66,7 +66,7 @@ object RequestDispatcher {
         }
     }
 
-    private fun handleData(request: Request): JsonElement {
+    private suspend fun handleData(request: Request): JsonElement {
         return when (request.action) {
             Action.LIST -> DataHandler.list(request.connection, request.payload)
             Action.CREATE -> DataHandler.create(request.connection, request.payload)
@@ -76,7 +76,7 @@ object RequestDispatcher {
         }
     }
 
-    private fun handleUser(request: Request): JsonElement {
+    private suspend fun handleUser(request: Request): JsonElement {
         return when (request.action) {
             Action.LIST -> UserHandler.list(request.connection)
             Action.UPDATE -> UserHandler.updatePrivileges(request.connection, request.payload)
@@ -84,7 +84,7 @@ object RequestDispatcher {
         }
     }
 
-    private fun handleSql(request: Request): JsonElement {
+    private suspend fun handleSql(request: Request): JsonElement {
         return when (request.action) {
             Action.EXECUTE -> SqlEngineHandler.execute(request.connection, request.payload)
             else -> throw UnsupportedOperationException("Action ${request.action} not supported for SQL")

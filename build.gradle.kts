@@ -14,7 +14,8 @@ repositories {
 dependencies {
     // Kotlin Serialization
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
-
+// Source: https://mvnrepository.com/artifact/org.jetbrains.kotlinx/kotlinx-coroutines-core
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
     // HikariCP Connection Pool
     implementation("com.zaxxer:HikariCP:7.0.2")
 

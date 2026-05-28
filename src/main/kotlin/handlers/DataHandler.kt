@@ -2,17 +2,19 @@ package com.kxxnzstdsw.handlers
 
 import com.kxxnzstdsw.models.ConnectionConfig
 import com.kxxnzstdsw.pool.PoolManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 
 object DataHandler {
-    fun list(config: ConnectionConfig, payload: JsonObject): JsonElement {
+    suspend fun list(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
         val tableName = payload["tableName"]?.jsonPrimitive?.content ?: throw IllegalArgumentException("Missing 'tableName'")
         val page = payload["page"]?.jsonPrimitive?.intOrNull ?: 1
         val pageSize = payload["pageSize"]?.jsonPrimitive?.intOrNull ?: 50
         val offset = (page - 1) * pageSize
 
         val connection = PoolManager.getConnection(config)
-        return connection.use { conn ->
+        return@withContext connection.use { conn ->
             val sql = "SELECT * FROM `$tableName` LIMIT ? OFFSET ?"
             conn.prepareStatement(sql).use { stmt ->
                 stmt.setInt(1, pageSize)
@@ -44,12 +46,12 @@ object DataHandler {
         }
     }
 
-    fun create(config: ConnectionConfig, payload: JsonObject): JsonElement {
+    suspend fun create(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
         val tableName = payload["tableName"]?.jsonPrimitive?.content ?: throw IllegalArgumentException("Missing 'tableName'")
         val values = payload["values"]?.jsonObject ?: throw IllegalArgumentException("Missing 'values'")
 
         val connection = PoolManager.getConnection(config)
-        return connection.use { conn ->
+        return@withContext connection.use { conn ->
             val columns = values.keys.joinToString(", ") { "`$it`" }
             val placeholders = values.keys.joinToString(", ") { "?" }
             val sql = "INSERT INTO `$tableName` ($columns) VALUES ($placeholders)"
@@ -64,13 +66,13 @@ object DataHandler {
         }
     }
 
-    fun update(config: ConnectionConfig, payload: JsonObject): JsonElement {
+    suspend fun update(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
         val tableName = payload["tableName"]?.jsonPrimitive?.content ?: throw IllegalArgumentException("Missing 'tableName'")
         val changes = payload["changes"]?.jsonObject ?: throw IllegalArgumentException("Missing 'changes'")
         val where = payload["where"]?.jsonObject ?: throw IllegalArgumentException("Missing 'where'")
 
         val connection = PoolManager.getConnection(config)
-        return connection.use { conn ->
+        return@withContext connection.use { conn ->
             val setClause = changes.keys.joinToString(", ") { "`$it` = ?" }
             val whereClause = where.keys.joinToString(" AND ") { "`$it` = ?" }
             val sql = "UPDATE `$tableName` SET $setClause WHERE $whereClause"
@@ -89,12 +91,12 @@ object DataHandler {
         }
     }
 
-    fun delete(config: ConnectionConfig, payload: JsonObject): JsonElement {
+    suspend fun delete(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
         val tableName = payload["tableName"]?.jsonPrimitive?.content ?: throw IllegalArgumentException("Missing 'tableName'")
         val where = payload["where"]?.jsonObject ?: throw IllegalArgumentException("Missing 'where'")
 
         val connection = PoolManager.getConnection(config)
-        return connection.use { conn ->
+        return@withContext connection.use { conn ->
             val whereClause = where.keys.joinToString(" AND ") { "`$it` = ?" }
             val sql = "DELETE FROM `$tableName` WHERE $whereClause"
 
