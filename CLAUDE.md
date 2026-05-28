@@ -178,6 +178,75 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 ]
 ```
 
+**CREATE** — 创建表，支持主键定义
+
+```json
+// 请求 payload
+{
+  "tableName": "products",
+  "columns": [
+    {"name": "id", "type": "INT", "nullable": false, "isPrimaryKey": true},
+    {"name": "name", "type": "VARCHAR", "size": 255, "nullable": false},
+    {"name": "price", "type": "DECIMAL", "nullable": true, "defaultValue": "0.00"},
+    {"name": "created_at", "type": "TIMESTAMP", "nullable": true, "defaultValue": "CURRENT_TIMESTAMP"}
+  ]
+}
+
+// 响应 data
+{"created": "products"}
+```
+
+**UPDATE** — 修改表结构（ADD_COLUMN / DROP_COLUMN / MODIFY_COLUMN）
+
+添加列：
+```json
+// 请求 payload
+{
+  "tableName": "products",
+  "operation": "ADD_COLUMN",
+  "column": {"name": "description", "type": "TEXT", "nullable": true}
+}
+
+// 响应 data
+{"tableName": "products", "operation": "ADD_COLUMN"}
+```
+
+删除列：
+```json
+// 请求 payload
+{
+  "tableName": "products",
+  "operation": "DROP_COLUMN",
+  "columnName": "description"
+}
+
+// 响应 data
+{"tableName": "products", "operation": "DROP_COLUMN"}
+```
+
+修改列（MySQL 使用 `MODIFY COLUMN`，PostgreSQL 使用 `ALTER COLUMN ... TYPE`）：
+```json
+// 请求 payload
+{
+  "tableName": "products",
+  "operation": "MODIFY_COLUMN",
+  "column": {"name": "price", "type": "DECIMAL", "size": 10, "nullable": false}
+}
+
+// 响应 data
+{"tableName": "products", "operation": "MODIFY_COLUMN"}
+```
+
+**DELETE** — 删除表（`DROP TABLE`）
+
+```json
+// 请求 payload
+{"tableName": "old_table"}
+
+// 响应 data
+{"deleted": "old_table"}
+```
+
 ### 5.4 表数据运维 (Table Data CRUD) — `category: "DATA"`
 
 为防止大数据量拖垮本地内存，强制实施分页和参数化查询（`PreparedStatement`）。

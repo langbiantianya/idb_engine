@@ -167,6 +167,61 @@ java -jar build/libs/idb-engine.jar
 {"id":"9","success":true,"error":null,"data":[{"name":"id","type":"INT","size":10,"nullable":false,"isPrimaryKey":true,"defaultValue":null},{"name":"name","type":"VARCHAR","size":255,"nullable":true,"isPrimaryKey":false,"defaultValue":null},{"name":"email","type":"VARCHAR","size":255,"nullable":true,"isPrimaryKey":false,"defaultValue":null}]}
 ```
 
+**创建表**
+
+```json
+{"id":"10","category":"TABLE","action":"CREATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"products","columns":[{"name":"id","type":"INT","nullable":false,"isPrimaryKey":true},{"name":"name","type":"VARCHAR","size":255,"nullable":false},{"name":"price","type":"DECIMAL","nullable":true,"defaultValue":"0.00"}]}}
+```
+
+响应：
+```json
+{"id":"10","success":true,"error":null,"data":{"created":"products"}}
+```
+
+**修改表结构 — 添加列**
+
+```json
+{"id":"11","category":"TABLE","action":"UPDATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"products","operation":"ADD_COLUMN","column":{"name":"description","type":"TEXT","nullable":true}}}
+```
+
+响应：
+```json
+{"id":"11","success":true,"error":null,"data":{"tableName":"products","operation":"ADD_COLUMN"}}
+```
+
+**修改表结构 — 删除列**
+
+```json
+{"id":"12","category":"TABLE","action":"UPDATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"products","operation":"DROP_COLUMN","columnName":"description"}}
+```
+
+响应：
+```json
+{"id":"12","success":true,"error":null,"data":{"tableName":"products","operation":"DROP_COLUMN"}}
+```
+
+**修改表结构 — 修改列类型**
+
+```json
+{"id":"13","category":"TABLE","action":"UPDATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"products","operation":"MODIFY_COLUMN","column":{"name":"price","type":"DECIMAL","size":10,"nullable":false}}}
+```
+
+响应：
+```json
+{"id":"13","success":true,"error":null,"data":{"tableName":"products","operation":"MODIFY_COLUMN"}}
+```
+
+**删除表**
+
+```json
+{"id":"14","category":"TABLE","action":"DELETE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"old_table"}}
+```
+
+响应：
+```json
+{"id":"14","success":true,"error":null,"data":{"deleted":"old_table"}}
+```
+
 ---
 
 ### DATA — 表数据 CRUD
@@ -174,45 +229,45 @@ java -jar build/libs/idb-engine.jar
 **分页查询（LOB 字段自动截断为 `[LOB Data]`）**
 
 ```json
-{"id":"10","category":"DATA","action":"LIST","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"users","page":1,"pageSize":20}}
+{"id":"15","category":"DATA","action":"LIST","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"users","page":1,"pageSize":20}}
 ```
 
 响应：
 ```json
-{"id":"10","success":true,"error":null,"data":[{"id":"1","name":"Alice","avatar":"[LOB Data]"},{"id":"2","name":"Bob","avatar":"[LOB Data]"}]}
+{"id":"15","success":true,"error":null,"data":[{"id":"1","name":"Alice","avatar":"[LOB Data]"},{"id":"2","name":"Bob","avatar":"[LOB Data]"}]}
 ```
 
 **插入一行**
 
 ```json
-{"id":"11","category":"DATA","action":"CREATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"users","values":{"name":"Charlie","email":"charlie@example.com"}}}
+{"id":"16","category":"DATA","action":"CREATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"users","values":{"name":"Charlie","email":"charlie@example.com"}}}
 ```
 
 响应：
 ```json
-{"id":"11","success":true,"error":null,"data":{"affectedRows":1}}
+{"id":"16","success":true,"error":null,"data":{"affectedRows":1}}
 ```
 
 **更新一行**
 
 ```json
-{"id":"12","category":"DATA","action":"UPDATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"users","changes":{"name":"Alex","email":"alex@example.com"},"where":{"id":"1"}}}
+{"id":"17","category":"DATA","action":"UPDATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"users","changes":{"name":"Alex","email":"alex@example.com"},"where":{"id":"1"}}}
 ```
 
 响应：
 ```json
-{"id":"12","success":true,"error":null,"data":{"affectedRows":1}}
+{"id":"17","success":true,"error":null,"data":{"affectedRows":1}}
 ```
 
 **删除一行**
 
 ```json
-{"id":"13","category":"DATA","action":"DELETE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"users","where":{"id":"1"}}}
+{"id":"18","category":"DATA","action":"DELETE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"users","where":{"id":"1"}}}
 ```
 
 响应：
 ```json
-{"id":"13","success":true,"error":null,"data":{"affectedRows":1}}
+{"id":"18","success":true,"error":null,"data":{"affectedRows":1}}
 ```
 
 ---
@@ -222,23 +277,23 @@ java -jar build/libs/idb-engine.jar
 **查询（返回结果集）**
 
 ```json
-{"id":"14","category":"SQL","action":"EXECUTE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"sql":"SELECT id, name FROM users WHERE id > 10 LIMIT 5"}}
+{"id":"19","category":"SQL","action":"EXECUTE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"sql":"SELECT id, name FROM users WHERE id > 10 LIMIT 5"}}
 ```
 
 响应：
 ```json
-{"id":"14","success":true,"error":null,"data":[{"id":"11","name":"Dave"},{"id":"12","name":"Eve"}]}
+{"id":"19","success":true,"error":null,"data":[{"id":"11","name":"Dave"},{"id":"12","name":"Eve"}]}
 ```
 
 **更新/DDL（返回受影响行数）**
 
 ```json
-{"id":"15","category":"SQL","action":"EXECUTE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"sql":"UPDATE users SET name = 'Frank' WHERE id = 3"}}
+{"id":"20","category":"SQL","action":"EXECUTE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"sql":"UPDATE users SET name = 'Frank' WHERE id = 3"}}
 ```
 
 响应：
 ```json
-{"id":"15","success":true,"error":null,"data":{"affectedRows":1}}
+{"id":"20","success":true,"error":null,"data":{"affectedRows":1}}
 ```
 
 ---

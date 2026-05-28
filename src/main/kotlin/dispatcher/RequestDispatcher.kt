@@ -59,7 +59,9 @@ object RequestDispatcher {
                     TableHandler.list(request.connection)
                 }
             }
-
+            Action.CREATE -> TableHandler.create(request.connection, request.payload)
+            Action.UPDATE -> TableHandler.update(request.connection, request.payload)
+            Action.DELETE -> TableHandler.delete(request.connection, request.payload)
             else -> throw UnsupportedOperationException("Action ${request.action} not supported for TABLE")
         }
     }
