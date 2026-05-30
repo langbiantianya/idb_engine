@@ -19,12 +19,21 @@ object DataHandler {
         val dialect = DialectFactory.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
+            // 查询总行数
+            val countSql = "SELECT COUNT(*) AS cnt FROM ${dialect.quoteIdentifier(tableName)}"
+            val total = conn.prepareStatement(countSql).use { countStmt ->
+                countStmt.executeQuery().use { rs ->
+                    if (rs.next()) rs.getLong("cnt") else 0L
+                }
+            }
+
+            // 查询当页数据
             val sql = "SELECT * FROM ${dialect.quoteIdentifier(tableName)} LIMIT ? OFFSET ?"
-            conn.prepareStatement(sql).use { stmt ->
+            val rows = conn.prepareStatement(sql).use { stmt ->
                 stmt.setInt(1, pageSize)
                 stmt.setInt(2, offset)
                 stmt.executeQuery().use { rs ->
-                    val rows = mutableListOf<Map<String, String?>>()
+                    val resultRows = mutableListOf<Map<String, String?>>()
                     val metaData = rs.metaData
                     val columnCount = metaData.columnCount
 
@@ -42,9 +51,18 @@ object DataHandler {
                             }
                             row[columnName] = value
                         }
-                        rows.add(row)
+                        resultRows.add(row)
                     }
-                    Json.encodeToJsonElement(rows)
+                    resultRows
+                }
+            }
+
+            buildJsonObject {
+                put("total", total)
+                put("page", page)
+                put("pageSize", pageSize)
+                putJsonArray("rows") {
+                    rows.forEach { add(Json.encodeToJsonElement(it)) }
                 }
             }
         }

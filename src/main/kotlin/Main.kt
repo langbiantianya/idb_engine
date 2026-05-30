@@ -60,7 +60,9 @@ fun main() = runBlocking {
             // Process request asynchronously (non-blocking)
             launch {
                 try {
+                    logger.debug("STDIN <<< {}", line)
                     val response = RequestDispatcher.dispatch(line)
+                    logger.debug("STDOUT >>> {}", response)
                     outputChannel.send(response)
                 } catch (e: Exception) {
                     logger.error("Error processing request asynchronously", e)

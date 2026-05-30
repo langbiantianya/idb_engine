@@ -15,7 +15,7 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 - **数据库驱动**：原生 JDBC (MySQL Connector/J 9.7.0, PostgreSQL JDBC Driver 42.7.11)
 - **连接池管理**：HikariCP 7.0.2 (业界最高性能、资源占用低的连接池)
 - **数据序列化**：`kotlinx.serialization` 1.11.0 (无反射、轻量化、原生支持 Kotlin 协程与数据类)
-- **日志框架**：SLF4J 2.0.18 + Logback 1.5.13 (所有日志输出到 stderr)
+- **日志框架**：SLF4J 2.0.18 + Logback 1.5.13 (日志输出到本地滚动文件，不污染 stdout)
 - **构建与分发**：Gradle + ShadowJar 9.3.0+ (构建为单一 FatJar，后续可通过 GraalVM Native Image 编译为无 JRE 依赖的二进制文件)
 
 ## 3. 核心机制设计 (Core Mechanisms)
@@ -25,7 +25,7 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 - **交互介质**：标准输入 (`System.in`) 与 标准输出 (`System.out`)。
 - **数据格式**：单行压缩 JSON 字符串（Minified JSON）。
 - **边界标识**：使用换行符 `\n` 作为单次请求和响应的结束符。
-- **日志隔离**：Kotlin 内部的任何常规日志（如 `logger.info` 或异常堆栈）**必须**重定向到标准错误流 (`System.err`) 或本地日志文件，绝对禁止混入 `System.out`，以免破坏返回给 Go 进程的 JSON 结构。
+- **日志隔离**：Kotlin 内部的任何常规日志（如 `logger.info` 或异常堆栈）通过 Logback 写入本地滚动文件 (`logs/idb-engine.log`)，不输出到 stdout 或 stderr，绝对避免污染返回给 Go 进程的 JSON 结构。
 - **异步处理**：使用 Kotlin 协程 (`kotlinx-coroutines`) 实现非阻塞并发处理，多个请求可同时执行互不阻塞。
 - **输出串行化**：通过 `Channel<String>` 确保所有响应按顺序输出到 stdout，一次只有一个输出，避免交错混乱。
 - **长驻运行**：主循环在 `runBlocking` 协程作用域中运行，使用 `BufferedReader.readLine()` 阻塞式读取输入，支持长期驻留运行，直到收到 `CMD_EXIT` 或 stdin 关闭（EOF）。
@@ -268,10 +268,15 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 {"tableName": "users", "page": 1, "pageSize": 50}
 
 // 响应 data（page/pageSize 默认值：1/50）
-[
-  {"id": "1", "name": "Alice", "avatar": "[LOB Data]"},
-  {"id": "2", "name": "Bob",   "avatar": "[LOB Data]"}
-]
+{
+  "total": 120,
+  "page": 1,
+  "pageSize": 50,
+  "rows": [
+    {"id": "1", "name": "Alice", "avatar": "[LOB Data]"},
+    {"id": "2", "name": "Bob",   "avatar": "[LOB Data]"}
+  ]
+}
 ```
 
 **CREATE** — 插入一行，`values` 中所有值均以字符串传递并通过 `stmt.setString` 绑定
@@ -362,11 +367,12 @@ src/main/kotlin/
 │   ├── DataHandler.kt
 │   ├── UserHandler.kt
 │   └── SqlEngineHandler.kt
-├── models/                    // 数据契约
-│   ├── Request.kt             // Request / Category / Action / ConnectionConfig / Driver
-│   └── Response.kt            // Response
-└── resources/
-    └── logback.xml            // 日志配置（输出到 stderr）
+└── models/                    // 数据契约
+    ├── Request.kt             // Request / Category / Action / ConnectionConfig / Driver
+    └── Response.kt            // Response
+
+src/main/resources/
+└── logback.xml                // 日志配置（滚动文件输出，每日归档，30天保留）
 ```
 
 ## 8. 构建与部署 (Build & Deploy)
@@ -413,7 +419,7 @@ response := scanner.Text()
 - 连接池管理（HikariCP + SHA-256 缓存）
 - 五大业务模块（Schema/Table/Data/User/SQL）全部改为 suspend 函数
 - 长驻运行机制（协程 + BufferedReader + Shutdown Hook）
-- 日志隔离（stderr）
+- 日志隔离（滚动文件，不污染 stdout/stderr）
 - 构建配置（Gradle + ShadowJar）
 
 ⏳ 待扩展：

@@ -234,7 +234,7 @@ java -jar build/libs/idb-engine.jar
 
 响应：
 ```json
-{"id":"15","success":true,"error":null,"data":[{"id":"1","name":"Alice","avatar":"[LOB Data]"},{"id":"2","name":"Bob","avatar":"[LOB Data]"}]}
+{"id":"15","success":true,"error":null,"data":{"total":120,"page":1,"pageSize":50,"rows":[{"id":"1","name":"Alice","avatar":"[LOB Data]"},{"id":"2","name":"Bob","avatar":"[LOB Data]"}]}}
 ```
 
 **插入一行**
@@ -320,7 +320,7 @@ java -jar build/libs/idb-engine.jar
 - **连接池复用**：基于 SHA-256 Hash 缓存 HikariCP 实例
 - **自动资源回收**：10 分钟空闲自动释放连接池
 - **安全防护**：强制使用 PreparedStatement 防止 SQL 注入
-- **日志隔离**：所有日志输出到 stderr，不污染 stdout JSON 流
+- **日志隔离**：所有日志输出到滚动文件 (`logs/idb-engine.log`)，不污染 stdout JSON 流
 
 ## 技术栈
 
