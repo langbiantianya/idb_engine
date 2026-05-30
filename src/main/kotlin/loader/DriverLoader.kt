@@ -5,20 +5,41 @@ import java.io.File
 import java.net.URLClassLoader
 import java.sql.Driver
 import java.sql.DriverManager
-import java.sql.DriverPropertyInfo
 import java.util.*
-import java.util.concurrent.CopyOnWriteArrayList
 
 object DriverLoader {
     private val logger = LoggerFactory.getLogger(DriverLoader::class.java)
-    private val classLoaders = CopyOnWriteArrayList<URLClassLoader>()
+    private var driverClassLoader: URLClassLoader? = null
 
+    fun getClassLoader(): ClassLoader? = driverClassLoader
+
+    /**
+     * 获取 JAR 包所在目录
+     */
+    private fun getJarDir(): File {
+        val codeSource = DriverLoader::class.java.protectionDomain.codeSource
+        return File(codeSource.location.toURI()).parentFile
+    }
+
+    /**
+     * 加载指定目录下的 JDBC 驱动，同时查找 JAR 同级 drivers/ 和 CWD drivers/
+     */
     fun loadFromDir(dir: File) {
-        if (!dir.isDirectory) {
-            logger.debug("Drivers directory not found: ${dir.absolutePath}")
+        // 优先从 JAR 同级目录查找，其次从 CWD 查找
+        val jarDrivers = File(getJarDir(), "drivers")
+        val candidates = listOf(dir.absoluteFile, jarDrivers).filter { it.isDirectory }
+
+        if (candidates.isEmpty()) {
+            logger.debug("No drivers directory found (tried: ${dir.absolutePath}, ${jarDrivers.absolutePath})")
             return
         }
 
+        for (candidate in candidates) {
+            loadFromSingleDir(candidate)
+        }
+    }
+
+    private fun loadFromSingleDir(dir: File) {
         val jars = dir.listFiles { f -> f.extension == "jar" } ?: return
         if (jars.isEmpty()) {
             logger.debug("No driver JARs found in ${dir.absolutePath}")
@@ -26,13 +47,14 @@ object DriverLoader {
         }
 
         val urls = jars.map { it.toURI().toURL() }.toTypedArray()
-        val classLoader = URLClassLoader(urls, this::class.java.classLoader)
+        val parent = driverClassLoader ?: Thread.currentThread().contextClassLoader
+        val classLoader = URLClassLoader(urls, parent)
 
         val drivers = ServiceLoader.load(Driver::class.java, classLoader)
         var count = 0
         for (driver in drivers) {
             try {
-                DriverManager.registerDriver(DriverDelegate(driver))
+                DriverManager.registerDriver(driver)
                 count++
                 logger.info("Registered dynamic JDBC driver: ${driver.javaClass.name}")
             } catch (e: Exception) {
@@ -41,7 +63,8 @@ object DriverLoader {
         }
 
         if (count > 0) {
-            classLoaders.add(classLoader)
+            driverClassLoader = classLoader
+            Thread.currentThread().contextClassLoader = classLoader
             logger.info("Loaded $count dynamic JDBC driver(s) from ${dir.absolutePath}")
         } else {
             classLoader.close()
@@ -50,19 +73,9 @@ object DriverLoader {
     }
 
     fun closeAll() {
-        classLoaders.forEach { cl ->
-            try { cl.close() } catch (_: Exception) {}
+        driverClassLoader?.let {
+            try { it.close() } catch (_: Exception) {}
         }
-        classLoaders.clear()
-    }
-
-    private class DriverDelegate(private val delegate: Driver) : Driver {
-        override fun connect(url: String?, info: Properties?) = delegate.connect(url, info)
-        override fun acceptsURL(url: String?) = delegate.acceptsURL(url)
-        override fun getPropertyInfo(url: String?, info: Properties?) = delegate.getPropertyInfo(url, info)
-        override fun getMajorVersion() = delegate.majorVersion
-        override fun getMinorVersion() = delegate.minorVersion
-        override fun jdbcCompliant() = delegate.jdbcCompliant()
-        override fun getParentLogger() = delegate.parentLogger
+        driverClassLoader = null
     }
 }

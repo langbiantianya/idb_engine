@@ -1,5 +1,6 @@
 package com.kxxnzstdsw.pool
 
+import com.kxxnzstdsw.loader.DriverLoader
 import com.kxxnzstdsw.models.ConnectionConfig
 import com.kxxnzstdsw.models.Driver
 import com.zaxxer.hikari.HikariConfig
@@ -28,10 +29,21 @@ object PoolManager {
     private fun createDataSource(config: ConnectionConfig): HikariDataSource {
         logger.info("Creating new connection pool for ${config.toHashKey()}")
 
+        // 将驱动 ClassLoader 设为当前线程上下文，确保 HikariCP 能找到动态加载的 JDBC 驱动
+        DriverLoader.getClassLoader()?.let {
+            Thread.currentThread().contextClassLoader = it
+        }
+
         val hikariConfig = HikariConfig().apply {
             jdbcUrl = buildJdbcUrl(config)
             username = config.user
             password = config.password
+
+            // 显式指定驱动类名，HikariCP 通过 Class.forName 加载（依赖线程 contextClassLoader）
+            driverClassName = when (config.driver) {
+                Driver.Mysql -> "com.mysql.cj.jdbc.Driver"
+                Driver.Postgresql -> "org.postgresql.Driver"
+            }
 
             // Performance tuning for desktop app
             maximumPoolSize = 5

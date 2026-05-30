@@ -66,9 +66,18 @@ fun main() = runBlocking {
             // Process request asynchronously (non-blocking)
             launch {
                 try {
-                    val masked = line.replace(Regex(""""password"\s*:\s*"[^"]*"""""), """"password":"***"""")
+                    val masked = line.replace(Regex(""""password"\s*:\s*"[^"]*""""), """"password":"***"""")
                     logger.debug("STDIN <<< {}", masked)
-                    RequestDispatcher.dispatch(line, outputChannel)
+                    val loggingChannel = Channel<String>(Channel.UNLIMITED)
+                    val forwardJob = launch(Dispatchers.IO) {
+                        for (msg in loggingChannel) {
+                            logger.debug("STDOUT >>> {}", msg)
+                            outputChannel.send(msg)
+                        }
+                    }
+                    RequestDispatcher.dispatch(line, loggingChannel)
+                    loggingChannel.close()
+                    forwardJob.join()
                 } catch (e: Exception) {
                     logger.error("Error processing request asynchronously", e)
                 }
