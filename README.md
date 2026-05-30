@@ -5,19 +5,21 @@
 ## 构建
 
 ```bash
-# 构建普通 JAR
-./gradlew build
-
-# 构建 FatJar (包含所有依赖)
-./gradlew shadowJar
+./gradlew jar
 ```
 
-构建产物位于 `build/libs/idb-engine.jar`
+构建产物结构：
+```
+build/libs/
+├── idb-engine.jar      ← 主程序瘦包
+├── libs/               ← 运行时依赖（Kotlin、HikariCP、日志等）
+└── drivers/            ← JDBC 驱动（内置 MySQL/PostgreSQL，可追加）
+```
 
 ## 运行
 
 ```bash
-java -jar build/libs/idb-engine.jar
+cd build/libs && java -jar idb-engine.jar
 ```
 
 程序启动后会监听标准输入，等待 JSON 请求。
@@ -50,9 +52,13 @@ java -jar build/libs/idb-engine.jar
   "id": "req-uuid-1234",
   "success": true,
   "error": null,
+  "stream": false,
+  "end": false,
   "data": {}
 }
 ```
+
+- `stream` / `end`：流式响应专用字段，普通响应中为 `false`（可忽略）。详见下方「流式全量查询」。
 
 ## 功能示例
 
@@ -248,6 +254,23 @@ java -jar build/libs/idb-engine.jar
 {"id":"15","success":true,"error":null,"data":{"total":120,"page":1,"pageSize":50,"rows":[{"id":"1","name":"Alice","avatar":"[LOB Data]"},{"id":"2","name":"Bob","avatar":"[LOB Data]"}]}}
 ```
 
+**流式全量查询（`pageSize: 0`，防 OOM）**
+
+请求：
+```json
+{"id":"15b","category":"DATA","action":"LIST","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"users","pageSize":0}}
+```
+
+响应（多行，逐行从 stdout 读取，data 结构与分页一致）：
+```
+{"id":"15b","success":true,"stream":true,"end":false,"data":{"total":1000,"page":0,"pageSize":1,"rows":[{"id":"1","name":"Alice"}]}}
+{"id":"15b","success":true,"stream":true,"end":false,"data":{"total":1000,"page":0,"pageSize":1,"rows":[{"id":"2","name":"Bob"}]}}
+...
+{"id":"15b","success":true,"stream":true,"end":true,"data":null}
+```
+
+收到 `end: true` 时停止读取，表示本次请求数据全部传输完毕。
+
 **插入一行**
 
 ```json
@@ -285,15 +308,18 @@ java -jar build/libs/idb-engine.jar
 
 ### SQL — 原生 SQL 引擎
 
-**查询（返回结果集）**
+**查询（流式返回结果集，data 结构与分页一致）**
 
 ```json
 {"id":"19","category":"SQL","action":"EXECUTE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"sql":"SELECT id, name FROM users WHERE id > 10 LIMIT 5"}}
 ```
 
-响应：
-```json
-{"id":"19","success":true,"error":null,"data":[{"id":"11","name":"Dave"},{"id":"12","name":"Eve"}]}
+响应（多行，`total: -1` 表示无法预知总行数）：
+```
+{"id":"19","success":true,"stream":true,"end":false,"data":{"total":-1,"page":0,"pageSize":1,"rows":[{"id":"11","name":"Dave"}]}}
+{"id":"19","success":true,"stream":true,"end":false,"data":{"total":-1,"page":0,"pageSize":1,"rows":[{"id":"12","name":"Eve"}]}}
+...
+{"id":"19","success":true,"stream":true,"end":true,"data":null}
 ```
 
 **更新/DDL（返回受影响行数）**
@@ -331,7 +357,7 @@ java -jar build/libs/idb-engine.jar
 - **连接池复用**：基于 SHA-256 Hash 缓存 HikariCP 实例
 - **自动资源回收**：10 分钟空闲自动释放连接池
 - **安全防护**：强制使用 PreparedStatement 防止 SQL 注入
-- **日志隔离**：所有日志输出到滚动文件 (`logs/idb-engine.log`)，不污染 stdout JSON 流
+- **日志隔离**：所有日志输出到滚动文件 (`~/.config/idb/logs/idb-engine.log`)，不污染 stdout JSON 流
 
 ## 技术栈
 
@@ -342,3 +368,4 @@ java -jar build/libs/idb-engine.jar
 - MySQL Connector/J 9.7.0
 - PostgreSQL JDBC 42.7.11
 - kotlinx.serialization 1.11.0
+- SLF4J 2.0.18 + Logback 1.5.13

@@ -2,18 +2,27 @@ package com.kxxnzstdsw.handlers
 
 import com.kxxnzstdsw.dialect.DialectFactory
 import com.kxxnzstdsw.models.ConnectionConfig
+import com.kxxnzstdsw.models.Driver
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
+import java.sql.ResultSet
 
 object DataHandler {
-    suspend fun list(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
+    /**
+     * @param onRow 流式回调，pageSize == 0 时每读一行调用一次；pageSize > 0 时为 null
+     * @return 流式模式返回 Unit，分页模式返回完整 JsonElement
+     */
+    suspend fun list(
+        config: ConnectionConfig,
+        payload: JsonObject,
+        onRow: (suspend (JsonElement) -> Unit)? = null
+    ): Any = withContext(Dispatchers.IO) {
         val tableName = payload["tableName"]?.jsonPrimitive?.content
             ?: throw IllegalArgumentException("Missing 'tableName'")
         val page = payload["page"]?.jsonPrimitive?.intOrNull ?: 1
         val pageSize = payload["pageSize"]?.jsonPrimitive?.intOrNull ?: 50
-        val offset = (page - 1) * pageSize
 
         val connection = PoolManager.getConnection(config)
         val dialect = DialectFactory.getDialect(config.driver)
@@ -27,45 +36,72 @@ object DataHandler {
                 }
             }
 
-            // 查询当页数据
-            val sql = "SELECT * FROM ${dialect.quoteIdentifier(tableName)} LIMIT ? OFFSET ?"
-            val rows = conn.prepareStatement(sql).use { stmt ->
-                stmt.setInt(1, pageSize)
-                stmt.setInt(2, offset)
-                stmt.executeQuery().use { rs ->
-                    val resultRows = mutableListOf<Map<String, String?>>()
-                    val metaData = rs.metaData
-                    val columnCount = metaData.columnCount
-
-                    while (rs.next()) {
-                        val row = mutableMapOf<String, String?>()
-                        for (i in 1..columnCount) {
-                            val columnName = metaData.getColumnName(i)
-                            val columnType = metaData.getColumnTypeName(i)
-
-                            // Handle LOB types
-                            val value = if (columnType in listOf("BLOB", "LONGTEXT", "BYTEA", "TEXT")) {
-                                "[LOB Data]"
-                            } else {
-                                rs.getString(i)
-                            }
-                            row[columnName] = value
-                        }
-                        resultRows.add(row)
+            if (pageSize == 0 && onRow != null) {
+                // 流式全量模式：逐行发送，data 结构与分页一致
+                val sql = "SELECT * FROM ${dialect.quoteIdentifier(tableName)}"
+                conn.prepareStatement(sql).use { stmt ->
+                    if (config.driver == Driver.Mysql) {
+                        stmt.fetchSize = Integer.MIN_VALUE
+                    } else {
+                        stmt.fetchSize = 100
                     }
-                    resultRows
+                    stmt.executeQuery().use { rs ->
+                        while (rs.next()) {
+                            val row = rowToJson(rs)
+                            onRow(buildJsonObject {
+                                put("total", total)
+                                put("page", 0)
+                                put("pageSize", 1)
+                                putJsonArray("rows") { add(row) }
+                            })
+                        }
+                    }
                 }
-            }
-
-            buildJsonObject {
-                put("total", total)
-                put("page", page)
-                put("pageSize", pageSize)
-                putJsonArray("rows") {
-                    rows.forEach { add(Json.encodeToJsonElement(it)) }
+            } else {
+                // 普通分页模式
+                val offset = (page - 1) * pageSize
+                val sql = "SELECT * FROM ${dialect.quoteIdentifier(tableName)} LIMIT ? OFFSET ?"
+                val rows = conn.prepareStatement(sql).use { stmt ->
+                    stmt.setInt(1, pageSize)
+                    stmt.setInt(2, offset)
+                    stmt.executeQuery().use { rs ->
+                        val resultRows = mutableListOf<Map<String, String?>>()
+                        while (rs.next()) {
+                            resultRows.add(rowToMap(rs))
+                        }
+                        resultRows
+                    }
+                }
+                buildJsonObject {
+                    put("total", total)
+                    put("page", page)
+                    put("pageSize", pageSize)
+                    putJsonArray("rows") {
+                        rows.forEach { add(Json.encodeToJsonElement(it)) }
+                    }
                 }
             }
         }
+    }
+
+    private fun rowToMap(rs: ResultSet): Map<String, String?> {
+        val metaData = rs.metaData
+        val columnCount = metaData.columnCount
+        val row = mutableMapOf<String, String?>()
+        for (i in 1..columnCount) {
+            val columnName = metaData.getColumnName(i)
+            val columnType = metaData.getColumnTypeName(i)
+            row[columnName] = if (columnType in listOf("BLOB", "LONGTEXT", "BYTEA", "TEXT")) {
+                "[LOB Data]"
+            } else {
+                rs.getString(i)
+            }
+        }
+        return row
+    }
+
+    private fun rowToJson(rs: ResultSet): JsonElement {
+        return Json.encodeToJsonElement(rowToMap(rs))
     }
 
     suspend fun create(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {

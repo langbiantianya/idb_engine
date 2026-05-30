@@ -16,7 +16,7 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 - **连接池管理**：HikariCP 7.0.2 (业界最高性能、资源占用低的连接池)
 - **数据序列化**：`kotlinx.serialization` 1.11.0 (无反射、轻量化、原生支持 Kotlin 协程与数据类)
 - **日志框架**：SLF4J 2.0.18 + Logback 1.5.13 (日志输出到本地滚动文件，不污染 stdout)
-- **构建与分发**：Gradle + ShadowJar 9.3.0+ (构建为单一 FatJar，后续可通过 GraalVM Native Image 编译为无 JRE 依赖的二进制文件)
+- **构建与分发**：Gradle + ShadowJar 9.3.0+ (构建为瘦包 + 外部依赖，后续可通过 GraalVM Native Image 编译为无 JRE 依赖的二进制文件)
 
 ## 3. 核心机制设计 (Core Mechanisms)
 
@@ -25,7 +25,7 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 - **交互介质**：标准输入 (`System.in`) 与 标准输出 (`System.out`)。
 - **数据格式**：单行压缩 JSON 字符串（Minified JSON）。
 - **边界标识**：使用换行符 `\n` 作为单次请求和响应的结束符。
-- **日志隔离**：Kotlin 内部的任何常规日志（如 `logger.info` 或异常堆栈）通过 Logback 写入本地滚动文件 (`logs/idb-engine.log`)，不输出到 stdout 或 stderr，绝对避免污染返回给 Go 进程的 JSON 结构。
+- **日志隔离**：Kotlin 内部的任何常规日志（如 `logger.info` 或异常堆栈）通过 Logback 写入本地滚动文件 (`~/.config/idb/logs/idb-engine.log`)，不输出到 stdout 或 stderr，绝对避免污染返回给 Go 进程的 JSON 结构。
 - **异步处理**：使用 Kotlin 协程 (`kotlinx-coroutines`) 实现非阻塞并发处理，多个请求可同时执行互不阻塞。
 - **输出串行化**：通过 `Channel<String>` 确保所有响应按顺序输出到 stdout，一次只有一个输出，避免交错混乱。
 - **长驻运行**：主循环在 `runBlocking` 协程作用域中运行，使用 `BufferedReader.readLine()` 阻塞式读取输入，支持长期驻留运行，直到收到 `CMD_EXIT` 或 stdin 关闭（EOF）。
@@ -74,6 +74,8 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
   "id": "req-uuid-1234",
   "success": true,
   "error": null,
+  "stream": false,
+  "end": false,
   "data": {
     // 根据 action 返回对应的结果 (如 List<Map> 或受影响行数)
   }
@@ -81,6 +83,11 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 ```
 
 错误时 `success` 为 `false`，`error` 为异常信息字符串，`data` 为 null。
+
+**流式响应字段说明**：
+- `stream: true` — 表示当前响应属于流式序列（一条请求产生多行响应）
+- `end: true` — 流式序列的最后一行，`data` 为 null，Go 端收到后停止读取
+- 普通（非流式）响应中 `stream` 和 `end` 均为 `false`（默认值），Go 端无需特殊处理
 
 ## 5. 功能模块详细设计 (Feature Modules)
 
@@ -286,6 +293,21 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 }
 ```
 
+**LIST（流式全量）** — `pageSize: 0` 触发流式模式，通过 JDBC fetchSize 逐行读取，防止 OOM。一条请求产生多行响应：
+
+```json
+// 请求 payload
+{"tableName": "users", "pageSize": 0}
+
+// 响应序列（每行一条 JSON，以 \n 分隔，data 结构与分页一致）
+{"id":"x","success":true,"stream":true,"end":false,"data":{"total":1000,"page":0,"pageSize":1,"rows":[{"id":"1","name":"Alice","avatar":"[LOB Data]"}]}}
+{"id":"x","success":true,"stream":true,"end":false,"data":{"total":1000,"page":0,"pageSize":1,"rows":[{"id":"2","name":"Bob","avatar":"[LOB Data]"}]}}
+...
+{"id":"x","success":true,"stream":true,"end":true,"data":null}
+```
+
+Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段；收到 `end: true` 后停止，表示本次请求数据全部传输完毕。
+
 **CREATE** — 插入一行，`values` 中所有值均以字符串传递并通过 `stmt.setString` 绑定
 
 ```json
@@ -320,20 +342,23 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 **EXECUTE** — 接收任意 SQL 字符串，通过 `statement.execute()` 执行
 
-- 若返回结果集（SELECT）：遍历 `ResultSetMetaData`，组装 `List<Map<String, String?>>` 返回
-- 若为更新操作（INSERT/UPDATE/DELETE/DDL）：返回 `{ "affectedRows": N }`
+- 若返回结果集（SELECT）：走流式输出，data 结构与 DATA LIST 一致（`total: -1` 表示无法预知总行数），通过 fetchSize 防止 OOM
+- 若为更新操作（INSERT/UPDATE/DELETE/DDL）：返回单次响应 `{ "affectedRows": N }`
 
 ```json
 // 请求 payload（查询）
 {"sql": "SELECT id, name FROM users WHERE id > 10 LIMIT 5"}
 
-// 响应 data（查询）
-[{"id": "11", "name": "Dave"}, {"id": "12", "name": "Eve"}]
+// 响应（流式，每行一条 JSON）
+{"id":"x","success":true,"stream":true,"end":false,"data":{"total":-1,"page":0,"pageSize":1,"rows":[{"id": "11", "name": "Dave"}]}}
+{"id":"x","success":true,"stream":true,"end":false,"data":{"total":-1,"page":0,"pageSize":1,"rows":[{"id": "12", "name": "Eve"}]}}
+...
+{"id":"x","success":true,"stream":true,"end":true,"data":null}
 
 // 请求 payload（更新）
 {"sql": "UPDATE users SET name = 'Frank' WHERE id = 3"}
 
-// 响应 data（更新）
+// 响应 data（更新，非流式）
 {"affectedRows": 1}
 ```
 
@@ -374,6 +399,8 @@ src/main/kotlin/
 │   ├── DataHandler.kt
 │   ├── UserHandler.kt
 │   └── SqlEngineHandler.kt
+├── loader/                    // 动态 JDBC 驱动加载
+│   └── DriverLoader.kt        // 扫描 drivers/ 目录，URLClassLoader 动态加载
 └── models/                    // 数据契约
     ├── Request.kt             // Request / Category / Action / ConnectionConfig / Driver
     └── Response.kt            // Response
@@ -384,26 +411,37 @@ src/main/resources/
 
 ## 8. 构建与部署 (Build & Deploy)
 
-### 8.1 构建 FatJar
+### 8.1 构建
 
 ```bash
-./gradlew shadowJar
+./gradlew jar
 ```
 
-产物位于 `build/libs/idb-engine.jar`，包含所有依赖，可直接运行。Main-Class 为 `com.kxxnzstdsw.MainKt`。
+产物结构：
+```
+build/libs/
+├── idb-engine.jar      // 瘦包（项目代码 + 资源）
+├── libs/               // 运行时依赖（Kotlin、HikariCP、日志等）
+└── drivers/            // JDBC 驱动（构建时内置 + 用户可追加）
+    ├── mysql-connector-j-9.7.0.jar
+    └── postgresql-42.7.11.jar
+```
+
+Main-Class 为 `com.kxxnzstdsw.MainKt`，Manifest 中 Class-Path 指向同级 `libs/` 目录。
 
 ### 8.2 运行
 
 ```bash
-java -jar build/libs/idb-engine.jar
+cd build/libs && java -jar idb-engine.jar
 ```
 
 ### 8.3 与 Wails 集成
 
-Go 进程通过 `exec.Command` 启动 Kotlin 子进程，并通过 stdin/stdout 管道通信：
+Go 进程通过 `exec.Command` 启动 Kotlin 子进程，工作目录设为 `libs` 所在目录：
 
 ```go
 cmd := exec.Command("java", "-jar", "idb-engine.jar")
+cmd.Dir = "/path/to/build/libs" // 确保 libs/ 目录可被找到
 stdin, _ := cmd.StdinPipe()
 stdout, _ := cmd.StdoutPipe()
 cmd.Start()
@@ -420,14 +458,17 @@ response := scanner.Text()
 ## 9. 实现状态 (Implementation Status)
 
 ✅ 已完成：
-- 核心架构与通信协议
+- 核心架构与通信协议（支持流式响应：stream/end 字段）
 - 异步非阻塞处理（Kotlin 协程 + Channel 输出串行化）
 - 数据库方言抽象层（DatabaseDialect 接口 + MySQL/PostgreSQL 实现）
 - 连接池管理（HikariCP + SHA-256 缓存）
 - 五大业务模块（Schema/Table/Data/User/SQL）全部改为 suspend 函数
+- 流式大数据输出（DATA LIST pageSize=0 / SQL SELECT，fetchSize 防 OOM）
+- 动态 JDBC 驱动加载（扫描 drivers/ 目录，URLClassLoader + ServiceLoader）
+- MODIFY_COLUMN 支持同时重命名（可选 newName）
 - 长驻运行机制（协程 + BufferedReader + Shutdown Hook）
 - 日志隔离（滚动文件，不污染 stdout/stderr）
-- 构建配置（Gradle + ShadowJar）
+- 构建配置（Gradle 瘦包 + 外部依赖）
 
 ⏳ 待扩展：
 - GraalVM Native Image 编译
