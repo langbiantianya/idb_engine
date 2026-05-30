@@ -342,20 +342,23 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
 
 **EXECUTE** — 接收任意 SQL 字符串，通过 `statement.execute()` 执行
 
-- 若返回结果集（SELECT）：遍历 `ResultSetMetaData`，组装 `List<Map<String, String?>>` 返回
-- 若为更新操作（INSERT/UPDATE/DELETE/DDL）：返回 `{ "affectedRows": N }`
+- 若返回结果集（SELECT）：走流式输出，data 结构与 DATA LIST 一致（`total: -1` 表示无法预知总行数），通过 fetchSize 防止 OOM
+- 若为更新操作（INSERT/UPDATE/DELETE/DDL）：返回单次响应 `{ "affectedRows": N }`
 
 ```json
 // 请求 payload（查询）
 {"sql": "SELECT id, name FROM users WHERE id > 10 LIMIT 5"}
 
-// 响应 data（查询）
-[{"id": "11", "name": "Dave"}, {"id": "12", "name": "Eve"}]
+// 响应（流式，每行一条 JSON）
+{"id":"x","success":true,"stream":true,"end":false,"data":{"total":-1,"page":0,"pageSize":1,"rows":[{"id": "11", "name": "Dave"}]}}
+{"id":"x","success":true,"stream":true,"end":false,"data":{"total":-1,"page":0,"pageSize":1,"rows":[{"id": "12", "name": "Eve"}]}}
+...
+{"id":"x","success":true,"stream":true,"end":true,"data":null}
 
 // 请求 payload（更新）
 {"sql": "UPDATE users SET name = 'Frank' WHERE id = 3"}
 
-// 响应 data（更新）
+// 响应 data（更新，非流式）
 {"affectedRows": 1}
 ```
 

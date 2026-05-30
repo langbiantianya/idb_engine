@@ -25,12 +25,18 @@ object RequestDispatcher {
                 }
             }
 
+            // SQL EXECUTE 走流式路径（内部判断是否为 SELECT）
+            if (request.category == Category.SQL && request.action == Action.EXECUTE) {
+                handleStreamSqlExecute(request, outputChannel)
+                return
+            }
+
             val data = when (request.category) {
                 Category.SCHEMA -> handleSchema(request)
                 Category.TABLE -> handleTable(request)
                 Category.DATA -> handleData(request)
                 Category.USER -> handleUser(request)
-                Category.SQL -> handleSql(request)
+                else -> throw UnsupportedOperationException("Unsupported request")
             }
 
             val response = Response(id = request.id, success = true, data = data)
@@ -55,14 +61,40 @@ object RequestDispatcher {
         }
 
         try {
-            // 每行 data 结构与分页一致（含 total），逐行发送
             DataHandler.list(request.connection, request.payload) { row ->
                 outputChannel.send(encode(false, row))
             }
-            // 流尾：结束标记
             outputChannel.send(encode(true, JsonNull))
         } catch (e: Exception) {
             logger.error("Error in stream data list", e)
+            outputChannel.send(json.encodeToString(Response.serializer(), Response(
+                id = id, success = false, error = e.message ?: "Unknown error"
+            )))
+        }
+    }
+
+    private suspend fun handleStreamSqlExecute(request: Request, outputChannel: kotlinx.coroutines.channels.Channel<String>) {
+        val id = request.id
+        val encode = { end: Boolean, data: JsonElement ->
+            json.encodeToString(Response.serializer(), Response(
+                id = id, success = true, stream = true, end = end, data = data
+            ))
+        }
+
+        try {
+            val result = SqlEngineHandler.execute(request.connection, request.payload) { row ->
+                outputChannel.send(encode(false, row))
+            }
+            if (result is Boolean && result) {
+                // SELECT 查询已流式发送，发送结束标记
+                outputChannel.send(encode(true, JsonNull))
+            } else {
+                // 非 SELECT（INSERT/UPDATE/DELETE/DDL），单次响应
+                val response = Response(id = id, success = true, data = result as JsonElement)
+                outputChannel.send(json.encodeToString(Response.serializer(), response))
+            }
+        } catch (e: Exception) {
+            logger.error("Error in SQL execute", e)
             outputChannel.send(json.encodeToString(Response.serializer(), Response(
                 id = id, success = false, error = e.message ?: "Unknown error"
             )))
@@ -109,13 +141,6 @@ object RequestDispatcher {
             Action.LIST -> UserHandler.list(request.connection)
             Action.UPDATE -> UserHandler.updatePrivileges(request.connection, request.payload)
             else -> throw UnsupportedOperationException("Action ${request.action} not supported for USER")
-        }
-    }
-
-    private suspend fun handleSql(request: Request): JsonElement {
-        return when (request.action) {
-            Action.EXECUTE -> SqlEngineHandler.execute(request.connection, request.payload)
-            else -> throw UnsupportedOperationException("Action ${request.action} not supported for SQL")
         }
     }
 

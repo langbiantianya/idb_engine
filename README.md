@@ -306,15 +306,18 @@ java -jar build/libs/idb-engine.jar
 
 ### SQL — 原生 SQL 引擎
 
-**查询（返回结果集）**
+**查询（流式返回结果集，data 结构与分页一致）**
 
 ```json
 {"id":"19","category":"SQL","action":"EXECUTE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"sql":"SELECT id, name FROM users WHERE id > 10 LIMIT 5"}}
 ```
 
-响应：
-```json
-{"id":"19","success":true,"error":null,"data":[{"id":"11","name":"Dave"},{"id":"12","name":"Eve"}]}
+响应（多行，`total: -1` 表示无法预知总行数）：
+```
+{"id":"19","success":true,"stream":true,"end":false,"data":{"total":-1,"page":0,"pageSize":1,"rows":[{"id":"11","name":"Dave"}]}}
+{"id":"19","success":true,"stream":true,"end":false,"data":{"total":-1,"page":0,"pageSize":1,"rows":[{"id":"12","name":"Eve"}]}}
+...
+{"id":"19","success":true,"stream":true,"end":true,"data":null}
 ```
 
 **更新/DDL（返回受影响行数）**
