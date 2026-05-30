@@ -149,8 +149,9 @@ object TableHandler {
                     val size = column["size"]?.jsonPrimitive?.intOrNull
                     val nullable = column["nullable"]?.jsonPrimitive?.booleanOrNull ?: true
                     val defaultValue = column["defaultValue"]?.jsonPrimitive?.contentOrNull
+                    val newName = column["newName"]?.jsonPrimitive?.contentOrNull
 
-                    dialect.buildModifyColumnSQL(tableName, name, type, size, nullable, defaultValue)
+                    dialect.buildModifyColumnSQL(tableName, name, type, size, nullable, defaultValue, newName)
                 }
 
                 else -> throw IllegalArgumentException("Unknown operation: $operation")

@@ -234,13 +234,20 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 {"tableName": "products", "operation": "DROP_COLUMN"}
 ```
 
-修改列（MySQL 使用 `MODIFY COLUMN`，PostgreSQL 使用 `ALTER COLUMN ... TYPE`）：
+修改列（MySQL 使用 `CHANGE COLUMN`，PostgreSQL 使用 `ALTER COLUMN ... TYPE`），可选 `newName` 同时重命名：
 ```json
-// 请求 payload
+// 请求 payload（仅修改类型）
 {
   "tableName": "products",
   "operation": "MODIFY_COLUMN",
   "column": {"name": "price", "type": "DECIMAL", "size": 10, "nullable": false}
+}
+
+// 请求 payload（修改类型 + 重命名，newName 放在 column 内）
+{
+  "tableName": "products",
+  "operation": "MODIFY_COLUMN",
+  "column": {"name": "price", "type": "DECIMAL", "size": 10, "nullable": false, "newName": "unit_price"}
 }
 
 // 响应 data

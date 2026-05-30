@@ -119,10 +119,12 @@ class MySQLDialect : DatabaseDialect {
         type: String,
         size: Int?,
         nullable: Boolean,
-        defaultValue: String?
+        defaultValue: String?,
+        newName: String?
     ): String {
-        val colDef = buildColumnDefinition(name, type, size, nullable, false, defaultValue)
-        return "ALTER TABLE ${quoteIdentifier(tableName)} MODIFY COLUMN $colDef"
+        val targetName = newName ?: name
+        val colDef = buildColumnDefinition(targetName, type, size, nullable, false, defaultValue)
+        return "ALTER TABLE ${quoteIdentifier(tableName)} CHANGE COLUMN ${quoteIdentifier(name)} $colDef"
     }
 
     private fun buildTypeSpec(type: String, size: Int?): String {

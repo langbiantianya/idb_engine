@@ -128,10 +128,17 @@ class PostgreSQLDialect : DatabaseDialect {
         type: String,
         size: Int?,
         nullable: Boolean,
-        defaultValue: String?
+        defaultValue: String?,
+        newName: String?
     ): String {
-        // PostgreSQL uses ALTER COLUMN ... TYPE syntax
-        return "ALTER TABLE ${quoteIdentifier(tableName)} ALTER COLUMN ${quoteIdentifier(name)} TYPE ${buildTypeSpec(type, size)}"
+        val table = quoteIdentifier(tableName)
+        val col = quoteIdentifier(name)
+        val typeSpec = buildTypeSpec(type, size)
+        return if (newName != null) {
+            "ALTER TABLE $table ALTER COLUMN $col TYPE $typeSpec, RENAME COLUMN $col TO ${quoteIdentifier(newName)}"
+        } else {
+            "ALTER TABLE $table ALTER COLUMN $col TYPE $typeSpec"
+        }
     }
 
     private fun buildTypeSpec(type: String, size: Int?): String {

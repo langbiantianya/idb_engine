@@ -211,6 +211,17 @@ java -jar build/libs/idb-engine.jar
 {"id":"13","success":true,"error":null,"data":{"tableName":"products","operation":"MODIFY_COLUMN"}}
 ```
 
+**修改表结构 — 修改列类型并重命名（可选 `newName` 字段）**
+
+```json
+{"id":"13b","category":"TABLE","action":"UPDATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"products","operation":"MODIFY_COLUMN","column":{"name":"price","type":"DECIMAL","size":10,"nullable":false,"newName":"unit_price"}}}
+```
+
+响应：
+```json
+{"id":"13b","success":true,"error":null,"data":{"tableName":"products","operation":"MODIFY_COLUMN"}}
+```
+
 **删除表**
 
 ```json

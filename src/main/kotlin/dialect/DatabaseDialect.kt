@@ -73,6 +73,7 @@ interface DatabaseDialect {
 
     /**
      * Build ALTER TABLE MODIFY/ALTER COLUMN statement
+     * @param newName optional new column name for renaming
      */
     fun buildModifyColumnSQL(
         tableName: String,
@@ -80,6 +81,7 @@ interface DatabaseDialect {
         type: String,
         size: Int?,
         nullable: Boolean,
-        defaultValue: String?
+        defaultValue: String?,
+        newName: String? = null
     ): String
 }
