@@ -50,9 +50,13 @@ java -jar build/libs/idb-engine.jar
   "id": "req-uuid-1234",
   "success": true,
   "error": null,
+  "stream": false,
+  "end": false,
   "data": {}
 }
 ```
+
+- `stream` / `end`：流式响应专用字段，普通响应中为 `false`（可忽略）。详见下方「流式全量查询」。
 
 ## 功能示例
 
@@ -247,6 +251,23 @@ java -jar build/libs/idb-engine.jar
 ```json
 {"id":"15","success":true,"error":null,"data":{"total":120,"page":1,"pageSize":50,"rows":[{"id":"1","name":"Alice","avatar":"[LOB Data]"},{"id":"2","name":"Bob","avatar":"[LOB Data]"}]}}
 ```
+
+**流式全量查询（`pageSize: 0`，防 OOM）**
+
+请求：
+```json
+{"id":"15b","category":"DATA","action":"LIST","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"users","pageSize":0}}
+```
+
+响应（多行，逐行从 stdout 读取，data 结构与分页一致）：
+```
+{"id":"15b","success":true,"stream":true,"end":false,"data":{"total":1000,"page":0,"pageSize":1,"rows":[{"id":"1","name":"Alice"}]}}
+{"id":"15b","success":true,"stream":true,"end":false,"data":{"total":1000,"page":0,"pageSize":1,"rows":[{"id":"2","name":"Bob"}]}}
+...
+{"id":"15b","success":true,"stream":true,"end":true,"data":null}
+```
+
+收到 `end: true` 时停止读取，表示本次请求数据全部传输完毕。
 
 **插入一行**
 

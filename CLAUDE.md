@@ -74,6 +74,8 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
   "id": "req-uuid-1234",
   "success": true,
   "error": null,
+  "stream": false,
+  "end": false,
   "data": {
     // 根据 action 返回对应的结果 (如 List<Map> 或受影响行数)
   }
@@ -81,6 +83,11 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 ```
 
 错误时 `success` 为 `false`，`error` 为异常信息字符串，`data` 为 null。
+
+**流式响应字段说明**：
+- `stream: true` — 表示当前响应属于流式序列（一条请求产生多行响应）
+- `end: true` — 流式序列的最后一行，`data` 为 null，Go 端收到后停止读取
+- 普通（非流式）响应中 `stream` 和 `end` 均为 `false`（默认值），Go 端无需特殊处理
 
 ## 5. 功能模块详细设计 (Feature Modules)
 
@@ -285,6 +292,21 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
   ]
 }
 ```
+
+**LIST（流式全量）** — `pageSize: 0` 触发流式模式，通过 JDBC fetchSize 逐行读取，防止 OOM。一条请求产生多行响应：
+
+```json
+// 请求 payload
+{"tableName": "users", "pageSize": 0}
+
+// 响应序列（每行一条 JSON，以 \n 分隔，data 结构与分页一致）
+{"id":"x","success":true,"stream":true,"end":false,"data":{"total":1000,"page":0,"pageSize":1,"rows":[{"id":"1","name":"Alice","avatar":"[LOB Data]"}]}}
+{"id":"x","success":true,"stream":true,"end":false,"data":{"total":1000,"page":0,"pageSize":1,"rows":[{"id":"2","name":"Bob","avatar":"[LOB Data]"}]}}
+...
+{"id":"x","success":true,"stream":true,"end":true,"data":null}
+```
+
+Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段；收到 `end: true` 后停止，表示本次请求数据全部传输完毕。
 
 **CREATE** — 插入一行，`values` 中所有值均以字符串传递并通过 `stmt.setString` 绑定
 

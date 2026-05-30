@@ -9,5 +9,7 @@ data class Response(
     val id: String,
     val success: Boolean,
     val error: String? = null,
+    val stream: Boolean = false,
+    val end: Boolean = false,
     val data: JsonElement = JsonNull
 )

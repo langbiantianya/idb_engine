@@ -61,9 +61,7 @@ fun main() = runBlocking {
             launch {
                 try {
                     logger.debug("STDIN <<< {}", line)
-                    val response = RequestDispatcher.dispatch(line)
-                    logger.debug("STDOUT >>> {}", response)
-                    outputChannel.send(response)
+                    RequestDispatcher.dispatch(line, outputChannel)
                 } catch (e: Exception) {
                     logger.error("Error processing request asynchronously", e)
                 }
