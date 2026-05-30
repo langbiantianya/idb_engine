@@ -1,17 +1,22 @@
 package com.kxxnzstdsw
 
 import com.kxxnzstdsw.dispatcher.RequestDispatcher
+import com.kxxnzstdsw.loader.DriverLoader
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import org.slf4j.LoggerFactory
 import java.io.BufferedReader
+import java.io.File
 import java.io.InputStreamReader
 import kotlin.system.exitProcess
 
 fun main() = runBlocking {
     val logger = LoggerFactory.getLogger("Main")
     logger.info("IDB Engine started (async mode), listening on stdin...")
+
+    // 动态加载 drivers/ 目录下的 JDBC 驱动
+    DriverLoader.loadFromDir(File("drivers"))
 
     val reader = BufferedReader(InputStreamReader(System.`in`, Charsets.UTF_8))
 
@@ -22,6 +27,7 @@ fun main() = runBlocking {
     Runtime.getRuntime().addShutdownHook(Thread {
         logger.info("Shutdown hook triggered")
         PoolManager.closeAll()
+        DriverLoader.closeAll()
     })
 
     // Launch output writer coroutine (serializes all stdout writes)

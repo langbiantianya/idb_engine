@@ -399,6 +399,8 @@ src/main/kotlin/
 │   ├── DataHandler.kt
 │   ├── UserHandler.kt
 │   └── SqlEngineHandler.kt
+├── loader/                    // 动态 JDBC 驱动加载
+│   └── DriverLoader.kt        // 扫描 drivers/ 目录，URLClassLoader 动态加载
 └── models/                    // 数据契约
     ├── Request.kt             // Request / Category / Action / ConnectionConfig / Driver
     └── Response.kt            // Response
@@ -409,26 +411,37 @@ src/main/resources/
 
 ## 8. 构建与部署 (Build & Deploy)
 
-### 8.1 构建 FatJar
+### 8.1 构建
 
 ```bash
-./gradlew shadowJar
+./gradlew jar
 ```
 
-产物位于 `build/libs/idb-engine.jar`，包含所有依赖，可直接运行。Main-Class 为 `com.kxxnzstdsw.MainKt`。
+产物结构：
+```
+build/libs/
+├── idb-engine.jar      // 瘦包（项目代码 + 资源）
+├── libs/               // 运行时依赖（Kotlin、HikariCP、日志等）
+└── drivers/            // JDBC 驱动（构建时内置 + 用户可追加）
+    ├── mysql-connector-j-9.7.0.jar
+    └── postgresql-42.7.11.jar
+```
+
+Main-Class 为 `com.kxxnzstdsw.MainKt`，Manifest 中 Class-Path 指向同级 `libs/` 目录。
 
 ### 8.2 运行
 
 ```bash
-java -jar build/libs/idb-engine.jar
+cd build/libs && java -jar idb-engine.jar
 ```
 
 ### 8.3 与 Wails 集成
 
-Go 进程通过 `exec.Command` 启动 Kotlin 子进程，并通过 stdin/stdout 管道通信：
+Go 进程通过 `exec.Command` 启动 Kotlin 子进程，工作目录设为 `libs` 所在目录：
 
 ```go
 cmd := exec.Command("java", "-jar", "idb-engine.jar")
+cmd.Dir = "/path/to/build/libs" // 确保 libs/ 目录可被找到
 stdin, _ := cmd.StdinPipe()
 stdout, _ := cmd.StdoutPipe()
 cmd.Start()
@@ -445,14 +458,17 @@ response := scanner.Text()
 ## 9. 实现状态 (Implementation Status)
 
 ✅ 已完成：
-- 核心架构与通信协议
+- 核心架构与通信协议（支持流式响应：stream/end 字段）
 - 异步非阻塞处理（Kotlin 协程 + Channel 输出串行化）
 - 数据库方言抽象层（DatabaseDialect 接口 + MySQL/PostgreSQL 实现）
 - 连接池管理（HikariCP + SHA-256 缓存）
 - 五大业务模块（Schema/Table/Data/User/SQL）全部改为 suspend 函数
+- 流式大数据输出（DATA LIST pageSize=0 / SQL SELECT，fetchSize 防 OOM）
+- 动态 JDBC 驱动加载（扫描 drivers/ 目录，URLClassLoader + ServiceLoader）
+- MODIFY_COLUMN 支持同时重命名（可选 newName）
 - 长驻运行机制（协程 + BufferedReader + Shutdown Hook）
 - 日志隔离（滚动文件，不污染 stdout/stderr）
-- 构建配置（Gradle + ShadowJar）
+- 构建配置（Gradle 瘦包 + 外部依赖）
 
 ⏳ 待扩展：
 - GraalVM Native Image 编译

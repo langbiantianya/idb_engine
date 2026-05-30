@@ -5,19 +5,21 @@
 ## 构建
 
 ```bash
-# 构建普通 JAR
-./gradlew build
-
-# 构建 FatJar (包含所有依赖)
-./gradlew shadowJar
+./gradlew jar
 ```
 
-构建产物位于 `build/libs/idb-engine.jar`
+构建产物结构：
+```
+build/libs/
+├── idb-engine.jar      ← 主程序瘦包
+├── libs/               ← 运行时依赖（Kotlin、HikariCP、日志等）
+└── drivers/            ← JDBC 驱动（内置 MySQL/PostgreSQL，可追加）
+```
 
 ## 运行
 
 ```bash
-java -jar build/libs/idb-engine.jar
+cd build/libs && java -jar idb-engine.jar
 ```
 
 程序启动后会监听标准输入，等待 JSON 请求。
