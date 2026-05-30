@@ -1,14 +1,14 @@
 <configuration>
     <!-- Rolling file appender with daily rotation and tar compression -->
     <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
-        <file>logs/idb-engine.log</file>
+        <file>${user.home}/.config/idb/logs/idb-engine.log</file>
         <encoder>
             <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
         </encoder>
 
         <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
             <!-- Daily rollover with tar.gz compression -->
-            <fileNamePattern>logs/archived/idb-engine.%d{yyyy-MM-dd}.tar.gz</fileNamePattern>
+            <fileNamePattern>${user.home}/.config/idb/logs/archived/idb-engine.%d{yyyy-MM-dd}.tar.gz</fileNamePattern>
             <!-- Keep 30 days of history -->
             <maxHistory>30</maxHistory>
             <!-- Total size cap of 1GB -->

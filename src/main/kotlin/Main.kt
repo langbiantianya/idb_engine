@@ -60,7 +60,8 @@ fun main() = runBlocking {
             // Process request asynchronously (non-blocking)
             launch {
                 try {
-                    logger.debug("STDIN <<< {}", line)
+                    val masked = line.replace(Regex(""""password"\s*:\s*"[^"]*"""""), """"password":"***"""")
+                    logger.debug("STDIN <<< {}", masked)
                     RequestDispatcher.dispatch(line, outputChannel)
                 } catch (e: Exception) {
                     logger.error("Error processing request asynchronously", e)
