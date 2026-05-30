@@ -368,3 +368,4 @@ cd build/libs && java -jar idb-engine.jar
 - MySQL Connector/J 9.7.0
 - PostgreSQL JDBC 42.7.11
 - kotlinx.serialization 1.11.0
+- SLF4J 2.0.18 + Logback 1.5.13

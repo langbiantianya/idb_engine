@@ -16,7 +16,7 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 - **连接池管理**：HikariCP 7.0.2 (业界最高性能、资源占用低的连接池)
 - **数据序列化**：`kotlinx.serialization` 1.11.0 (无反射、轻量化、原生支持 Kotlin 协程与数据类)
 - **日志框架**：SLF4J 2.0.18 + Logback 1.5.13 (日志输出到本地滚动文件，不污染 stdout)
-- **构建与分发**：Gradle + ShadowJar 9.3.0+ (构建为单一 FatJar，后续可通过 GraalVM Native Image 编译为无 JRE 依赖的二进制文件)
+- **构建与分发**：Gradle + ShadowJar 9.3.0+ (构建为瘦包 + 外部依赖，后续可通过 GraalVM Native Image 编译为无 JRE 依赖的二进制文件)
 
 ## 3. 核心机制设计 (Core Mechanisms)
 
