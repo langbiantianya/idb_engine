@@ -127,6 +127,15 @@ class MySQLDialect : DatabaseDialect {
         return "ALTER TABLE ${quoteIdentifier(tableName)} CHANGE COLUMN ${quoteIdentifier(name)} $colDef"
     }
 
+    override suspend fun getCreateTableDDL(conn: Connection, tableName: String): String = withContext(Dispatchers.IO) {
+        conn.createStatement().use { stmt ->
+            stmt.executeQuery("SHOW CREATE TABLE `${tableName}`").use { rs ->
+                if (rs.next()) rs.getString(2)
+                else throw IllegalArgumentException("Table '$tableName' not found")
+            }
+        }
+    }
+
     private fun buildTypeSpec(type: String, size: Int?): String {
         return if (size != null && type.uppercase() in listOf("VARCHAR", "CHAR", "VARBINARY", "BINARY")) {
             "$type($size)"

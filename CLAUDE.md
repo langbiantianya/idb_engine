@@ -52,7 +52,7 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 {
   "id": "req-uuid-1234",
   "category": "SCHEMA | USER | TABLE | DATA | SQL",
-  "action": "LIST | CREATE | UPDATE | DELETE | EXECUTE",
+  "action": "LIST | CREATE | UPDATE | DELETE | EXECUTE | GET_DDL",
   "connection": {
     "driver": "mysql | postgresql",
     "host": "127.0.0.1",
@@ -259,6 +259,18 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 // 响应 data
 {"tableName": "products", "operation": "MODIFY_COLUMN"}
+```
+
+**GET_DDL** — 返回建表语句（CREATE TABLE DDL）
+
+- MySQL 使用 `SHOW CREATE TABLE`；PostgreSQL 从 `information_schema` 元数据重建
+
+```json
+// 请求 payload
+{"tableName": "users"}
+
+// 响应 data（字符串，即完整 DDL）
+"CREATE TABLE `users` (\n  `id` INT NOT NULL,\n  `name` VARCHAR(255),\n  PRIMARY KEY (`id`)\n)"
 ```
 
 **DELETE** — 删除表（`DROP TABLE`）
@@ -469,6 +481,7 @@ response := scanner.Text()
 - 长驻运行机制（协程 + BufferedReader + Shutdown Hook）
 - 日志隔离（滚动文件，不污染 stdout/stderr）
 - 构建配置（Gradle 瘦包 + 外部依赖）
+- GET_DDL 返回建表语句（MySQL: SHOW CREATE TABLE / PG: information_schema 重建）
 
 ⏳ 待扩展：
 - GraalVM Native Image 编译

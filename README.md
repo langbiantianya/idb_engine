@@ -32,7 +32,7 @@ cd build/libs && java -jar idb-engine.jar
 {
   "id": "req-uuid-1234",
   "category": "SCHEMA|USER|TABLE|DATA|SQL",
-  "action": "LIST|CREATE|UPDATE|DELETE|EXECUTE",
+  "action": "LIST|CREATE|UPDATE|DELETE|EXECUTE|GET_DDL",
   "connection": {
     "driver": "mysql|postgresql",
     "host": "127.0.0.1",
@@ -237,6 +237,17 @@ cd build/libs && java -jar idb-engine.jar
 响应：
 ```json
 {"id":"14","success":true,"error":null,"data":{"deleted":"old_table"}}
+```
+
+**获取建表语句（GET_DDL）**
+
+```json
+{"id":"14b","category":"TABLE","action":"GET_DDL","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"users"}}
+```
+
+响应（data 为完整 DDL 字符串）：
+```json
+{"id":"14b","success":true,"error":null,"data":"CREATE TABLE `users` (\n  `id` INT NOT NULL,\n  `name` VARCHAR(255),\n  PRIMARY KEY (`id`)\n)"}
 ```
 
 ---

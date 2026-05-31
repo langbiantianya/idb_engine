@@ -71,6 +71,8 @@ interface DatabaseDialect {
      */
     fun buildDropColumnSQL(tableName: String, columnName: String): String
 
+    suspend fun getCreateTableDDL(conn: Connection, tableName: String): String
+
     /**
      * Build ALTER TABLE MODIFY/ALTER COLUMN statement
      * @param newName optional new column name for renaming
