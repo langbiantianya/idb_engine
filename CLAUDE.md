@@ -289,9 +289,24 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 **LIST** — 分页查询，强制 `LIMIT ? OFFSET ?`；`BLOB/LONGTEXT/BYTEA/TEXT` 类型返回 `[LOB Data]` 占位符
 
+可选参数：
+- `where` — 原始 WHERE 条件字符串（不含 `WHERE` 关键字），含值需用单引号包裹
+- `orderBy` — 原始 ORDER BY 排序字符串（不含 `ORDER BY` 关键字）
+
+安全校验：去除引号内容后，禁止出现 `INSERT/UPDATE/DELETE/DROP/UNION/EXEC/CREATE/ALTER/GRANT/REVOKE/TRUNCATE`、分号 `;`、注释符 `--` `/*`；ORDER BY 仅允许 `列名 [ASC|DESC]` 格式。
+
 ```json
-// 请求 payload
+// 请求 payload（基础分页）
 {"tableName": "users", "page": 1, "pageSize": 50}
+
+// 请求 payload（带过滤与排序）
+{
+  "tableName": "users",
+  "page": 1,
+  "pageSize": 20,
+  "where": "age > 18 AND name LIKE '%Alice%'",
+  "orderBy": "created_at DESC"
+}
 
 // 响应 data（page/pageSize 默认值：1/50）
 {

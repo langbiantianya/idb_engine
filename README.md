@@ -265,6 +265,28 @@ cd build/libs && java -jar idb-engine.jar
 {"id":"15","success":true,"error":null,"data":{"total":120,"page":1,"pageSize":50,"rows":[{"id":"1","name":"Alice","avatar":"[LOB Data]"},{"id":"2","name":"Bob","avatar":"[LOB Data]"}]}}
 ```
 
+**带过滤与排序的分页查询（`where` + `orderBy`）**
+
+直接传原始 SQL 片段，引擎会自动做注入校验。`where` 和 `orderBy` 均为可选字符串。
+
+```json
+{"id":"15c","category":"DATA","action":"LIST","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"users","page":1,"pageSize":20,"where":"age > 18 AND name LIKE '%Alice%'","orderBy":"created_at DESC"}}
+```
+
+响应结构与基础分页一致，`total` 为满足过滤条件的总行数。
+
+安全规则（自动拒绝以下内容）：
+- 分号 `;`、注释 `--` `/*`
+- 引号外出现 `INSERT`、`UPDATE`、`DELETE`、`DROP`、`UNION`、`EXEC`、`CREATE`、`ALTER`、`GRANT`、`REVOKE`、`TRUNCATE`
+
+合法示例：
+```json
+{"where": "status = 'active' AND age >= 18"}
+{"where": "name IS NOT NULL"}
+{"where": "id IN (1, 2, 3)"}
+{"orderBy": "name ASC, created_at DESC"}
+```
+
 **流式全量查询（`pageSize: 0`，防 OOM）**
 
 请求：

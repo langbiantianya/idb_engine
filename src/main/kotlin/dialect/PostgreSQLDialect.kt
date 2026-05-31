@@ -195,6 +195,36 @@ class PostgreSQLDialect : DatabaseDialect {
         "CREATE TABLE \"$tableName\" (\n  ${columns.joinToString(",\n  ")}\n)"
     }
 
+    // PostgreSQL 标识符用双引号包裹，额外禁止 COPY/DO（PG 特有危险操作）
+    private val orderByRegex = Regex(
+        """^\s*"?[\w]+"?(\s+(ASC|DESC))?(\s*,\s*"?[\w]+"?(\s+(ASC|DESC))?)?\s*$""",
+        RegexOption.IGNORE_CASE
+    )
+
+    private val dangerousKeywords = setOf(
+        "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE",
+        "UNION", "EXEC", "EXECUTE", "TRUNCATE", "GRANT", "REVOKE",
+        "COPY", "DO"
+    )
+
+    override fun validateSqlFragment(sql: String, label: String) {
+        val bare = sql.replace(Regex("'[^']*'"), "")
+        if (bare.contains(';')) throw IllegalArgumentException("$label contains illegal character ';'")
+        if (bare.contains("--") || bare.contains("/*")) throw IllegalArgumentException("$label contains illegal comment")
+        val upper = bare.uppercase()
+        for (kw in dangerousKeywords) {
+            if (Regex("\\b$kw\\b").containsMatchIn(upper)) {
+                throw IllegalArgumentException("$label contains forbidden keyword: $kw")
+            }
+        }
+    }
+
+    override fun validateOrderBy(sql: String) {
+        if (!orderByRegex.matches(sql)) {
+            throw IllegalArgumentException("Invalid ORDER BY format: $sql")
+        }
+    }
+
     private fun buildTypeSpec(type: String, size: Int?): String {
         return if (size != null && type.uppercase() in listOf("VARCHAR", "CHAR", "VARBINARY", "BINARY")) {
             "$type($size)"
