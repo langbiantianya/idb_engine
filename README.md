@@ -267,7 +267,7 @@ cd build/libs && java -jar idb-engine.jar
 
 **带过滤与排序的分页查询（`where` + `orderBy`）**
 
-直接传原始 SQL 片段，引擎会自动做注入校验。`where` 和 `orderBy` 均为可选字符串。
+直接传原始 SQL 片段，`where` 和 `orderBy` 均为可选字符串。引擎按数据库方言自动校验安全性。
 
 ```json
 {"id":"15c","category":"DATA","action":"LIST","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"users","page":1,"pageSize":20,"where":"age > 18 AND name LIKE '%Alice%'","orderBy":"created_at DESC"}}
@@ -275,9 +275,10 @@ cd build/libs && java -jar idb-engine.jar
 
 响应结构与基础分页一致，`total` 为满足过滤条件的总行数。
 
-安全规则（自动拒绝以下内容）：
-- 分号 `;`、注释 `--` `/*`
-- 引号外出现 `INSERT`、`UPDATE`、`DELETE`、`DROP`、`UNION`、`EXEC`、`CREATE`、`ALTER`、`GRANT`、`REVOKE`、`TRUNCATE`
+安全规则（方言级校验，自动拒绝以下内容）：
+- 通用：分号 `;`、注释 `--` `/*`、引号外出现 `INSERT/UPDATE/DELETE/DROP/UNION/EXEC/CREATE/ALTER/GRANT/REVOKE/TRUNCATE`
+- MySQL：ORDER BY 允许反引号标识符（`` `col` ``）
+- PostgreSQL：额外禁止 `COPY`/`DO`，ORDER BY 允许双引号标识符（`"col"`）
 
 合法示例：
 ```json
