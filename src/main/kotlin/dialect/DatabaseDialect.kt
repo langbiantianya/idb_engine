@@ -71,6 +71,20 @@ interface DatabaseDialect {
      */
     fun buildDropColumnSQL(tableName: String, columnName: String): String
 
+    suspend fun getCreateTableDDL(conn: Connection, tableName: String): String
+
+    /**
+     * 校验原始 SQL 片段（WHERE 条件等）的安全性。
+     * 去除引号内容后，按方言规则扫描危险关键词、分号、注释符。
+     */
+    fun validateSqlFragment(sql: String, label: String)
+
+    /**
+     * 校验 ORDER BY 子句格式。
+     * 只允许方言合法的标识符 [ASC|DESC] 列表。
+     */
+    fun validateOrderBy(sql: String)
+
     /**
      * Build ALTER TABLE MODIFY/ALTER COLUMN statement
      * @param newName optional new column name for renaming

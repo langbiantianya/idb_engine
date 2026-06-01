@@ -24,12 +24,25 @@ object DataHandler {
         val page = payload["page"]?.jsonPrimitive?.intOrNull ?: 1
         val pageSize = payload["pageSize"]?.jsonPrimitive?.intOrNull ?: 50
 
+        val whereRaw = payload["where"]?.jsonPrimitive?.contentOrNull
+        val orderByRaw = payload["orderBy"]?.jsonPrimitive?.contentOrNull
+
         val connection = PoolManager.getConnection(config)
         val dialect = DialectFactory.getDialect(config.driver)
 
+        // 按方言规则校验 SQL 片段安全性
+        if (!whereRaw.isNullOrBlank()) dialect.validateSqlFragment(whereRaw, "where")
+        if (!orderByRaw.isNullOrBlank()) {
+            dialect.validateSqlFragment(orderByRaw, "orderBy")
+            dialect.validateOrderBy(orderByRaw)
+        }
+
+        val whereSql  = if (!whereRaw.isNullOrBlank())  " WHERE $whereRaw"   else ""
+        val orderBySql = if (!orderByRaw.isNullOrBlank()) " ORDER BY $orderByRaw" else ""
+
         return@withContext connection.use { conn ->
-            // 查询总行数
-            val countSql = "SELECT COUNT(*) AS cnt FROM ${dialect.quoteIdentifier(tableName)}"
+            // 查询总行数（带 WHERE）
+            val countSql = "SELECT COUNT(*) AS cnt FROM ${dialect.quoteIdentifier(tableName)}$whereSql"
             val total = conn.prepareStatement(countSql).use { countStmt ->
                 countStmt.executeQuery().use { rs ->
                     if (rs.next()) rs.getLong("cnt") else 0L
@@ -38,7 +51,7 @@ object DataHandler {
 
             if (pageSize == 0 && onRow != null) {
                 // 流式全量模式：逐行发送，data 结构与分页一致
-                val sql = "SELECT * FROM ${dialect.quoteIdentifier(tableName)}"
+                val sql = "SELECT * FROM ${dialect.quoteIdentifier(tableName)}$whereSql$orderBySql"
                 conn.prepareStatement(sql).use { stmt ->
                     if (config.driver == Driver.Mysql) {
                         stmt.fetchSize = Integer.MIN_VALUE
@@ -60,7 +73,7 @@ object DataHandler {
             } else {
                 // 普通分页模式
                 val offset = (page - 1) * pageSize
-                val sql = "SELECT * FROM ${dialect.quoteIdentifier(tableName)} LIMIT ? OFFSET ?"
+                val sql = "SELECT * FROM ${dialect.quoteIdentifier(tableName)}$whereSql$orderBySql LIMIT ? OFFSET ?"
                 val rows = conn.prepareStatement(sql).use { stmt ->
                     stmt.setInt(1, pageSize)
                     stmt.setInt(2, offset)

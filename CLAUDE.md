@@ -52,7 +52,7 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 {
   "id": "req-uuid-1234",
   "category": "SCHEMA | USER | TABLE | DATA | SQL",
-  "action": "LIST | CREATE | UPDATE | DELETE | EXECUTE",
+  "action": "LIST | CREATE | UPDATE | DELETE | EXECUTE | GET_DDL",
   "connection": {
     "driver": "mysql | postgresql",
     "host": "127.0.0.1",
@@ -261,6 +261,18 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 {"tableName": "products", "operation": "MODIFY_COLUMN"}
 ```
 
+**GET_DDL** — 返回建表语句（CREATE TABLE DDL）
+
+- MySQL 使用 `SHOW CREATE TABLE`；PostgreSQL 从 `information_schema` 元数据重建
+
+```json
+// 请求 payload
+{"tableName": "users"}
+
+// 响应 data（字符串，即完整 DDL）
+"CREATE TABLE `users` (\n  `id` INT NOT NULL,\n  `name` VARCHAR(255),\n  PRIMARY KEY (`id`)\n)"
+```
+
 **DELETE** — 删除表（`DROP TABLE`）
 
 ```json
@@ -277,9 +289,27 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 **LIST** — 分页查询，强制 `LIMIT ? OFFSET ?`；`BLOB/LONGTEXT/BYTEA/TEXT` 类型返回 `[LOB Data]` 占位符
 
+可选参数：
+- `where` — 原始 WHERE 条件字符串（不含 `WHERE` 关键字），含值需用单引号包裹
+- `orderBy` — 原始 ORDER BY 排序字符串（不含 `ORDER BY` 关键字）
+
+安全校验由方言层实现（`DatabaseDialect.validateSqlFragment` / `validateOrderBy`），按数据库类型执行不同规则：
+- **通用**：去除单引号内容后禁止分号 `;`、注释 `--` `/*`，禁止引号外出现 `INSERT/UPDATE/DELETE/DROP/UNION/EXEC/CREATE/ALTER/GRANT/REVOKE/TRUNCATE`
+- **MySQL 额外**：ORDER BY 标识符允许反引号 `` `col` ``
+- **PostgreSQL 额外**：ORDER BY 标识符允许双引号 `"col"`；额外禁止 `COPY`、`DO` 关键词
+
 ```json
-// 请求 payload
+// 请求 payload（基础分页）
 {"tableName": "users", "page": 1, "pageSize": 50}
+
+// 请求 payload（带过滤与排序）
+{
+  "tableName": "users",
+  "page": 1,
+  "pageSize": 20,
+  "where": "age > 18 AND name LIKE '%Alice%'",
+  "orderBy": "created_at DESC"
+}
 
 // 响应 data（page/pageSize 默认值：1/50）
 {
@@ -377,7 +407,7 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
    所有的 JDBC `SQLException`（如语法错误、主键冲突、权限不足）都会被 `RequestDispatcher` 拦截，提取 `e.message` 包装入 Response 的 `error` 字段，`success` 置为 `false`。**绝对禁止**应用因未捕获异常而崩溃退出。
 
 4. **SQL 注入防护**：
-   DATA 模块所有 CRUD 操作强制使用 `PreparedStatement` 绑定参数（`stmt.setString`），从 JDBC 驱动层物理隔绝 SQL 注入。SQL 模块的 EXECUTE 接受原始 SQL，由调用方（Go 层）负责校验来源合法性。
+   DATA 模块所有 CRUD 操作强制使用 `PreparedStatement` 绑定参数（`stmt.setString`），从 JDBC 驱动层物理隔绝 SQL 注入。DATA LIST 的 `where`/`orderBy` 原始片段在拼接前由方言层（`DatabaseDialect.validateSqlFragment` / `validateOrderBy`）执行注入校验，按数据库类型使用不同关键词列表和标识符格式规则。SQL 模块的 EXECUTE 接受原始 SQL，由调用方（Go 层）负责校验来源合法性。
 
 ## 7. 工程目录结构 (Directory Structure)
 
@@ -469,6 +499,8 @@ response := scanner.Text()
 - 长驻运行机制（协程 + BufferedReader + Shutdown Hook）
 - 日志隔离（滚动文件，不污染 stdout/stderr）
 - 构建配置（Gradle 瘦包 + 外部依赖）
+- GET_DDL 返回建表语句（MySQL: SHOW CREATE TABLE / PG: information_schema 重建）
+- DATA LIST 支持 `where`/`orderBy` 原始 SQL 片段过滤与排序，方言级注入校验
 
 ⏳ 待扩展：
 - GraalVM Native Image 编译

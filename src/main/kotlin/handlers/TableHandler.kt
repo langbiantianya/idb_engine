@@ -165,6 +165,16 @@ object TableHandler {
         }
     }
 
+    suspend fun getDDL(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
+        val tableName = payload["tableName"]?.jsonPrimitive?.content
+            ?: throw IllegalArgumentException("Missing 'tableName' in payload")
+        val connection = PoolManager.getConnection(config)
+        val dialect = DialectFactory.getDialect(config.driver)
+        return@withContext connection.use { conn ->
+            JsonPrimitive(dialect.getCreateTableDDL(conn, tableName))
+        }
+    }
+
     suspend fun delete(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
         val tableName = payload["tableName"]?.jsonPrimitive?.content
             ?: throw IllegalArgumentException("Missing 'tableName'")

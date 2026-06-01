@@ -32,7 +32,7 @@ cd build/libs && java -jar idb-engine.jar
 {
   "id": "req-uuid-1234",
   "category": "SCHEMA|USER|TABLE|DATA|SQL",
-  "action": "LIST|CREATE|UPDATE|DELETE|EXECUTE",
+  "action": "LIST|CREATE|UPDATE|DELETE|EXECUTE|GET_DDL",
   "connection": {
     "driver": "mysql|postgresql",
     "host": "127.0.0.1",
@@ -239,6 +239,17 @@ cd build/libs && java -jar idb-engine.jar
 {"id":"14","success":true,"error":null,"data":{"deleted":"old_table"}}
 ```
 
+**获取建表语句（GET_DDL）**
+
+```json
+{"id":"14b","category":"TABLE","action":"GET_DDL","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"users"}}
+```
+
+响应（data 为完整 DDL 字符串）：
+```json
+{"id":"14b","success":true,"error":null,"data":"CREATE TABLE `users` (\n  `id` INT NOT NULL,\n  `name` VARCHAR(255),\n  PRIMARY KEY (`id`)\n)"}
+```
+
 ---
 
 ### DATA — 表数据 CRUD
@@ -252,6 +263,29 @@ cd build/libs && java -jar idb-engine.jar
 响应：
 ```json
 {"id":"15","success":true,"error":null,"data":{"total":120,"page":1,"pageSize":50,"rows":[{"id":"1","name":"Alice","avatar":"[LOB Data]"},{"id":"2","name":"Bob","avatar":"[LOB Data]"}]}}
+```
+
+**带过滤与排序的分页查询（`where` + `orderBy`）**
+
+直接传原始 SQL 片段，`where` 和 `orderBy` 均为可选字符串。引擎按数据库方言自动校验安全性。
+
+```json
+{"id":"15c","category":"DATA","action":"LIST","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"users","page":1,"pageSize":20,"where":"age > 18 AND name LIKE '%Alice%'","orderBy":"created_at DESC"}}
+```
+
+响应结构与基础分页一致，`total` 为满足过滤条件的总行数。
+
+安全规则（方言级校验，自动拒绝以下内容）：
+- 通用：分号 `;`、注释 `--` `/*`、引号外出现 `INSERT/UPDATE/DELETE/DROP/UNION/EXEC/CREATE/ALTER/GRANT/REVOKE/TRUNCATE`
+- MySQL：ORDER BY 允许反引号标识符（`` `col` ``）
+- PostgreSQL：额外禁止 `COPY`/`DO`，ORDER BY 允许双引号标识符（`"col"`）
+
+合法示例：
+```json
+{"where": "status = 'active' AND age >= 18"}
+{"where": "name IS NOT NULL"}
+{"where": "id IN (1, 2, 3)"}
+{"orderBy": "name ASC, created_at DESC"}
 ```
 
 **流式全量查询（`pageSize: 0`，防 OOM）**
