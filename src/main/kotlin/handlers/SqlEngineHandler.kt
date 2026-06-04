@@ -22,43 +22,50 @@ object SqlEngineHandler {
         val connection = PoolManager.getConnection(config)
 
         return@withContext connection.use { conn ->
-            conn.createStatement().use { stmt ->
-                val hasResultSet = stmt.execute(sql)
+            conn.createStatement(
+                java.sql.ResultSet.TYPE_FORWARD_ONLY,
+                java.sql.ResultSet.CONCUR_READ_ONLY
+            ).use { stmt ->
+                val originalAutoCommit = conn.autoCommit
+                try {
+                    if (config.driver == Driver.Postgresql) {
+                        conn.autoCommit = false
+                    }
+                    val hasResultSet = stmt.execute(sql)
 
-                if (hasResultSet) {
-                    if (onRow != null) {
-                        // 流式模式
-                        if (config.driver == Driver.Mysql) {
-                            stmt.fetchSize = Integer.MIN_VALUE
-                        } else {
+                    if (hasResultSet) {
+                        if (onRow != null) {
+                            // 游标流式模式
                             stmt.fetchSize = 100
-                        }
-                        stmt.resultSet.use { rs ->
-                            while (rs.next()) {
-                                onRow(buildJsonObject {
-                                    put("total", -1)
-                                    put("page", 0)
-                                    put("pageSize", 1)
-                                    putJsonArray("rows") { add(rowToJson(rs)) }
-                                })
+                            stmt.resultSet.use { rs ->
+                                while (rs.next()) {
+                                    onRow(buildJsonObject {
+                                        put("total", -1)
+                                        put("page", 0)
+                                        put("pageSize", 1)
+                                        putJsonArray("rows") { add(rowToJson(rs)) }
+                                    })
+                                }
+                            }
+                            true
+                        } else {
+                            // 非流式模式
+                            stmt.resultSet.use { rs ->
+                                val rows = mutableListOf<Map<String, String?>>()
+                                while (rs.next()) {
+                                    rows.add(rowToMap(rs))
+                                }
+                                Json.encodeToJsonElement(rows)
                             }
                         }
-                        true
                     } else {
-                        // 非流式模式
-                        stmt.resultSet.use { rs ->
-                            val rows = mutableListOf<Map<String, String?>>()
-                            while (rs.next()) {
-                                rows.add(rowToMap(rs))
-                            }
-                            Json.encodeToJsonElement(rows)
+                        // Update/Insert/Delete operation
+                        buildJsonObject {
+                            put("affectedRows", stmt.updateCount)
                         }
                     }
-                } else {
-                    // Update/Insert/Delete operation
-                    buildJsonObject {
-                        put("affectedRows", stmt.updateCount)
-                    }
+                } finally {
+                    conn.autoCommit = originalAutoCommit
                 }
             }
         }

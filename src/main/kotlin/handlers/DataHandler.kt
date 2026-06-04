@@ -50,25 +50,33 @@ object DataHandler {
             }
 
             if (pageSize == 0 && onRow != null) {
-                // 流式全量模式：逐行发送，data 结构与分页一致
+                // 流式全量模式：使用 JDBC 游标逐行读取
                 val sql = "SELECT * FROM ${dialect.quoteIdentifier(tableName)}$whereSql$orderBySql"
-                conn.prepareStatement(sql).use { stmt ->
-                    if (config.driver == Driver.Mysql) {
-                        stmt.fetchSize = Integer.MIN_VALUE
-                    } else {
-                        stmt.fetchSize = 100
+                val originalAutoCommit = conn.autoCommit
+                try {
+                    if (config.driver == Driver.Postgresql) {
+                        conn.autoCommit = false
                     }
-                    stmt.executeQuery().use { rs ->
-                        while (rs.next()) {
-                            val row = rowToJson(rs)
-                            onRow(buildJsonObject {
-                                put("total", total)
-                                put("page", 0)
-                                put("pageSize", 1)
-                                putJsonArray("rows") { add(row) }
-                            })
+                    conn.prepareStatement(
+                        sql,
+                        java.sql.ResultSet.TYPE_FORWARD_ONLY,
+                        java.sql.ResultSet.CONCUR_READ_ONLY
+                    ).use { stmt ->
+                        stmt.fetchSize = 100
+                        stmt.executeQuery().use { rs ->
+                            while (rs.next()) {
+                                val row = rowToJson(rs)
+                                onRow(buildJsonObject {
+                                    put("total", total)
+                                    put("page", 0)
+                                    put("pageSize", 1)
+                                    putJsonArray("rows") { add(row) }
+                                })
+                            }
                         }
                     }
+                } finally {
+                    conn.autoCommit = originalAutoCommit
                 }
             } else {
                 // 普通分页模式
