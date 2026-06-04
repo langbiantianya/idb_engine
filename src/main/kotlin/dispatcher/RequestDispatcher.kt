@@ -16,6 +16,14 @@ object RequestDispatcher {
             val request = json.decodeFromString<Request>(requestJson)
             logger.info("Processing request: ${request.id} - ${request.category}/${request.action}")
 
+            // SYSTEM INFO 不需要数据库连接，直接返回
+            if (request.category == Category.SYSTEM && request.action == Action.INFO) {
+                val data = SystemHandler.info()
+                val response = Response(id = request.id, success = true, data = data)
+                outputChannel.send(json.encodeToString(Response.serializer(), response))
+                return
+            }
+
             // 流式 DATA LIST（pageSize == 0）
             if (request.category == Category.DATA && request.action == Action.LIST) {
                 val pageSize = request.payload["pageSize"]?.jsonPrimitive?.intOrNull ?: 50

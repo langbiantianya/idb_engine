@@ -31,8 +31,8 @@ cd build/libs && java -jar idb-engine.jar
 ```json
 {
   "id": "req-uuid-1234",
-  "category": "SCHEMA|USER|TABLE|DATA|SQL",
-  "action": "LIST|CREATE|UPDATE|DELETE|EXECUTE|GET_DDL",
+  "category": "SCHEMA|USER|TABLE|DATA|SQL|SYSTEM",
+  "action": "LIST|CREATE|UPDATE|DELETE|EXECUTE|GET_DDL|INFO",
   "connection": {
     "driver": "mysql|postgresql",
     "host": "127.0.0.1",
@@ -288,7 +288,9 @@ cd build/libs && java -jar idb-engine.jar
 {"orderBy": "name ASC, created_at DESC"}
 ```
 
-**流式全量查询（`pageSize: 0`，防 OOM）**
+**流式全量查询（`pageSize: 0`，JDBC 游标模式防 OOM）**
+
+通过 JDBC 游标（`TYPE_FORWARD_ONLY` + `CONCUR_READ_ONLY` + `fetchSize=100`）逐行读取，PostgreSQL 端自动临时关闭 `autoCommit` 以启用服务端游标，读取完毕后恢复。
 
 请求：
 ```json
@@ -369,6 +371,32 @@ cd build/libs && java -jar idb-engine.jar
 
 ---
 
+### SYSTEM — 系统信息
+
+**获取 JVM 运行时信息（无需数据库连接，`connection` 字段仍需传递但会被忽略）**
+
+```json
+{"id":"21","category":"SYSTEM","action":"INFO","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"mysql"},"payload":{}}
+```
+
+响应（`memory` 字段单位为字节）：
+```json
+{"id":"21","success":true,"error":null,"data":{"jvmVersion":"21.0.2","jvmVendor":"Oracle Corporation","jvmName":"OpenJDK 64-Bit Server VM","osName":"Windows 11","osArch":"amd64","osVersion":"10.0","availableProcessors":16,"memory":{"max":4294967296,"total":268435456,"used":134217728,"free":134217728},"uptime":120000,"pid":12345}}
+```
+
+字段说明：
+- `jvmVersion` / `jvmVendor` / `jvmName` — JVM 版本信息
+- `osName` / `osArch` / `osVersion` — 操作系统信息
+- `availableProcessors` — 可用 CPU 核心数
+- `memory.max` — JVM 最大可用内存
+- `memory.total` — JVM 当前已分配内存
+- `memory.used` — 已使用内存
+- `memory.free` — 已分配中的空闲内存
+- `uptime` — JVM 启动至今的毫秒数
+- `pid` — 进程 ID
+
+---
+
 ### 错误响应示例
 
 连接失败、SQL 语法错误等异常均返回统一错误格式：
@@ -391,6 +419,7 @@ cd build/libs && java -jar idb-engine.jar
 - **连接池复用**：基于 SHA-256 Hash 缓存 HikariCP 实例
 - **自动资源回收**：10 分钟空闲自动释放连接池
 - **安全防护**：强制使用 PreparedStatement 防止 SQL 注入
+- **JDBC 游标流式**：大结果集通过服务端游标逐行拉取，避免客户端内存溢出
 - **日志隔离**：所有日志输出到滚动文件 (`~/.config/idb/logs/idb-engine.log`)，不污染 stdout JSON 流
 
 ## 技术栈

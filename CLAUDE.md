@@ -51,8 +51,8 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 ```json
 {
   "id": "req-uuid-1234",
-  "category": "SCHEMA | USER | TABLE | DATA | SQL",
-  "action": "LIST | CREATE | UPDATE | DELETE | EXECUTE | GET_DDL",
+  "category": "SCHEMA | USER | TABLE | DATA | SQL | SYSTEM",
+  "action": "LIST | CREATE | UPDATE | DELETE | EXECUTE | GET_DDL | INFO",
   "connection": {
     "driver": "mysql | postgresql",
     "host": "127.0.0.1",
@@ -323,7 +323,7 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 }
 ```
 
-**LIST（流式全量）** — `pageSize: 0` 触发流式模式，通过 JDBC fetchSize 逐行读取，防止 OOM。一条请求产生多行响应：
+**LIST（流式全量）** — `pageSize: 0` 触发流式模式，通过 JDBC 游标（`TYPE_FORWARD_ONLY` + `CONCUR_READ_ONLY` + `fetchSize=100`）逐行读取，防止 OOM。PostgreSQL 端需临时关闭 `autoCommit` 以启用服务端游标，读取完毕后恢复。一条请求产生多行响应：
 
 ```json
 // 请求 payload
@@ -372,7 +372,7 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
 
 **EXECUTE** — 接收任意 SQL 字符串，通过 `statement.execute()` 执行
 
-- 若返回结果集（SELECT）：走流式输出，data 结构与 DATA LIST 一致（`total: -1` 表示无法预知总行数），通过 fetchSize 防止 OOM
+- 若返回结果集（SELECT）：走流式输出，data 结构与 DATA LIST 一致（`total: -1` 表示无法预知总行数），通过 JDBC 游标（`TYPE_FORWARD_ONLY` + `CONCUR_READ_ONLY` + `fetchSize=100`）防止 OOM，PostgreSQL 端临时关闭 `autoCommit` 启用服务端游标
 - 若为更新操作（INSERT/UPDATE/DELETE/DDL）：返回单次响应 `{ "affectedRows": N }`
 
 ```json
@@ -390,6 +390,37 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
 
 // 响应 data（更新，非流式）
 {"affectedRows": 1}
+```
+
+### 5.6 系统信息 (System Info) — `category: "SYSTEM"`
+
+**INFO** — 返回当前 JVM 运行时信息，无需数据库连接（`connection` 字段仍需传递，但会被忽略）
+
+- 通过 `Runtime`、`OperatingSystemMXBean`、`RuntimeMXBean` 采集
+- `memory` 中各字段单位为字节（Bytes）
+
+```json
+// 请求
+{"id":"req-010","category":"SYSTEM","action":"INFO","connection":{"driver":"mysql","host":"127.0.0.1","port":3306,"user":"root","password":"secret","database":"mysql"},"payload":{}}
+
+// 响应 data
+{
+  "jvmVersion": "21.0.2",
+  "jvmVendor": "Oracle Corporation",
+  "jvmName": "OpenJDK 64-Bit Server VM",
+  "osName": "Windows 11",
+  "osArch": "amd64",
+  "osVersion": "10.0",
+  "availableProcessors": 16,
+  "memory": {
+    "max": 4294967296,
+    "total": 268435456,
+    "used": 134217728,
+    "free": 134217728
+  },
+  "uptime": 120000,
+  "pid": 12345
+}
 ```
 
 ## 6. 安全与健壮性保障 (Security & Reliability)
@@ -428,7 +459,8 @@ src/main/kotlin/
 │   ├── TableHandler.kt
 │   ├── DataHandler.kt
 │   ├── UserHandler.kt
-│   └── SqlEngineHandler.kt
+│   ├── SqlEngineHandler.kt
+│   └── SystemHandler.kt       // JVM 系统信息采集
 ├── loader/                    // 动态 JDBC 驱动加载
 │   └── DriverLoader.kt        // 扫描 drivers/ 目录，URLClassLoader 动态加载
 └── models/                    // 数据契约
@@ -493,7 +525,7 @@ response := scanner.Text()
 - 数据库方言抽象层（DatabaseDialect 接口 + MySQL/PostgreSQL 实现）
 - 连接池管理（HikariCP + SHA-256 缓存）
 - 五大业务模块（Schema/Table/Data/User/SQL）全部改为 suspend 函数
-- 流式大数据输出（DATA LIST pageSize=0 / SQL SELECT，fetchSize 防 OOM）
+- 流式大数据输出（DATA LIST pageSize=0 / SQL SELECT，JDBC 游标模式防 OOM）
 - 动态 JDBC 驱动加载（扫描 drivers/ 目录，URLClassLoader + ServiceLoader）
 - MODIFY_COLUMN 支持同时重命名（可选 newName）
 - 长驻运行机制（协程 + BufferedReader + Shutdown Hook）
@@ -501,6 +533,7 @@ response := scanner.Text()
 - 构建配置（Gradle 瘦包 + 外部依赖）
 - GET_DDL 返回建表语句（MySQL: SHOW CREATE TABLE / PG: information_schema 重建）
 - DATA LIST 支持 `where`/`orderBy` 原始 SQL 片段过滤与排序，方言级注入校验
+- SYSTEM INFO 返回 JVM 运行时信息（版本、内存、CPU、PID、运行时长等）
 
 ⏳ 待扩展：
 - GraalVM Native Image 编译
