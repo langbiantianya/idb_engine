@@ -125,6 +125,54 @@ cd build/libs && java -jar idb-engine.jar
 {"id":"5","success":true,"error":null,"data":[{"user":"postgres"},{"user":"app_user"}]}
 ```
 
+**查询指定用户权限（MySQL）**
+
+payload 含 `user` 字段时返回该用户的权限列表（`host` 可选，默认 `"%"`）：
+
+```json
+{"id":"4b","category":"USER","action":"LIST","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"mysql"},"payload":{"user":"app_user"}}
+```
+
+响应：
+```json
+{"id":"4b","success":true,"error":null,"data":[{"grant":"GRANT SELECT ON `test_db`.* TO 'app_user'@'%'"},{"grant":"GRANT INSERT ON `test_db`.* TO 'app_user'@'%'"}]}
+```
+
+**查询指定用户权限（PostgreSQL）**
+
+```json
+{"id":"5b","category":"USER","action":"LIST","connection":{"driver":"postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"postgres"},"payload":{"user":"app_user"}}
+```
+
+响应：
+```json
+{"id":"5b","success":true,"error":null,"data":[{"schema":"public","table":"users","privilege":"SELECT"},{"schema":"public","table":"users","privilege":"INSERT"}]}
+```
+
+**创建用户**
+
+`host` 仅 MySQL 使用（PostgreSQL 忽略），默认 `"%"`。
+
+```json
+{"id":"4c","category":"USER","action":"CREATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"mysql"},"payload":{"user":"new_user","password":"secret123"}}
+```
+
+响应：
+```json
+{"id":"4c","success":true,"error":null,"data":{"created":"new_user"}}
+```
+
+**删除用户**
+
+```json
+{"id":"4d","category":"USER","action":"DELETE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"mysql"},"payload":{"user":"old_user"}}
+```
+
+响应：
+```json
+{"id":"4d","success":true,"error":null,"data":{"deleted":"old_user"}}
+```
+
 **授予权限**
 
 ```json
@@ -145,6 +193,19 @@ cd build/libs && java -jar idb-engine.jar
 响应：
 ```json
 {"id":"7","success":true,"error":null,"data":{"user":"app_user","action":"revoked"}}
+```
+
+**修改密码**
+
+payload 含 `password` 且无 `privileges` 字段时走密码修改路径。
+
+```json
+{"id":"7b","category":"USER","action":"UPDATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"mysql"},"payload":{"user":"app_user","password":"new_secret"}}
+```
+
+响应：
+```json
+{"id":"7b","success":true,"error":null,"data":{"user":"app_user","action":"password_changed"}}
 ```
 
 ---

@@ -45,6 +45,37 @@ interface DatabaseDialect {
     ): Boolean
 
     /**
+     * Create a new database user
+     * @param user 用户名
+     * @param password 密码
+     * @param host 主机（MySQL 用，PostgreSQL 忽略）
+     */
+    suspend fun createUser(conn: Connection, user: String, password: String, host: String): Boolean
+
+    /**
+     * Drop a database user
+     * @param user 用户名
+     * @param host 主机（MySQL 用，PostgreSQL 忽略）
+     */
+    suspend fun deleteUser(conn: Connection, user: String, host: String): Boolean
+
+    /**
+     * Change user password
+     * @param user 用户名
+     * @param password 新密码
+     * @param host 主机（MySQL 用，PostgreSQL 忽略）
+     */
+    suspend fun updatePassword(conn: Connection, user: String, password: String, host: String): Boolean
+
+    /**
+     * List privileges for a specific user on a specific schema
+     * @param user 用户名
+     * @param host 主机（MySQL 用，PostgreSQL 忽略）
+     * @return 权限列表
+     */
+    suspend fun listPrivileges(conn: Connection, user: String, host: String): List<Map<String, String>>
+
+    /**
      * Quote identifier (table name, column name, etc.)
      */
     fun quoteIdentifier(identifier: String): String

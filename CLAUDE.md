@@ -106,7 +106,7 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 **LIST** — 获取可用架构列表
 
-- MySQL 走 `SHOW DATABASES`；PG 走 `information_schema.schemata`（过滤 `pg_catalog` / `information_schema`）
+- MySQL 走 `SHOW DATABASES`；PG 走 `pg_catalog.pg_namespace`（过滤 `pg_%` 系统 schema 和 `information_schema`）
 - payload 为空对象
 
 ```json
@@ -142,15 +142,56 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 **LIST** — 查询数据库用户列表
 
 - MySQL 查 `mysql.user`，返回 `user` + `host`
-- PG 查 `pg_user`，返回 `user`
+- PG 查 `pg_roles`（`rolcanlogin = true`），返回 `user`
 - payload 为空对象
 
 ```json
+// 请求
+{"id":"req-002","category":"USER","action":"LIST","connection":{"driver":"mysql","host":"127.0.0.1","port":3306,"user":"root","password":"secret","database":"mysql"},"payload":{}}
+
 // MySQL 响应 data
 [{"user": "root", "host": "localhost"}, {"user": "app_user", "host": "%"}]
 
 // PostgreSQL 响应 data
 [{"user": "postgres"}, {"user": "app_user"}]
+```
+
+**LIST（查询指定用户权限）** — payload 含 `user` 字段时，返回该用户的权限列表
+
+```json
+// 请求 payload
+{"user": "dev", "host": "%"}
+```
+
+- MySQL 走 `SHOW GRANTS FOR 'user'@'host'`，返回授权语句列表
+- PostgreSQL 走 `information_schema.table_privileges`，返回 `schema` + `table` + `privilege`
+
+```json
+// MySQL 响应 data
+[{"grant": "GRANT SELECT ON `test_db`.* TO 'dev'@'%'"}, {"grant": "GRANT INSERT ON `test_db`.* TO 'dev'@'%'"}]
+
+// PostgreSQL 响应 data
+[{"schema": "public", "table": "users", "privilege": "SELECT"}, {"schema": "public", "table": "users", "privilege": "INSERT"}]
+```
+
+**CREATE** — 创建数据库用户
+
+```json
+// 请求 payload（host 仅 MySQL 使用，PostgreSQL 忽略，默认 "%"）
+{"user": "new_user", "password": "secret123", "host": "%"}
+
+// 响应 data
+{"created": "new_user"}
+```
+
+**DELETE** — 删除数据库用户
+
+```json
+// 请求 payload（host 仅 MySQL 使用，PostgreSQL 忽略，默认 "%"）
+{"user": "old_user", "host": "%"}
+
+// 响应 data
+{"deleted": "old_user"}
 ```
 
 **UPDATE** — 授予或回收权限（`GRANT ... ON schema.* TO user` / `REVOKE ...`）
@@ -167,6 +208,19 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 // 响应 data（回收）
 {"user": "dev", "action": "revoked"}
+```
+
+**UPDATE（修改密码）** — payload 含 `password` 且无 `privileges` 时走密码修改路径
+
+- MySQL 走 `ALTER USER ... IDENTIFIED BY`
+- PostgreSQL 走 `ALTER USER ... PASSWORD`
+
+```json
+// 请求 payload
+{"user": "dev", "password": "new_secret", "host": "%"}
+
+// 响应 data
+{"user": "dev", "action": "password_changed"}
 ```
 
 ### 5.3 表结构元数据 (Table Metadata) — `category: "TABLE"`
@@ -241,7 +295,7 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 {"tableName": "products", "operation": "DROP_COLUMN"}
 ```
 
-修改列（MySQL 使用 `CHANGE COLUMN`，PostgreSQL 使用 `ALTER COLUMN ... TYPE`），可选 `newName` 同时重命名：
+修改列（MySQL 使用 `CHANGE COLUMN`，PostgreSQL 使用 `ALTER COLUMN ... TYPE / SET NOT NULL / SET DEFAULT` 多子命令），可选 `newName` 同时重命名：
 ```json
 // 请求 payload（仅修改类型）
 {
@@ -263,7 +317,7 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 **GET_DDL** — 返回建表语句（CREATE TABLE DDL）
 
-- MySQL 使用 `SHOW CREATE TABLE`；PostgreSQL 从 `information_schema` 元数据重建
+- MySQL 使用 `SHOW CREATE TABLE`；PostgreSQL 从 `information_schema` + `pg_catalog` 重建（含主键、UNIQUE、CHECK 约束及索引）
 
 ```json
 // 请求 payload
@@ -534,6 +588,8 @@ response := scanner.Text()
 - GET_DDL 返回建表语句（MySQL: SHOW CREATE TABLE / PG: information_schema 重建）
 - DATA LIST 支持 `where`/`orderBy` 原始 SQL 片段过滤与排序，方言级注入校验
 - SYSTEM INFO 返回 JVM 运行时信息（版本、内存、CPU、PID、运行时长等）
+- PostgreSQL 方言全面优化（listSchemas 用 pg_namespace、listTables 含视图、listUsers 用 pg_roles、MODIFY_COLUMN 补齐 nullable/default、GET_DDL 含约束与索引、正则预编译）
+- 用户管理完整 CRUD（CREATE/DELETE 用户、修改密码、查询指定用户权限，MySQL 与 PostgreSQL 均已实现）
 
 ⏳ 待扩展：
 - GraalVM Native Image 编译
