@@ -151,6 +151,7 @@ object RequestDispatcher {
             Action.CREATE -> UserHandler.create(request.connection, request.payload)
             Action.UPDATE -> UserHandler.updatePrivileges(request.connection, request.payload)
             Action.DELETE -> UserHandler.delete(request.connection, request.payload)
+            Action.GRANTS -> UserHandler.listAllGrants(request.connection, request.payload)
             else -> throw UnsupportedOperationException("Action ${request.action} not supported for USER")
         }
     }

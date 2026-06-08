@@ -52,7 +52,7 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 {
   "id": "req-uuid-1234",
   "category": "SCHEMA | USER | TABLE | DATA | SQL | SYSTEM",
-  "action": "LIST | CREATE | UPDATE | DELETE | EXECUTE | GET_DDL | INFO",
+  "action": "LIST | CREATE | UPDATE | DELETE | EXECUTE | GET_DDL | INFO | GRANTS",
   "connection": {
     "driver": "mysql | postgresql",
     "host": "127.0.0.1",
@@ -172,6 +172,24 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 // PostgreSQL 响应 data
 [{"schema": "public", "table": "users", "privilege": "SELECT"}, {"schema": "public", "table": "users", "privilege": "INSERT"}]
+```
+
+**GRANTS** — 查询指定用户被授权的所有表及权限（按 schema + table 聚合）
+
+```json
+// 请求 payload（host 仅 MySQL 使用，PostgreSQL 忽略，默认 "%"）
+{"user": "dev", "host": "%"}
+```
+
+- MySQL 解析 `SHOW GRANTS` 输出，过滤 `*.*` 全局授权，提取表级权限
+- PostgreSQL 聚合 `information_schema.table_privileges`
+
+```json
+// MySQL 响应 data
+[{"schema": "test_db", "table": "users", "privileges": "SELECT, INSERT"}, {"schema": "test_db", "table": "orders", "privileges": "SELECT"}]
+
+// PostgreSQL 响应 data
+[{"schema": "public", "table": "users", "privileges": "INSERT, SELECT"}, {"schema": "public", "table": "orders", "privileges": "SELECT"}]
 ```
 
 **CREATE** — 创建数据库用户

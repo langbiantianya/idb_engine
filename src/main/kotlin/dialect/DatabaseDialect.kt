@@ -76,6 +76,14 @@ interface DatabaseDialect {
     suspend fun listPrivileges(conn: Connection, user: String, host: String): List<Map<String, String>>
 
     /**
+     * List all table-level grants for a user, grouped by schema + table
+     * @param user 用户名
+     * @param host 主机（MySQL 用，PostgreSQL 忽略）
+     * @return 每个元素包含 schema、table、privileges（逗号分隔的权限列表）
+     */
+    suspend fun listAllGrants(conn: Connection, user: String, host: String): List<Map<String, String>>
+
+    /**
      * Quote identifier (table name, column name, etc.)
      */
     fun quoteIdentifier(identifier: String): String

@@ -32,7 +32,7 @@ cd build/libs && java -jar idb-engine.jar
 {
   "id": "req-uuid-1234",
   "category": "SCHEMA|USER|TABLE|DATA|SQL|SYSTEM",
-  "action": "LIST|CREATE|UPDATE|DELETE|EXECUTE|GET_DDL|INFO",
+  "action": "LIST|CREATE|UPDATE|DELETE|EXECUTE|GET_DDL|INFO|GRANTS",
   "connection": {
     "driver": "mysql|postgresql",
     "host": "127.0.0.1",
@@ -147,6 +147,28 @@ payload 含 `user` 字段时返回该用户的权限列表（`host` 可选，默
 响应：
 ```json
 {"id":"5b","success":true,"error":null,"data":[{"schema":"public","table":"users","privilege":"SELECT"},{"schema":"public","table":"users","privilege":"INSERT"}]}
+```
+
+**查询用户被授权的所有表与权限（GRANTS）**
+
+按 schema + table 聚合返回。`host` 仅 MySQL 使用。
+
+```json
+{"id":"5c","category":"USER","action":"GRANTS","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"mysql"},"payload":{"user":"app_user"}}
+```
+
+响应（MySQL）：
+```json
+{"id":"5c","success":true,"error":null,"data":[{"schema":"test_db","table":"users","privileges":"SELECT, INSERT"},{"schema":"test_db","table":"orders","privileges":"SELECT"}]}
+```
+
+```json
+{"id":"5d","category":"USER","action":"GRANTS","connection":{"driver":"postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"postgres"},"payload":{"user":"app_user"}}
+```
+
+响应（PostgreSQL）：
+```json
+{"id":"5d","success":true,"error":null,"data":[{"schema":"public","table":"users","privileges":"INSERT, SELECT"},{"schema":"public","table":"orders","privileges":"SELECT"}]}
 ```
 
 **创建用户**

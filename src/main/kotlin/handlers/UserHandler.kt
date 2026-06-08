@@ -27,6 +27,20 @@ object UserHandler {
         }
     }
 
+    suspend fun listAllGrants(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
+        val user = payload["user"]?.jsonPrimitive?.content
+            ?: throw IllegalArgumentException("Missing 'user'")
+        val host = payload["host"]?.jsonPrimitive?.contentOrNull ?: "%"
+
+        val connection = PoolManager.getConnection(config)
+        val dialect = DialectFactory.getDialect(config.driver)
+
+        return@withContext connection.use { conn ->
+            val grants = dialect.listAllGrants(conn, user, host)
+            Json.encodeToJsonElement(grants)
+        }
+    }
+
     suspend fun create(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
         val user = payload["user"]?.jsonPrimitive?.content
             ?: throw IllegalArgumentException("Missing 'user'")
