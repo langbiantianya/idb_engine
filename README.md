@@ -197,10 +197,14 @@ payload 含 `user` 字段时返回该用户的权限列表（`host` 可选，默
 
 **修改密码**
 
-payload 含 `password` 且无 `privileges` 字段时走密码修改路径。
+payload 含 `password` 且无 `privileges` 字段时走密码修改路径。`host` 仅 MySQL 使用。
 
 ```json
 {"id":"7b","category":"USER","action":"UPDATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"mysql"},"payload":{"user":"app_user","password":"new_secret"}}
+```
+
+```json
+{"id":"7c","category":"USER","action":"UPDATE","connection":{"driver":"postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"postgres"},"payload":{"user":"app_user","password":"new_secret"}}
 ```
 
 响应：
