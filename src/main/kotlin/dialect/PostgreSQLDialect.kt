@@ -126,16 +126,35 @@ class PostgreSQLDialect : DatabaseDialect {
             if (!p.matches(Regex("^[A-Z_]+$", RegexOption.IGNORE_CASE))) {
                 throw IllegalArgumentException("Invalid privilege name: $p")
             }
-            p
+            p.uppercase()
         }
-        val privilegeList = safePrivs.joinToString(", ")
-        val sql = if (isGrant) {
-            "GRANT $privilegeList ON SCHEMA ${quoteIdentifier(safeSchema)} TO ${quoteIdentifier(safeUser)}"
-        } else {
-            "REVOKE $privilegeList ON SCHEMA ${quoteIdentifier(safeSchema)} FROM ${quoteIdentifier(safeUser)}"
-        }
+
+        // PostgreSQL 将权限分为 schema 级和 table 级，需分别授予/回收
+        val schemaLevel = setOf("CREATE", "USAGE")
+        val schemaPrivs = safePrivs.filter { it in schemaLevel }
+        val tablePrivs = safePrivs.filter { it !in schemaLevel }
+
         conn.createStatement().use { stmt ->
-            stmt.execute(sql)
+            // Schema 级权限：GRANT ... ON SCHEMA
+            if (schemaPrivs.isNotEmpty()) {
+                val privList = schemaPrivs.joinToString(", ")
+                val sql = if (isGrant) {
+                    "GRANT $privList ON SCHEMA ${quoteIdentifier(safeSchema)} TO ${quoteIdentifier(safeUser)}"
+                } else {
+                    "REVOKE $privList ON SCHEMA ${quoteIdentifier(safeSchema)} FROM ${quoteIdentifier(safeUser)}"
+                }
+                stmt.execute(sql)
+            }
+            // 表级权限：GRANT ... ON ALL TABLES IN SCHEMA
+            if (tablePrivs.isNotEmpty()) {
+                val privList = tablePrivs.joinToString(", ")
+                val sql = if (isGrant) {
+                    "GRANT $privList ON ALL TABLES IN SCHEMA ${quoteIdentifier(safeSchema)} TO ${quoteIdentifier(safeUser)}"
+                } else {
+                    "REVOKE $privList ON ALL TABLES IN SCHEMA ${quoteIdentifier(safeSchema)} FROM ${quoteIdentifier(safeUser)}"
+                }
+                stmt.execute(sql)
+            }
         }
         true
     }
