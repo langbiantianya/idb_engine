@@ -1,28 +1,53 @@
 # IDB Engine - Database Management Backend
 
-基于 Kotlin + JDBC 的无头数据库管理引擎，通过 stdin/stdout 与 Wails 前端通信。
+基于 Kotlin + JDBC 的无头数据库管理引擎，通过 stdin/stdout 与 Wails 前端通信。方言层采用 SPI 插件化架构，支持动态加载。
+
+## 项目结构
+
+Gradle 多模块项目，方言与引擎解耦：
+
+```
+idb_engine/
+├── api/                        公共 SPI 接口（DatabaseDialect + Driver 枚举）
+├── dialect-mysql/              MySQL 方言插件 JAR
+├── dialect-postgresql/         PostgreSQL 方言插件 JAR
+└── engine/                     主引擎（业务逻辑 + 动态加载）
+```
+
+引擎启动时通过 `ServiceLoader` 自动扫描 `dialects/` 目录，发现并注册所有方言插件，无需硬编码。
 
 ## 构建
 
 ```bash
-./gradlew jar
+./gradlew engine:jar
 ```
 
-构建产物结构：
+产物位于 `engine/build/libs/`：
 ```
-build/libs/
-├── idb-engine.jar      ← 主程序瘦包
-├── libs/               ← 运行时依赖（Kotlin、HikariCP、日志等）
-└── drivers/            ← JDBC 驱动（内置 MySQL/PostgreSQL，可追加）
+engine/build/libs/
+├── idb-engine.jar              ← 主引擎瘦包
+├── libs/                       ← 运行时依赖（Kotlin、HikariCP、日志、api）
+├── drivers/                    ← JDBC 驱动（内置 MySQL/PostgreSQL，可追加）
+└── dialects/                   ← 方言插件（SPI 动态加载）
+    ├── idb-dialect-mysql.jar
+    └── idb-dialect-postgresql.jar
 ```
 
 ## 运行
 
 ```bash
-cd build/libs && java -jar idb-engine.jar
+cd engine/build/libs && java -jar idb-engine.jar
 ```
 
-程序启动后会监听标准输入，等待 JSON 请求。
+程序启动后自动加载 `dialects/` 目录中的方言插件和 `drivers/` 目录中的 JDBC 驱动，然后监听标准输入等待 JSON 请求。
+
+## 添加新方言
+
+1. 创建 Gradle 模块，依赖 `api` 项目
+2. 实现 `DatabaseDialect` 接口，声明 `override val driverName = "YourDriver"`
+3. 在 `src/main/resources/META-INF/services/com.kxxnzstdsw.dialect.DatabaseDialect` 中写入实现类全限定名
+4. 构建后将 JAR 放入 `engine/build/libs/dialects/` 目录
+5. 无需修改主引擎代码，重启即自动加载
 
 ## 通信协议
 
@@ -500,6 +525,7 @@ payload 含 `password` 且无 `privileges` 字段时走密码修改路径。`hos
 
 ## 架构特性
 
+- **方言插件化**：方言以独立 JAR 通过 SPI 动态加载，新增数据库无需改主引擎
 - **异步非阻塞**：基于 Kotlin 协程实现高并发请求处理
 - **输出串行化**：通过 Channel 确保标准输出不会交错混乱
 - **无状态设计**：每次请求携带完整连接信息

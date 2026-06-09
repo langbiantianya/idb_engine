@@ -22,3 +22,8 @@ plugins {
 }
 
 rootProject.name = "idb_engine"
+
+include("api")
+include("dialect-mysql")
+include("dialect-postgresql")
+include("engine")

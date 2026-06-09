@@ -91,14 +91,19 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 ## 5. 功能模块详细设计 (Feature Modules)
 
-为兼容 MySQL 与 PostgreSQL，采用**方言抽象层 (Dialect Abstraction Layer)** 设计模式：
+为兼容 MySQL 与 PostgreSQL，采用**方言抽象层 (Dialect Abstraction Layer)** + **SPI 插件动态加载**设计模式：
 
-- **DatabaseDialect 接口**：定义所有数据库特定操作的抽象方法
-- **MySQLDialect / PostgreSQLDialect**：分别实现 MySQL 和 PostgreSQL 的具体方言
-- **DialectFactory**：根据 `ConnectionConfig.driver` 实例化对应的方言实现
-- **Handler 层**：通过 `DialectFactory.getDialect(config.driver)` 获取方言实例，调用统一接口
+- **DatabaseDialect SPI 接口**（`api` 模块）：定义所有数据库特定操作的抽象方法，通过 `driverName` 属性声明所处理的驱动
+- **MySQLDialect / PostgreSQLDialect**（独立插件模块）：分别实现 MySQL 和 PostgreSQL 的具体方言，打包为独立 JAR
+- **DialectLoader**（`engine` 模块）：启动时扫描 `dialects/` 目录，通过 `ServiceLoader<DatabaseDialect>` 自动发现并注册所有方言插件
+- **Handler 层**：通过 `DialectLoader.getDialect(driverName)` 获取方言实例，调用统一接口
 
-这种设计使得新增数据库支持（如 Oracle、SQL Server）只需实现 `DatabaseDialect` 接口，无需修改 Handler 层代码。
+这种设计使得新增数据库支持（如 Oracle、SQL Server）只需：
+1. 实现 `DatabaseDialect` 接口
+2. 在 `META-INF/services/` 中声明实现类
+3. 将 JAR 放入 `dialects/` 目录
+
+无需修改或重新编译主引擎代码。
 
 ### 5.1 架构管理 (Schema Management) — `category: "SCHEMA"`
 
@@ -515,32 +520,54 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
 ## 7. 工程目录结构 (Directory Structure)
 
 ```
-src/main/kotlin/
-├── Main.kt                    // 入口点，维护协程主循环与 Channel 输出串行化
-├── dispatcher/
-│   └── RequestDispatcher.kt   // 解析 JSON，分发请求路由
-├── pool/
-│   └── PoolManager.kt         // HikariCP 动态管理与 SHA-256 缓存
-├── dialect/                   // 数据库方言抽象层
-│   ├── DatabaseDialect.kt     // 方言接口定义
-│   ├── MySQLDialect.kt        // MySQL 方言实现
-│   ├── PostgreSQLDialect.kt   // PostgreSQL 方言实现
-│   └── DialectFactory.kt      // 方言工厂（根据 Driver 实例化）
-├── handlers/                  // 业务处理层（调用方言接口）
-│   ├── SchemaHandler.kt
-│   ├── TableHandler.kt
-│   ├── DataHandler.kt
-│   ├── UserHandler.kt
-│   ├── SqlEngineHandler.kt
-│   └── SystemHandler.kt       // JVM 系统信息采集
-├── loader/                    // 动态 JDBC 驱动加载
-│   └── DriverLoader.kt        // 扫描 drivers/ 目录，URLClassLoader 动态加载
-└── models/                    // 数据契约
-    ├── Request.kt             // Request / Category / Action / ConnectionConfig / Driver
-    └── Response.kt            // Response
+idb_engine/                          Gradle 多模块项目
+├── settings.gradle.kts              模块注册
+├── build.gradle.kts                 根项目（聚合）
+│
+├── api/                             公共 API 模块（零外部依赖）
+│   └── src/main/kotlin/
+│       ├── dialect/DatabaseDialect.kt   方言 SPI 接口（含 driverName）
+│       └── models/Driver.kt             驱动枚举
+│
+├── dialect-mysql/                   MySQL 方言插件
+│   └── src/main/kotlin/
+│       └── dialect/MySQLDialect.kt
+│       + META-INF/services/com.kxxnzstdsw.dialect.DatabaseDialect
+│
+├── dialect-postgresql/              PostgreSQL 方言插件
+│   └── src/main/kotlin/
+│       └── dialect/PostgreSQLDialect.kt
+│       + META-INF/services/com.kxxnzstdsw.dialect.DatabaseDialect
+│
+└── engine/                          主引擎模块
+    └── src/main/kotlin/
+        ├── Main.kt                    入口点，协程主循环与 Channel 输出串行化
+        ├── dispatcher/
+        │   └── RequestDispatcher.kt   解析 JSON，分发请求路由
+        ├── pool/
+        │   └── PoolManager.kt         HikariCP 动态管理与 SHA-256 缓存
+        ├── handlers/                  业务处理层（通过 DialectLoader 获取方言）
+        │   ├── SchemaHandler.kt
+        │   ├── TableHandler.kt
+        │   ├── DataHandler.kt
+        │   ├── UserHandler.kt
+        │   ├── SqlEngineHandler.kt
+        │   └── SystemHandler.kt       JVM 系统信息采集
+        ├── loader/                    动态加载
+        │   ├── DriverLoader.kt        扫描 drivers/ 目录，ServiceLoader 加载 JDBC 驱动
+        │   └── DialectLoader.kt       扫描 dialects/ 目录，ServiceLoader 加载方言插件
+        └── models/                    数据契约
+            ├── Request.kt             Request / Category / Action / ConnectionConfig
+            └── Response.kt            Response
 
-src/main/resources/
-└── logback.xml                // 日志配置（滚动文件输出，每日归档，30天保留）
+构建产物结构：
+engine/build/libs/
+├── idb-engine.jar       主引擎瘦包
+├── libs/                运行时依赖（Kotlin、HikariCP、日志、api）
+├── drivers/             JDBC 驱动（mysql-connector-j、postgresql）
+└── dialects/            方言插件
+    ├── idb-dialect-mysql.jar
+    └── idb-dialect-postgresql.jar
 ```
 
 ## 8. 构建与部署 (Build & Deploy)
@@ -548,17 +575,20 @@ src/main/resources/
 ### 8.1 构建
 
 ```bash
-./gradlew jar
+./gradlew engine:jar
 ```
 
-产物结构：
+产物结构（位于 `engine/build/libs/`）：
 ```
-build/libs/
-├── idb-engine.jar      // 瘦包（项目代码 + 资源）
-├── libs/               // 运行时依赖（Kotlin、HikariCP、日志等）
-└── drivers/            // JDBC 驱动（构建时内置 + 用户可追加）
-    ├── mysql-connector-j-9.7.0.jar
-    └── postgresql-42.7.11.jar
+engine/build/libs/
+├── idb-engine.jar       主引擎瘦包
+├── libs/                运行时依赖（Kotlin、HikariCP、日志、api）
+├── drivers/             JDBC 驱动
+│   ├── mysql-connector-j-9.7.0.jar
+│   └── postgresql-42.7.11.jar
+└── dialects/            方言插件（SPI 动态加载）
+    ├── idb-dialect-mysql.jar
+    └── idb-dialect-postgresql.jar
 ```
 
 Main-Class 为 `com.kxxnzstdsw.MainKt`，Manifest 中 Class-Path 指向同级 `libs/` 目录。
@@ -566,7 +596,7 @@ Main-Class 为 `com.kxxnzstdsw.MainKt`，Manifest 中 Class-Path 指向同级 `l
 ### 8.2 运行
 
 ```bash
-cd build/libs && java -jar idb-engine.jar
+cd engine/build/libs && java -jar idb-engine.jar
 ```
 
 ### 8.3 与 Wails 集成
@@ -594,11 +624,12 @@ response := scanner.Text()
 ✅ 已完成：
 - 核心架构与通信协议（支持流式响应：stream/end 字段）
 - 异步非阻塞处理（Kotlin 协程 + Channel 输出串行化）
-- 数据库方言抽象层（DatabaseDialect 接口 + MySQL/PostgreSQL 实现）
+- 数据库方言抽象层（DatabaseDialect SPI 接口 + MySQL/PostgreSQL 插件）
 - 连接池管理（HikariCP + SHA-256 缓存）
 - 五大业务模块（Schema/Table/Data/User/SQL）全部改为 suspend 函数
 - 流式大数据输出（DATA LIST pageSize=0 / SQL SELECT，JDBC 游标模式防 OOM）
 - 动态 JDBC 驱动加载（扫描 drivers/ 目录，URLClassLoader + ServiceLoader）
+- 方言插件化动态加载（Gradle 多模块 + SPI，扫描 dialects/ 目录，DialectLoader 自动发现注册）
 - MODIFY_COLUMN 支持同时重命名（可选 newName）
 - 长驻运行机制（协程 + BufferedReader + Shutdown Hook）
 - 日志隔离（滚动文件，不污染 stdout/stderr）
@@ -611,5 +642,5 @@ response := scanner.Text()
 
 ⏳ 待扩展：
 - GraalVM Native Image 编译
-- 更多数据库方言支持（Oracle, SQL Server, SQLite）
+- 更多数据库方言插件（Oracle, SQL Server, SQLite — 只需实现 SPI 接口，放入 dialects/ 即可）
 - 性能监控与指标上报
