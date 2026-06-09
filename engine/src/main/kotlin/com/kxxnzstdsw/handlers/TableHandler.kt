@@ -63,6 +63,9 @@ object TableHandler {
             ?: throw IllegalArgumentException("Missing 'tableName'")
         val columns = payload["columns"]?.jsonArray
             ?: throw IllegalArgumentException("Missing 'columns' array")
+        val options = payload["options"]?.jsonObject?.let { obj ->
+            obj.entries.associate { it.key to it.value.jsonPrimitive.content }
+        } ?: emptyMap()
 
         val connection = PoolManager.getConnection(config)
         val dialect = DialectLoader.getDialect(config.driver)
@@ -100,9 +103,16 @@ object TableHandler {
                     append(")")
                 }
                 append(")")
+                append(dialect.buildTableOptionsSQL(options))
             }
 
             conn.createStatement().use { it.execute(sql) }
+
+            // 执行后续语句（如 PostgreSQL 的 COMMENT ON TABLE）
+            for (stmt in dialect.buildPostCreateStatements(dialect.quoteIdentifier(tableName), options)) {
+                conn.createStatement().use { it.execute(stmt) }
+            }
+
             buildJsonObject { put("created", tableName) }
         }
     }

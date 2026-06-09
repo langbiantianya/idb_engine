@@ -72,7 +72,7 @@ class PostgreSQLDialect : DatabaseDialect {
         schemas
     }
 
-    override suspend fun createSchema(conn: Connection, name: String): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun createSchema(conn: Connection, name: String, options: Map<String, String>): Boolean = withContext(Dispatchers.IO) {
         val safeName = sanitizeIdentifier(name, "schema name")
         conn.createStatement().use { stmt ->
             stmt.execute("CREATE SCHEMA ${quoteIdentifier(safeName)}")
@@ -469,6 +469,21 @@ class PostgreSQLDialect : DatabaseDialect {
                 append(indexes.joinToString("\n"))
             }
         }
+    }
+
+    override fun buildTableOptionsSQL(options: Map<String, String>): String {
+        // PostgreSQL 不支持表级 ENGINE/CHARSET/COLLATE，返回空串
+        return ""
+    }
+
+    override fun buildPostCreateStatements(tableName: String, options: Map<String, String>): List<String> {
+        val statements = mutableListOf<String>()
+        val comment = options["comment"]
+        if (comment != null) {
+            val escaped = comment.replace("'", "''")
+            statements.add("COMMENT ON TABLE ${quoteIdentifier(tableName)} IS '$escaped'")
+        }
+        return statements
     }
 
     // endregion

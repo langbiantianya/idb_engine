@@ -30,11 +30,14 @@ class MySQLDialect : DatabaseDialect {
         schemas
     }
 
-    override suspend fun createSchema(conn: Connection, name: String): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun createSchema(conn: Connection, name: String, options: Map<String, String>): Boolean = withContext(Dispatchers.IO) {
         val safeName = sanitizeIdentifier(name, "schema name")
-        conn.createStatement().use { stmt ->
-            stmt.execute("CREATE DATABASE ${quoteIdentifier(safeName)}")
+        val sql = buildString {
+            append("CREATE DATABASE ${quoteIdentifier(safeName)}")
+            options["charset"]?.let { append(" CHARACTER SET $it") }
+            options["collate"]?.let { append(" COLLATE $it") }
         }
+        conn.createStatement().use { stmt -> stmt.execute(sql) }
         true
     }
 
@@ -240,6 +243,23 @@ class MySQLDialect : DatabaseDialect {
                 else throw IllegalArgumentException("Table '$tableName' not found")
             }
         }
+    }
+
+    override fun buildTableOptionsSQL(options: Map<String, String>): String = buildString {
+        val parts = mutableListOf<String>()
+        options["engine"]?.let { parts.add("ENGINE=$it") }
+        options["charset"]?.let { parts.add("DEFAULT CHARSET=$it") }
+        options["collate"]?.let { parts.add("COLLATE=$it") }
+        options["comment"]?.let { parts.add("COMMENT='${it.replace("'", "\\'")}'") }
+        if (parts.isNotEmpty()) {
+            append(" ")
+            append(parts.joinToString(" "))
+        }
+    }
+
+    override fun buildPostCreateStatements(tableName: String, options: Map<String, String>): List<String> {
+        // MySQL 的 COMMENT 在 CREATE TABLE 语句内处理，无需后续语句
+        return emptyList()
     }
 
     // MySQL 标识符可用反引号包裹

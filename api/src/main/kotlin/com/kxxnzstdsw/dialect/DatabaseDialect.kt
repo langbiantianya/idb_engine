@@ -43,8 +43,10 @@ interface DatabaseDialect {
 
     /**
      * Create a new schema/database
+     * @param name schema/database name
+     * @param options 可选项（如 MySQL: charset, collate）
      */
-    suspend fun createSchema(conn: Connection, name: String): Boolean
+    suspend fun createSchema(conn: Connection, name: String, options: Map<String, String> = emptyMap()): Boolean
 
     /**
      * Delete a schema/database
@@ -139,6 +141,21 @@ interface DatabaseDialect {
     fun buildDropColumnSQL(tableName: String, columnName: String): String
 
     suspend fun getCreateTableDDL(conn: Connection, tableName: String): String
+
+    /**
+     * 构建 CREATE TABLE 语句的表级选项后缀（如 ENGINE、CHARSET、COLLATE）
+     * @param options 用户传入的选项 map（如 engine, charset, collate）
+     * @return 表级选项 SQL 片段，无可选项时返回空串
+     */
+    fun buildTableOptionsSQL(options: Map<String, String>): String
+
+    /**
+     * 构建 CREATE TABLE 之后需要单独执行的语句（如 PostgreSQL 的 COMMENT ON TABLE）
+     * @param tableName 表名（已由方言引用）
+     * @param options 用户传入的选项 map
+     * @return 需要执行的 SQL 语句列表，无需时返回空列表
+     */
+    fun buildPostCreateStatements(tableName: String, options: Map<String, String>): List<String>
 
     /**
      * 校验原始 SQL 片段（WHERE 条件等）的安全性。

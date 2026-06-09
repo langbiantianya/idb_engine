@@ -124,9 +124,14 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 **CREATE** — 创建 Database / Schema
 
+可选 `options` 对象（MySQL 支持 `charset`、`collate`，PostgreSQL 忽略）：
+
 ```json
-// 请求 payload
+// 请求 payload（基础）
 {"name": "new_db"}
+
+// 请求 payload（带字符集选项，仅 MySQL 有效）
+{"name": "new_db", "options": {"charset": "utf8mb4", "collate": "utf8mb4_unicode_ci"}}
 
 // 响应 data
 {"created": "new_db"}
@@ -272,10 +277,14 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 ]
 ```
 
-**CREATE** — 创建表，支持主键定义
+**CREATE** — 创建表，支持主键定义和表级选项
+
+可选 `options` 对象：
+- MySQL 支持：`engine`、`charset`、`collate`、`comment`
+- PostgreSQL 支持：`comment`（通过 `COMMENT ON TABLE` 实现，其余忽略）
 
 ```json
-// 请求 payload
+// 请求 payload（基础）
 {
   "tableName": "products",
   "columns": [
@@ -284,6 +293,18 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
     {"name": "price", "type": "DECIMAL", "nullable": true, "defaultValue": "0.00"},
     {"name": "created_at", "type": "TIMESTAMP", "nullable": true, "defaultValue": "CURRENT_TIMESTAMP"}
   ]
+}
+
+// 请求 payload（带表级选项）
+{
+  "tableName": "products",
+  "columns": [...],
+  "options": {
+    "engine": "InnoDB",
+    "charset": "utf8mb4",
+    "collate": "utf8mb4_unicode_ci",
+    "comment": "商品表"
+  }
 }
 
 // 响应 data
