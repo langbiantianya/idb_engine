@@ -2,7 +2,6 @@ package com.kxxnzstdsw.handlers
 
 import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.models.ConnectionConfig
-import com.kxxnzstdsw.models.Driver
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -28,7 +27,7 @@ object DataHandler {
         val orderByRaw = payload["orderBy"]?.jsonPrimitive?.contentOrNull
 
         val connection = PoolManager.getConnection(config)
-        val dialect = DialectLoader.getDialect(config.driver.name)
+        val dialect = DialectLoader.getDialect(config.driver)
 
         // 按方言规则校验 SQL 片段安全性
         if (!whereRaw.isNullOrBlank()) dialect.validateSqlFragment(whereRaw, "where")
@@ -52,11 +51,8 @@ object DataHandler {
             if (pageSize == 0 && onRow != null) {
                 // 流式全量模式：使用 JDBC 游标逐行读取
                 val sql = "SELECT * FROM ${dialect.quoteIdentifier(tableName)}$whereSql$orderBySql"
-                val originalAutoCommit = conn.autoCommit
+                val originalAutoCommit = dialect.configureConnectionForStreaming(conn)
                 try {
-                    if (config.driver == Driver.Postgresql) {
-                        conn.autoCommit = false
-                    }
                     conn.prepareStatement(
                         sql,
                         ResultSet.TYPE_FORWARD_ONLY,
@@ -76,7 +72,7 @@ object DataHandler {
                         }
                     }
                 } finally {
-                    conn.autoCommit = originalAutoCommit
+                    dialect.restoreConnectionAfterStreaming(conn, originalAutoCommit)
                 }
             } else {
                 // 普通分页模式
@@ -132,7 +128,7 @@ object DataHandler {
             ?: throw IllegalArgumentException("Missing 'values'")
 
         val connection = PoolManager.getConnection(config)
-        val dialect = DialectLoader.getDialect(config.driver.name)
+        val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
             val columns = values.keys.joinToString(", ") { dialect.quoteIdentifier(it) }
@@ -158,7 +154,7 @@ object DataHandler {
             ?: throw IllegalArgumentException("Missing 'where'")
 
         val connection = PoolManager.getConnection(config)
-        val dialect = DialectLoader.getDialect(config.driver.name)
+        val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
             val setClause = changes.keys.joinToString(", ") { "${dialect.quoteIdentifier(it)} = ?" }
@@ -186,7 +182,7 @@ object DataHandler {
             ?: throw IllegalArgumentException("Missing 'where'")
 
         val connection = PoolManager.getConnection(config)
-        val dialect = DialectLoader.getDialect(config.driver.name)
+        val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
             val whereClause = where.keys.joinToString(" AND ") { "${dialect.quoteIdentifier(it)} = ?" }

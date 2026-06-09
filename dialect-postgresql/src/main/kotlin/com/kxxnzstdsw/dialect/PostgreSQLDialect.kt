@@ -6,6 +6,17 @@ import java.sql.Connection
 
 class PostgreSQLDialect : DatabaseDialect {
     override val driverName = "Postgresql"
+    override val jdbcDriverClassName = "org.postgresql.Driver"
+
+    override fun buildJdbcUrl(host: String, port: Int, database: String): String {
+        return "jdbc:postgresql://$host:$port/$database"
+    }
+
+    override fun configureConnectionForStreaming(conn: Connection): Boolean {
+        val original = conn.autoCommit
+        conn.autoCommit = false  // PostgreSQL 必须关闭 autoCommit 才能启用服务端游标
+        return original
+    }
 
     // region companion object — 预编译正则与常量集合
 

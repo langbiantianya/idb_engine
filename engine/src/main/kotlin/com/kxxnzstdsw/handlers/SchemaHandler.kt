@@ -10,7 +10,7 @@ import kotlinx.serialization.json.*
 object SchemaHandler {
     suspend fun list(config: ConnectionConfig): JsonElement = withContext(Dispatchers.IO) {
         val connection = PoolManager.getConnection(config)
-        val dialect = DialectLoader.getDialect(config.driver.name)
+        val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
             val schemas = dialect.listSchemas(conn)
@@ -22,7 +22,7 @@ object SchemaHandler {
         val schemaName = payload["name"]?.jsonPrimitive?.content
             ?: throw IllegalArgumentException("Missing 'name' in payload")
         val connection = PoolManager.getConnection(config)
-        val dialect = DialectLoader.getDialect(config.driver.name)
+        val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
             dialect.createSchema(conn, schemaName)
@@ -34,7 +34,7 @@ object SchemaHandler {
         val schemaName = payload["name"]?.jsonPrimitive?.content
             ?: throw IllegalArgumentException("Missing 'name' in payload")
         val connection = PoolManager.getConnection(config)
-        val dialect = DialectLoader.getDialect(config.driver.name)
+        val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
             dialect.deleteSchema(conn, schemaName)

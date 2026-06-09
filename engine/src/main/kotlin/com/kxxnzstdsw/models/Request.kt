@@ -1,6 +1,5 @@
 package com.kxxnzstdsw.models
 
-import com.kxxnzstdsw.models.Driver
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 
@@ -25,7 +24,7 @@ enum class Action {
 
 @Serializable
 data class ConnectionConfig(
-    val driver: Driver,
+    val driver: String,
     val host: String,
     val port: Int,
     val user: String,

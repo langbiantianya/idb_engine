@@ -10,7 +10,7 @@ import kotlinx.serialization.json.*
 object TableHandler {
     suspend fun list(config: ConnectionConfig): JsonElement = withContext(Dispatchers.IO) {
         val connection = PoolManager.getConnection(config)
-        val dialect = DialectLoader.getDialect(config.driver.name)
+        val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
             val tables = dialect.listTables(conn, config.database)
@@ -65,7 +65,7 @@ object TableHandler {
             ?: throw IllegalArgumentException("Missing 'columns' array")
 
         val connection = PoolManager.getConnection(config)
-        val dialect = DialectLoader.getDialect(config.driver.name)
+        val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
             val columnDefs = columns.map { col ->
@@ -114,7 +114,7 @@ object TableHandler {
             ?: throw IllegalArgumentException("Missing 'operation' (ADD_COLUMN|DROP_COLUMN|MODIFY_COLUMN)")
 
         val connection = PoolManager.getConnection(config)
-        val dialect = DialectLoader.getDialect(config.driver.name)
+        val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
             val sql = when (operation) {
@@ -169,7 +169,7 @@ object TableHandler {
         val tableName = payload["tableName"]?.jsonPrimitive?.content
             ?: throw IllegalArgumentException("Missing 'tableName' in payload")
         val connection = PoolManager.getConnection(config)
-        val dialect = DialectLoader.getDialect(config.driver.name)
+        val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
             JsonPrimitive(dialect.getCreateTableDDL(conn, tableName))
         }
@@ -179,7 +179,7 @@ object TableHandler {
         val tableName = payload["tableName"]?.jsonPrimitive?.content
             ?: throw IllegalArgumentException("Missing 'tableName'")
         val connection = PoolManager.getConnection(config)
-        val dialect = DialectLoader.getDialect(config.driver.name)
+        val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
             val sql = "DROP TABLE ${dialect.quoteIdentifier(tableName)}"

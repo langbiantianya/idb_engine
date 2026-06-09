@@ -10,7 +10,7 @@ import kotlinx.serialization.json.*
 object UserHandler {
     suspend fun list(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
         val connection = PoolManager.getConnection(config)
-        val dialect = DialectLoader.getDialect(config.driver.name)
+        val dialect = DialectLoader.getDialect(config.driver)
 
         // payload 含 user 字段时查询该用户权限，否则返回用户列表
         val targetUser = payload["user"]?.jsonPrimitive?.contentOrNull
@@ -33,7 +33,7 @@ object UserHandler {
         val host = payload["host"]?.jsonPrimitive?.contentOrNull ?: "%"
 
         val connection = PoolManager.getConnection(config)
-        val dialect = DialectLoader.getDialect(config.driver.name)
+        val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
             val grants = dialect.listAllGrants(conn, user, host)
@@ -49,7 +49,7 @@ object UserHandler {
         val host = payload["host"]?.jsonPrimitive?.contentOrNull ?: "%"
 
         val connection = PoolManager.getConnection(config)
-        val dialect = DialectLoader.getDialect(config.driver.name)
+        val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
             dialect.createUser(conn, user, password, host)
@@ -63,7 +63,7 @@ object UserHandler {
         val host = payload["host"]?.jsonPrimitive?.contentOrNull ?: "%"
 
         val connection = PoolManager.getConnection(config)
-        val dialect = DialectLoader.getDialect(config.driver.name)
+        val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
             dialect.deleteUser(conn, user, host)
@@ -76,7 +76,7 @@ object UserHandler {
             ?: throw IllegalArgumentException("Missing 'user'")
 
         val connection = PoolManager.getConnection(config)
-        val dialect = DialectLoader.getDialect(config.driver.name)
+        val dialect = DialectLoader.getDialect(config.driver)
 
         // 当 payload 含 password 且不含 privileges 时走密码修改路径
         val newPassword = payload["password"]?.jsonPrimitive?.contentOrNull

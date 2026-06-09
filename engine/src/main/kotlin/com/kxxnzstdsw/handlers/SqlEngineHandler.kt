@@ -1,7 +1,7 @@
 package com.kxxnzstdsw.handlers
 
+import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.models.ConnectionConfig
-import com.kxxnzstdsw.models.Driver
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -26,11 +26,9 @@ object SqlEngineHandler {
                 ResultSet.TYPE_FORWARD_ONLY,
                 ResultSet.CONCUR_READ_ONLY
             ).use { stmt ->
-                val originalAutoCommit = conn.autoCommit
+                val dialect = DialectLoader.getDialect(config.driver)
+                val originalAutoCommit = dialect.configureConnectionForStreaming(conn)
                 try {
-                    if (config.driver == Driver.Postgresql) {
-                        conn.autoCommit = false
-                    }
                     val hasResultSet = stmt.execute(sql)
 
                     if (hasResultSet) {
@@ -65,7 +63,7 @@ object SqlEngineHandler {
                         }
                     }
                 } finally {
-                    conn.autoCommit = originalAutoCommit
+                    dialect.restoreConnectionAfterStreaming(conn, originalAutoCommit)
                 }
             }
         }

@@ -1,8 +1,8 @@
 package com.kxxnzstdsw.pool
 
+import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.loader.DriverLoader
 import com.kxxnzstdsw.models.ConnectionConfig
-import com.kxxnzstdsw.models.Driver
 import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
 import org.slf4j.LoggerFactory
@@ -34,16 +34,13 @@ object PoolManager {
             Thread.currentThread().contextClassLoader = it
         }
 
+        val dialect = DialectLoader.getDialect(config.driver)
+
         val hikariConfig = HikariConfig().apply {
-            jdbcUrl = buildJdbcUrl(config)
+            jdbcUrl = dialect.buildJdbcUrl(config.host, config.port, config.database)
             username = config.user
             password = config.password
-
-            // 显式指定驱动类名，HikariCP 通过 Class.forName 加载（依赖线程 contextClassLoader）
-            driverClassName = when (config.driver) {
-                Driver.Mysql -> "com.mysql.cj.jdbc.Driver"
-                Driver.Postgresql -> "org.postgresql.Driver"
-            }
+            driverClassName = dialect.jdbcDriverClassName
 
             // Performance tuning for desktop app
             maximumPoolSize = 5
@@ -52,21 +49,10 @@ object PoolManager {
             connectionTimeout = 5_000 // 5 seconds
             maxLifetime = 1_800_000 // 30 minutes
 
-            // Connection test
-            connectionTestQuery = when (config.driver) {
-                Driver.Mysql -> "SELECT 1"
-                Driver.Postgresql -> "SELECT 1"
-            }
+            connectionTestQuery = "SELECT 1"
         }
 
         return HikariDataSource(hikariConfig)
-    }
-
-    private fun buildJdbcUrl(config: ConnectionConfig): String {
-        return when (config.driver) {
-            Driver.Mysql -> "jdbc:mysql://${config.host}:${config.port}/${config.database}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
-            Driver.Postgresql -> "jdbc:postgresql://${config.host}:${config.port}/${config.database}"
-        }
     }
 
     fun closeAll() {

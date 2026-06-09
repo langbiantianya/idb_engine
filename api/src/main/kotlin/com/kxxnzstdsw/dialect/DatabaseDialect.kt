@@ -9,9 +9,32 @@ import java.sql.Connection
  */
 interface DatabaseDialect {
     /**
-     * 该方言处理的驱动名称，与请求中 connection.driver 枚举值匹配（如 "Mysql"、"Postgresql"）
+     * 该方言处理的驱动名称，与请求中 connection.driver 匹配（如 "Mysql"、"Postgresql"）
      */
     val driverName: String
+
+    /**
+     * JDBC 驱动类名（如 "com.mysql.cj.jdbc.Driver"）
+     */
+    val jdbcDriverClassName: String
+
+    /**
+     * 构建 JDBC URL
+     */
+    fun buildJdbcUrl(host: String, port: Int, database: String): String
+
+    /**
+     * 为流式游标读取配置连接（如 PostgreSQL 需关闭 autoCommit）
+     * @return 原始 autoCommit 值，供 restoreConnectionAfterStreaming 恢复
+     */
+    fun configureConnectionForStreaming(conn: Connection): Boolean
+
+    /**
+     * 流式读取完毕后恢复连接状态
+     */
+    fun restoreConnectionAfterStreaming(conn: Connection, originalAutoCommit: Boolean) {
+        conn.autoCommit = originalAutoCommit
+    }
 
     /**
      * List all schemas/databases
