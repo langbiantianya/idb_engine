@@ -3,7 +3,7 @@ plugins {
 }
 
 group = "com.kxxnzstdsw"
-version = "1.0-SNAPSHOT"
+version = "0.1.1"
 
 dependencies {
     implementation(project(":api"))
@@ -12,6 +12,5 @@ dependencies {
 
 tasks.jar {
     archiveClassifier.set("")
-    archiveVersion.set("")
     archiveBaseName.set("idb-dialect-postgresql")
 }

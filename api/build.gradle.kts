@@ -3,10 +3,9 @@ plugins {
 }
 
 group = "com.kxxnzstdsw"
-version = "1.0-SNAPSHOT"
+version = "0.1.0"
 
 tasks.jar {
     archiveClassifier.set("")
-    archiveVersion.set("")
     archiveBaseName.set("idb-api")
 }
