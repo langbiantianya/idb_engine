@@ -7,7 +7,7 @@ version = "1.0-SNAPSHOT"
 
 dependencies {
     implementation(project(":api"))
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
+    implementation(libs.kotlinx.coroutines.core)
 }
 
 tasks.jar {

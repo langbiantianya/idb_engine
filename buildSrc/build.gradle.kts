@@ -9,16 +9,7 @@ kotlin {
     jvmToolchain(25)
 }
 
-java {
-    toolchain {
-        languageVersion = JavaLanguageVersion.of(25)
-    }
-    targetCompatibility = JavaVersion.VERSION_25
-    sourceCompatibility = JavaVersion.VERSION_25
-}
-
-
 dependencies {
     // Add a dependency on the Kotlin Gradle plugin, so that convention plugins can apply it.
-    implementation(libs.kotlinGradlePlugin)
+    implementation(libs.kotlin.gradle.plugin)
 }

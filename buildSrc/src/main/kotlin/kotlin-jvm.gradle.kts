@@ -14,14 +14,6 @@ kotlin {
     jvmToolchain(25)
 }
 
-java {
-    toolchain {
-        languageVersion = JavaLanguageVersion.of(25)
-    }
-    targetCompatibility = JavaVersion.VERSION_25
-    sourceCompatibility = JavaVersion.VERSION_25
-}
-
 tasks.withType<Test>().configureEach {
     // Configure all test Gradle tasks to use JUnitPlatform.
     useJUnitPlatform()
@@ -34,8 +26,4 @@ tasks.withType<Test>().configureEach {
             TestLogEvent.SKIPPED
         )
     }
-}
-
-tasks.test {
-    useJUnitPlatform()
 }

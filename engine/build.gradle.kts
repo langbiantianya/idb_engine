@@ -1,6 +1,6 @@
 plugins {
     kotlin("jvm")
-    kotlin("plugin.serialization") version "2.4.0"
+    alias(libs.plugins.kotlin.serialization)
 }
 
 group = "com.kxxnzstdsw"
@@ -8,24 +8,20 @@ version = "1.0-SNAPSHOT"
 
 dependencies {
     implementation(project(":api"))
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
-    implementation("com.zaxxer:HikariCP:7.0.2")
-    implementation("org.slf4j:slf4j-api:2.0.18")
-    implementation("ch.qos.logback:logback-classic:1.5.13")
+    implementation(libs.kotlinx.serialization.json)
+    implementation(libs.kotlinx.coroutines.core)
+    implementation(libs.hikari)
+    implementation(libs.slf4j.api)
+    implementation(libs.logback.classic)
 
     // JDBC Drivers — 不编译依赖，构建时复制到 drivers/
     val jdbcDrivers by configurations.creating {
         isTransitive = false
     }
-    jdbcDrivers("com.mysql:mysql-connector-j:9.7.0")
-    jdbcDrivers("org.postgresql:postgresql:42.7.11")
+    jdbcDrivers(libs.mysql.connector)
+    jdbcDrivers(libs.postgresql)
 
     testImplementation(kotlin("test"))
-}
-
-tasks.test {
-    useJUnitPlatform()
 }
 
 // 瘦 JAR：只打包 engine 代码和资源，不含依赖
