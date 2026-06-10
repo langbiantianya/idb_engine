@@ -558,8 +558,8 @@ payload 含 `password` 且无 `privileges` 字段时走密码修改路径。`hos
 
 ## 技术栈
 
-- Kotlin 2.3.21
-- JDK 21
+- Kotlin 2.4.0
+- JDK 25
 - kotlinx-coroutines 1.11.0
 - HikariCP 7.0.2
 - MySQL Connector/J 9.7.0

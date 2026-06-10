@@ -10,7 +10,7 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 
 ## 2. 技术栈选型 (Technology Stack)
 
-- **核心语言**：Kotlin 2.3.21 / JDK 21
+- **核心语言**：Kotlin 2.4.0 / JDK 25
 - **异步框架**：kotlinx-coroutines 1.11.0 (协程实现非阻塞并发)
 - **数据库驱动**：原生 JDBC (MySQL Connector/J 9.7.0, PostgreSQL JDBC Driver 42.7.11)
 - **连接池管理**：HikariCP 7.0.2 (业界最高性能、资源占用低的连接池)
