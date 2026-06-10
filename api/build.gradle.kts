@@ -1,13 +1,11 @@
 plugins {
-    kotlin("jvm") version "2.3.21"
+    kotlin("jvm")
 }
 
 group = "com.kxxnzstdsw"
 version = "1.0-SNAPSHOT"
 
-kotlin {
-    jvmToolchain(21)
-}
+
 
 tasks.jar {
     archiveClassifier.set("")

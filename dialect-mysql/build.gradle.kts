@@ -1,5 +1,5 @@
 plugins {
-    kotlin("jvm") version "2.3.21"
+    kotlin("jvm")
 }
 
 group = "com.kxxnzstdsw"
@@ -8,10 +8,6 @@ version = "1.0-SNAPSHOT"
 dependencies {
     implementation(project(":api"))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
-}
-
-kotlin {
-    jvmToolchain(21)
 }
 
 tasks.jar {

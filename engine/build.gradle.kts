@@ -1,7 +1,6 @@
 plugins {
-    kotlin("jvm") version "2.3.21"
-    kotlin("plugin.serialization") version "2.3.21"
-    id("com.gradleup.shadow") version "9.3.0+"
+    kotlin("jvm")
+    kotlin("plugin.serialization") version "2.4.0"
 }
 
 group = "com.kxxnzstdsw"
@@ -25,28 +24,8 @@ dependencies {
     testImplementation(kotlin("test"))
 }
 
-kotlin {
-    jvmToolchain(21)
-}
-java {
-    toolchain {
-        languageVersion = JavaLanguageVersion.of(21)
-    }
-    targetCompatibility = JavaVersion.VERSION_21
-    sourceCompatibility = JavaVersion.VERSION_21
-}
-
 tasks.test {
     useJUnitPlatform()
-}
-
-tasks.shadowJar {
-    archiveBaseName.set("idb-engine")
-    archiveClassifier.set("all")
-    archiveVersion.set("")
-    manifest {
-        attributes["Main-Class"] = "com.kxxnzstdsw.MainKt"
-    }
 }
 
 // 瘦 JAR：只打包 engine 代码和资源，不含依赖
