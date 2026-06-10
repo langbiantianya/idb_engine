@@ -269,13 +269,26 @@ class PostgreSQLDialect : DatabaseDialect {
         size: Int?,
         nullable: Boolean,
         isPrimaryKey: Boolean,
-        defaultValue: String?
+        defaultValue: String?,
+        autoIncrement: Boolean
     ): String = buildString {
         append(quoteIdentifier(name))
         append(" ")
-        append(buildTypeSpec(type, size))
-        if (!nullable) append(" NOT NULL")
-        if (defaultValue != null) {
+        // PostgreSQL: 自增列使用 SERIAL / BIGSERIAL 替代 INT / BIGINT
+        if (autoIncrement && isPrimaryKey) {
+            val upperType = type.uppercase()
+            when (upperType) {
+                "INT", "INTEGER" -> append("SERIAL")
+                "BIGINT" -> append("BIGSERIAL")
+                "SMALLINT" -> append("SMALLSERIAL")
+                else -> append(buildTypeSpec(type, size))
+            }
+        } else {
+            append(buildTypeSpec(type, size))
+        }
+        if (!autoIncrement && !nullable) append(" NOT NULL")
+        // SERIAL 类型隐含 NOT NULL 和 DEFAULT，无需额外声明
+        if (defaultValue != null && !autoIncrement) {
             append(" DEFAULT ")
             append(if (UNQUOTED_DEFAULT_REGEX.matches(defaultValue)) {
                 defaultValue

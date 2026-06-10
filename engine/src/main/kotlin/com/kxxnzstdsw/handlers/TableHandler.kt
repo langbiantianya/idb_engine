@@ -81,8 +81,9 @@ object TableHandler {
                 val nullable = colObj["nullable"]?.jsonPrimitive?.booleanOrNull ?: true
                 val isPrimaryKey = colObj["isPrimaryKey"]?.jsonPrimitive?.booleanOrNull ?: false
                 val defaultValue = colObj["defaultValue"]?.jsonPrimitive?.contentOrNull
+                val autoIncrement = colObj["autoIncrement"]?.jsonPrimitive?.booleanOrNull ?: false
 
-                dialect.buildColumnDefinition(name, type, size, nullable, isPrimaryKey, defaultValue)
+                dialect.buildColumnDefinition(name, type, size, nullable, isPrimaryKey, defaultValue, autoIncrement)
             }
 
             val primaryKeys = columns.mapNotNull { col ->

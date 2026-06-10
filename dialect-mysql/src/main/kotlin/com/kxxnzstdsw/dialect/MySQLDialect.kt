@@ -197,12 +197,14 @@ class MySQLDialect : DatabaseDialect {
         size: Int?,
         nullable: Boolean,
         isPrimaryKey: Boolean,
-        defaultValue: String?
+        defaultValue: String?,
+        autoIncrement: Boolean
     ): String = buildString {
         append(quoteIdentifier(name))
         append(" ")
         append(buildTypeSpec(type, size))
         if (!nullable) append(" NOT NULL")
+        if (autoIncrement && isPrimaryKey) append(" AUTO_INCREMENT")
         if (defaultValue != null) {
             append(" DEFAULT ")
             append(if (defaultValue.matches(Regex("\\d+(\\.\\d+)?|NULL|CURRENT_TIMESTAMP", RegexOption.IGNORE_CASE))) {

@@ -283,6 +283,10 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 - MySQL 支持：`engine`、`charset`、`collate`、`comment`
 - PostgreSQL 支持：`comment`（通过 `COMMENT ON TABLE` 实现，其余忽略）
 
+列定义支持 `autoIncrement: true`（仅对主键列有效）：
+- MySQL：生成 `INT AUTO_INCREMENT`
+- PostgreSQL：将 `INT` 替换为 `SERIAL`（`BIGINT` → `BIGSERIAL`）
+
 ```json
 // 请求 payload（基础）
 {
@@ -292,6 +296,15 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
     {"name": "name", "type": "VARCHAR", "size": 255, "nullable": false},
     {"name": "price", "type": "DECIMAL", "nullable": true, "defaultValue": "0.00"},
     {"name": "created_at", "type": "TIMESTAMP", "nullable": true, "defaultValue": "CURRENT_TIMESTAMP"}
+  ]
+}
+
+// 请求 payload（带自增主键）
+{
+  "tableName": "products",
+  "columns": [
+    {"name": "id", "type": "INT", "nullable": false, "isPrimaryKey": true, "autoIncrement": true},
+    {"name": "name", "type": "VARCHAR", "size": 255, "nullable": false}
   ]
 }
 

@@ -296,13 +296,20 @@ payload 含 `password` 且无 `privileges` 字段时走密码修改路径。`hos
 
 可选 `options` 对象：MySQL 支持 `engine`/`charset`/`collate`/`comment`，PostgreSQL 支持 `comment`。
 
+列定义支持 `"autoIncrement": true`（仅对主键有效）：MySQL 生成 `AUTO_INCREMENT`，PostgreSQL `INT` → `SERIAL`，`BIGINT` → `BIGSERIAL`；`SERIAL` 自带 `NOT NULL` 和 `DEFAULT`。
+
 ```json
 {"id":"10","category":"TABLE","action":"CREATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"products","columns":[{"name":"id","type":"INT","nullable":false,"isPrimaryKey":true},{"name":"name","type":"VARCHAR","size":255,"nullable":false},{"name":"price","type":"DECIMAL","nullable":true,"defaultValue":"0.00"}]}}
 ```
 
+带自增主键：
+```json
+{"id":"10a","category":"TABLE","action":"CREATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"products","columns":[{"name":"id","type":"INT","nullable":false,"isPrimaryKey":true,"autoIncrement":true},{"name":"name","type":"VARCHAR","size":255,"nullable":false}]}}
+```
+
 带表级选项（仅 MySQL 有效）：
 ```json
-{"id":"10b","category":"TABLE","action":"CREATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"products","columns":[{"name":"id","type":"INT","nullable":false,"isPrimaryKey":true},{"name":"name","type":"VARCHAR","size":255,"nullable":false}],"options":{"engine":"InnoDB","charset":"utf8mb4","collate":"utf8mb4_unicode_ci","comment":"商品表"}}}
+{"id":"10b","category":"TABLE","action":"CREATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"products","columns":[{"name":"id","type":"INT","nullable":false,"isPrimaryKey":true,"autoIncrement":true},{"name":"name","type":"VARCHAR","size":255,"nullable":false}],"options":{"engine":"InnoDB","charset":"utf8mb4","collate":"utf8mb4_unicode_ci","comment":"商品表"}}}
 ```
 
 响应：

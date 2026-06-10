@@ -120,6 +120,7 @@ interface DatabaseDialect {
 
     /**
      * Build column definition for CREATE TABLE
+     * @param autoIncrement 是否自增（仅对主键列有效）
      */
     fun buildColumnDefinition(
         name: String,
@@ -127,7 +128,8 @@ interface DatabaseDialect {
         size: Int?,
         nullable: Boolean,
         isPrimaryKey: Boolean,
-        defaultValue: String?
+        defaultValue: String?,
+        autoIncrement: Boolean = false
     ): String
 
     /**
