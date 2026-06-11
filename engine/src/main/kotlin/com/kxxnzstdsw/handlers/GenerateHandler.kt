@@ -9,6 +9,11 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import party.iroiro.luajava.JFunction
 import party.iroiro.luajava.Lua
+import party.iroiro.luajava.lua51.Lua51
+import party.iroiro.luajava.lua52.Lua52
+import party.iroiro.luajava.lua53.Lua53
+import party.iroiro.luajava.lua54.Lua54
+import party.iroiro.luajava.lua55.Lua55
 import party.iroiro.luajava.luajit.LuaJit
 import java.sql.Connection
 import java.sql.PreparedStatement
@@ -90,8 +95,8 @@ object GenerateHandler {
                 for ((index, tableConfig) in generatePayload.tables.withIndex()) {
                     val state = GenerateState(conn = conn, dialect = dialect, tableName = tableConfig.tableName)
 
-                    // 创建 Lua VM，执行脚本（insert 实时写库）
-                    LuaJit().use { L ->
+                    // 创建 Lua VM（按 luaVersion 选择引擎），执行脚本（insert 实时写库）
+                    createLuaEngine(generatePayload.luaVersion).use { L ->
                         L.openLibraries()
                         applySandbox(L)
                         registerHelpers(L, state)
@@ -124,6 +129,22 @@ object GenerateHandler {
             put("success", true)
             put("tablesProcessed", generatePayload.tables.size)
         }
+    }
+
+    /**
+     * 按版本标识创建 Lua 引擎实例
+     * 支持: "luajit"(默认), "5.1", "5.2", "5.3", "5.4", "5.5"
+     */
+    private fun createLuaEngine(version: String): Lua = when (version.lowercase()) {
+        "luajit", "jit" -> LuaJit()
+        "5.1", "lua51", "lua5.1" -> Lua51()
+        "5.2", "lua52", "lua5.2" -> Lua52()
+        "5.3", "lua53", "lua5.3" -> Lua53()
+        "5.4", "lua54", "lua5.4" -> Lua54()
+        "5.5", "lua55", "lua5.5" -> Lua55()
+        else -> throw IllegalArgumentException(
+            "Unsupported luaVersion: '$version'. Use: luajit, 5.1, 5.2, 5.3, 5.4, 5.5"
+        )
     }
 
     private fun applySandbox(L: Lua) {

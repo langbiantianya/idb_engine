@@ -14,7 +14,21 @@ dependencies {
     implementation(libs.slf4j.api)
     implementation(libs.logback.classic)
     implementation(libs.luajava)
-    runtimeOnly("party.iroiro.luajava:luajit-platform:${libs.versions.luajava.get()}:natives-desktop")
+
+    // Lua 引擎（编译依赖 + 运行时原生库）
+    implementation(libs.luajit)
+    implementation(libs.lua51)
+    implementation(libs.lua52)
+    implementation(libs.lua53)
+    implementation(libs.lua54)
+    implementation(libs.lua55)
+    val luaVersion = libs.versions.luajava.get()
+    runtimeOnly("party.iroiro.luajava:luajit-platform:$luaVersion:natives-desktop")
+    runtimeOnly("party.iroiro.luajava:lua51-platform:$luaVersion:natives-desktop")
+    runtimeOnly("party.iroiro.luajava:lua52-platform:$luaVersion:natives-desktop")
+    runtimeOnly("party.iroiro.luajava:lua53-platform:$luaVersion:natives-desktop")
+    runtimeOnly("party.iroiro.luajava:lua54-platform:$luaVersion:natives-desktop")
+    runtimeOnly("party.iroiro.luajava:lua55-platform:$luaVersion:natives-desktop")
 
     // JDBC Drivers — 不编译依赖，构建时复制到 drivers/
     val jdbcDrivers by configurations.creating {

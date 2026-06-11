@@ -17,7 +17,7 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 - **数据序列化**：`kotlinx.serialization` 1.11.0 (无反射、轻量化、原生支持 Kotlin 协程与数据类)
 - **日志框架**：SLF4J 2.0.18 + Logback 1.5.13 (日志输出到本地滚动文件，不污染 stdout)
 - **构建与分发**：Gradle + ShadowJar 9.3.0+ (构建为瘦包 + 外部依赖，后续可通过 GraalVM Native Image 编译为无 JRE 依赖的二进制文件)
-- **脚本引擎**：LuaJIT 4.1.0 via luajava (嵌入式 Lua 脚本引擎，用于造数功能中的数据生成规则定义)
+- **脚本引擎**：LuaJIT 4.1.0 + Lua 5.1~5.5 via luajava (嵌入式 Lua 脚本引擎，用于造数功能中的数据生成规则定义，支持多版本切换)
 
 ## 3. 核心机制设计 (Core Mechanisms)
 
@@ -563,14 +563,19 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
 | `random_enum(...)` | 从可变参数中随机选取一个值 |
 | `random_uuid()` | 随机 UUID 字符串 |
 
+**请求 payload 顶层字段**：
+- `tables` — 表配置数组（必填，按顺序执行）
+- `luaVersion` — Lua 引擎版本（可选，默认 `"luajit"`，支持 `"5.1"` / `"5.2"` / `"5.3"` / `"5.4"` / `"5.5"`）
+
 ```json
-// 请求
+// 请求（使用 Lua 5.4 引擎）
 {
   "id": "req-gen-001",
   "category": "DATA",
   "action": "GENERATE",
   "connection": {"driver": "mysql", "host": "127.0.0.1", "port": 3306, "user": "root", "password": "secret", "database": "test_db"},
   "payload": {
+    "luaVersion": "5.4",
     "tables": [
       {
         "tableName": "users",
@@ -701,6 +706,16 @@ engine/build/libs/
 │   ├── luajava-4.1.0.jar
 │   ├── luajit-4.1.0.jar
 │   ├── luajit-platform-4.1.0-natives-desktop.jar
+│   ├── lua51-4.1.0.jar
+│   ├── lua51-platform-4.1.0-natives-desktop.jar
+│   ├── lua52-4.1.0.jar
+│   ├── lua52-platform-4.1.0-natives-desktop.jar
+│   ├── lua53-4.1.0.jar
+│   ├── lua53-platform-4.1.0-natives-desktop.jar
+│   ├── lua54-4.1.0.jar
+│   ├── lua54-platform-4.1.0-natives-desktop.jar
+│   ├── lua55-4.1.0.jar
+│   ├── lua55-platform-4.1.0-natives-desktop.jar
 │   ├── HikariCP-7.0.2.jar
 │   ├── ...
 ├── drivers/             JDBC 驱动

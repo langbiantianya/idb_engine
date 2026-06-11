@@ -517,8 +517,10 @@ payload 含 `password` 且无 `privileges` 字段时走密码修改路径。`hos
 
 **内置 Lua 辅助函数**：`insert(tableName, rowTable)` / `lastId()` / `random_int(min, max)` / `random_float(min, max)` / `random_string(length)` / `random_date(start, end)` / `random_email()` / `random_phone()` / `random_name()` / `random_enum(...)` / `random_uuid()`
 
+**Lua 引擎版本**：通过 `payload.luaVersion` 选择，默认 `"luajit"`，可选 `"5.1"` / `"5.2"` / `"5.3"` / `"5.4"` / `"5.5"`。
+
 ```json
-{"id":"30","category":"DATA","action":"GENERATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tables":[{"tableName":"users","count":100,"script":"for i = 1, count do\n  insert('users', {\n    name = 'user_' .. i,\n    email = random_email(),\n    age = random_int(18, 65)\n  })\nend"},{"tableName":"orders","count":500,"script":"for i = 1, count do\n  insert('orders', {\n    user_id = random_int(1, 100),\n    amount = random_int(100, 99999) / 100.0,\n    status = random_enum('pending', 'paid', 'shipped'),\n    created_at = random_date('2024-01-01', '2024-12-31')\n  })\nend"}]}}
+{"id":"30","category":"DATA","action":"GENERATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"luaVersion":"5.4","tables":[{"tableName":"users","count":100,"script":"for i = 1, count do\n  insert('users', {\n    name = 'user_' .. i,\n    email = random_email(),\n    age = random_int(18, 65)\n  })\nend"},{"tableName":"orders","count":500,"script":"for i = 1, count do\n  insert('orders', {\n    user_id = random_int(1, 100),\n    amount = random_int(100, 99999) / 100.0,\n    status = random_enum('pending', 'paid', 'shipped'),\n    created_at = random_date('2024-01-01', '2024-12-31')\n  })\nend"}]}}
 ```
 
 响应（流式，每张表一条进度，含执行的 INSERT SQL）：

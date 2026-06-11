@@ -4,7 +4,8 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 data class GeneratePayload(
-    val tables: List<TableGenerateConfig>
+    val tables: List<TableGenerateConfig>,
+    val luaVersion: String = "luajit"
 )
 
 @Serializable

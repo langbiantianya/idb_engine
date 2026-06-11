@@ -18,7 +18,13 @@ slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
 logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
 mysql-connector = { module = "com.mysql:mysql-connector-j", version.ref = "mysql-connector" }
 postgresql = { module = "org.postgresql:postgresql", version.ref = "postgresql" }
-luajava = { module = "party.iroiro.luajava:luajit", version.ref = "luajava" }
+luajava = { module = "party.iroiro.luajava:luajava", version.ref = "luajava" }
+luajit = { module = "party.iroiro.luajava:luajit", version.ref = "luajava" }
+lua51 = { module = "party.iroiro.luajava:lua51", version.ref = "luajava" }
+lua52 = { module = "party.iroiro.luajava:lua52", version.ref = "luajava" }
+lua53 = { module = "party.iroiro.luajava:lua53", version.ref = "luajava" }
+lua54 = { module = "party.iroiro.luajava:lua54", version.ref = "luajava" }
+lua55 = { module = "party.iroiro.luajava:lua55", version.ref = "luajava" }
 
 [bundles]
 
