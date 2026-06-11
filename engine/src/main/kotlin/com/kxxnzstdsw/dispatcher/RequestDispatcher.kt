@@ -1,6 +1,7 @@
 package com.kxxnzstdsw.dispatcher
 
 import com.kxxnzstdsw.handlers.DataHandler
+import com.kxxnzstdsw.handlers.GenerateHandler
 import com.kxxnzstdsw.handlers.SchemaHandler
 import com.kxxnzstdsw.handlers.SqlEngineHandler
 import com.kxxnzstdsw.handlers.SystemHandler
@@ -44,6 +45,12 @@ object RequestDispatcher {
             // SQL EXECUTE 走流式路径（内部判断是否为 SELECT）
             if (request.category == Category.SQL && request.action == Action.EXECUTE) {
                 handleStreamSqlExecute(request, outputChannel)
+                return
+            }
+
+            // DATA GENERATE 走流式路径（造数进度回报）
+            if (request.category == Category.DATA && request.action == Action.GENERATE) {
+                handleStreamDataGenerate(request, outputChannel)
                 return
             }
 
@@ -117,6 +124,31 @@ object RequestDispatcher {
             }
         } catch (e: Exception) {
             logger.error("Error in SQL execute", e)
+            outputChannel.send(json.encodeToString(
+                Response.serializer(), Response(
+                    id = id, success = false, error = e.message ?: "Unknown error"
+                )
+            ))
+        }
+    }
+
+    private suspend fun handleStreamDataGenerate(request: Request, outputChannel: Channel<String>) {
+        val id = request.id
+        val encode = { end: Boolean, data: JsonElement ->
+            json.encodeToString(
+                Response.serializer(), Response(
+                    id = id, success = true, stream = true, end = end, data = data
+                )
+            )
+        }
+
+        try {
+            GenerateHandler.execute(request.connection, request.payload) { progress ->
+                outputChannel.send(encode(false, progress))
+            }
+            outputChannel.send(encode(true, JsonNull))
+        } catch (e: Exception) {
+            logger.error("Error in data generate", e)
             outputChannel.send(json.encodeToString(
                 Response.serializer(), Response(
                     id = id, success = false, error = e.message ?: "Unknown error"

@@ -19,7 +19,7 @@ enum class Category {
 
 @Serializable
 enum class Action {
-    LIST, CREATE, UPDATE, DELETE, EXECUTE, GET_DDL, INFO, GRANTS
+    LIST, CREATE, UPDATE, DELETE, EXECUTE, GET_DDL, INFO, GRANTS, GENERATE
 }
 
 @Serializable

@@ -13,6 +13,8 @@ dependencies {
     implementation(libs.hikari)
     implementation(libs.slf4j.api)
     implementation(libs.logback.classic)
+    implementation(libs.luajava)
+    runtimeOnly("party.iroiro.luajava:luajit-platform:${libs.versions.luajava.get()}:natives-desktop")
 
     // JDBC Drivers — 不编译依赖，构建时复制到 drivers/
     val jdbcDrivers by configurations.creating {

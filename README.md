@@ -57,7 +57,7 @@ cd engine/build/libs && java -jar idb-engine.jar
 {
   "id": "req-uuid-1234",
   "category": "SCHEMA|USER|TABLE|DATA|SQL|SYSTEM",
-  "action": "LIST|CREATE|UPDATE|DELETE|EXECUTE|GET_DDL|INFO|GRANTS",
+  "action": "LIST|CREATE|UPDATE|DELETE|EXECUTE|GET_DDL|INFO|GRANTS|GENERATE",
   "connection": {
     "driver": "mysql|postgresql",
     "host": "127.0.0.1",
@@ -504,6 +504,38 @@ payload 含 `password` 且无 `privileges` 字段时走密码修改路径。`hos
 
 ---
 
+### DATA — 造数引擎 (GENERATE)
+
+基于嵌入式 LuaJIT 脚本的批量造数功能，支持多表按序生成（自动处理外键依赖）。Lua 脚本由调用方提供，每张表独立执行。
+
+**核心机制**：
+- `insert()` 调用时实时写库（每 1000 行批量执行），不在内存积累全部数据
+- 表按 `tables` 数组顺序执行，先创建的表先入库（满足外键约束）
+- 每累计 10,000 行自动提交事务，避免长时间锁表
+- `lastId()` 返回当前表最近一次批量写入的自增 ID（用于外键引用）
+- 流式响应逐表回报造数进度
+- Lua 沙箱禁用 `os`/`io`/`debug`/`package`/`require` 等危险模块
+
+**内置 Lua 辅助函数**：`insert(tableName, rowTable)` / `lastId()` / `random_int(min, max)` / `random_float(min, max)` / `random_string(length)` / `random_date(start, end)` / `random_email()` / `random_phone()` / `random_name()` / `random_enum(...)` / `random_uuid()`
+
+```json
+{"id":"30","category":"DATA","action":"GENERATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tables":[{"tableName":"users","count":100,"script":"for i = 1, count do\n  insert('users', {\n    name = 'user_' .. i,\n    email = random_email(),\n    age = random_int(18, 65)\n  })\nend"},{"tableName":"orders","count":500,"script":"for i = 1, count do\n  insert('orders', {\n    user_id = random_int(1, 100),\n    amount = random_int(100, 99999) / 100.0,\n    status = random_enum('pending', 'paid', 'shipped'),\n    created_at = random_date('2024-01-01', '2024-12-31')\n  })\nend"}]}}
+```
+
+响应（流式，每张表一条进度，含执行的 INSERT SQL）：
+```
+{"id":"30","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":100,"total":2,"index":1,"sql":"INSERT INTO `users` (`name`, `email`, `age`) VALUES (?, ?, ?)"}}
+{"id":"30","success":true,"stream":true,"end":false,"data":{"table":"orders","inserted":500,"total":2,"index":2,"sql":"INSERT INTO `orders` (`user_id`, `amount`, `status`, `created_at`) VALUES (?, ?, ?, ?)"}}
+{"id":"30","success":true,"stream":true,"end":true,"data":null}
+```
+
+外键引用示例（通过 `lastId()` 获取父表自增 ID）：
+```json
+{"tables":[{"tableName":"categories","count":10,"script":"for i = 1, count do\n  insert('categories', { name = '分类_' .. i })\nend"},{"tableName":"products","count":100,"script":"local catId = lastId()\nfor i = 1, count do\n  insert('products', {\n    category_id = random_int(catId - 9, catId),\n    name = '商品_' .. random_string(6),\n    price = random_int(100, 99999) / 100.0\n  })\nend"}]}
+```
+
+---
+
 ### SYSTEM — 系统信息
 
 **获取 JVM 运行时信息（无需数据库连接，`connection` 字段仍需传递但会被忽略）**
@@ -555,6 +587,7 @@ payload 含 `password` 且无 `privileges` 字段时走密码修改路径。`hos
 - **安全防护**：强制使用 PreparedStatement 防止 SQL 注入
 - **JDBC 游标流式**：大结果集通过服务端游标逐行拉取，避免客户端内存溢出
 - **日志隔离**：所有日志输出到滚动文件 (`~/.config/idb/logs/idb-engine.log`)，不污染 stdout JSON 流
+- **嵌入式造数引擎**：LuaJIT 脚本驱动，支持多表按序造数、外键引用、沙箱隔离、流式进度回报
 
 ## 技术栈
 
@@ -565,4 +598,5 @@ payload 含 `password` 且无 `privileges` 字段时走密码修改路径。`hos
 - MySQL Connector/J 9.7.0
 - PostgreSQL JDBC 42.7.11
 - kotlinx.serialization 1.11.0
+- LuaJIT 4.1.0 (luajava — 嵌入式脚本引擎，造数功能)
 - SLF4J 2.0.18 + Logback 1.5.13

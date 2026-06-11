@@ -17,6 +17,7 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 - **数据序列化**：`kotlinx.serialization` 1.11.0 (无反射、轻量化、原生支持 Kotlin 协程与数据类)
 - **日志框架**：SLF4J 2.0.18 + Logback 1.5.13 (日志输出到本地滚动文件，不污染 stdout)
 - **构建与分发**：Gradle + ShadowJar 9.3.0+ (构建为瘦包 + 外部依赖，后续可通过 GraalVM Native Image 编译为无 JRE 依赖的二进制文件)
+- **脚本引擎**：LuaJIT 4.1.0 via luajava (嵌入式 Lua 脚本引擎，用于造数功能中的数据生成规则定义)
 
 ## 3. 核心机制设计 (Core Mechanisms)
 
@@ -52,7 +53,7 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 {
   "id": "req-uuid-1234",
   "category": "SCHEMA | USER | TABLE | DATA | SQL | SYSTEM",
-  "action": "LIST | CREATE | UPDATE | DELETE | EXECUTE | GET_DDL | INFO | GRANTS",
+  "action": "LIST | CREATE | UPDATE | DELETE | EXECUTE | GET_DDL | INFO | GRANTS | GENERATE",
   "connection": {
     "driver": "mysql | postgresql",
     "host": "127.0.0.1",
@@ -534,6 +535,85 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
 }
 ```
 
+### 5.7 造数引擎 (Data Generation) — `category: "DATA"`, `action: "GENERATE"`
+
+基于嵌入式 LuaJIT 脚本引擎的造数功能，支持单表或多表按序造数（自动处理外键依赖）。Lua 脚本由调用方（Go/Wails 前端）提供，每张表独立执行一个脚本。
+
+**核心机制**：
+- 每张表创建独立的 Lua 虚拟机，`insert()` 调用时**实时写库**（每 1000 行 `executeBatch`），不在内存中积累全部数据
+- 表按 `tables` 数组顺序执行，先创建的表数据先入库（满足外键约束）
+- 每累计 10,000 行自动 `commit()` 一次，避免长时间锁表；每张表执行完毕后再 `commit()` 一次
+- 通过 `RETURN_GENERATED_KEYS` 获取自增主键，`lastId()` 返回当前表最近一次 flush 的自增 ID，供后续表或行引用
+- 使用流式响应逐表回报造数进度
+
+**Lua 沙箱**：禁用 `os`、`io`、`debug`、`package`、`require`、`loadfile`、`dofile`、`loadstring`、`rawget`、`rawset`、`rawequal`、`setfenv`、`getfenv`、`newproxy` 等危险模块。保留 `math`、`string`、`table`、`tostring`、`tonumber`、`type`、`pairs`、`ipairs`、`pcall`、`error`、`assert` 等安全模块。
+
+**Lua 内置辅助函数**：
+
+| 函数 | 说明 |
+|---|---|
+| `insert(tableName, rowTable)` | 收集一行待插入数据（Lua table → JDBC 行） |
+| `lastId()` | 获取上一张表最后插入的自增 ID（用于外键引用，无自增 ID 时返回 nil） |
+| `random_int(min, max)` | 随机整数 [min, max] |
+| `random_float(min, max)` | 随机浮点数 [min, max) |
+| `random_string(length)` | 指定长度的随机字母数字字符串 |
+| `random_date(start, end)` | 两个日期之间的随机日期（参数格式 `YYYY-MM-DD`，返回同格式字符串） |
+| `random_email()` | 随机邮箱地址（`user_<random>@example.com`） |
+| `random_phone()` | 随机 11 位手机号 |
+| `random_name()` | 随机姓名（内置中文 + 英文姓名池） |
+| `random_enum(...)` | 从可变参数中随机选取一个值 |
+| `random_uuid()` | 随机 UUID 字符串 |
+
+```json
+// 请求
+{
+  "id": "req-gen-001",
+  "category": "DATA",
+  "action": "GENERATE",
+  "connection": {"driver": "mysql", "host": "127.0.0.1", "port": 3306, "user": "root", "password": "secret", "database": "test_db"},
+  "payload": {
+    "tables": [
+      {
+        "tableName": "users",
+        "count": 100,
+        "script": "for i = 1, count do\n  insert('users', {\n    name = 'user_' .. i,\n    email = random_email(),\n    age = random_int(18, 65),\n    phone = random_phone(),\n    created_at = random_date('2024-01-01', '2024-12-31')\n  })\nend"
+      },
+      {
+        "tableName": "orders",
+        "count": 500,
+        "script": "for i = 1, count do\n  insert('orders', {\n    user_id = random_int(1, 100),\n    amount = random_int(100, 99999) / 100.0,\n    status = random_enum('pending', 'paid', 'shipped', 'completed'),\n    created_at = random_date('2024-06-01', '2025-06-01')\n  })\nend"
+      }
+    ]
+  }
+}
+
+// 响应序列（流式，每张表一条进度 + 结束标记，sql 为该表使用的 INSERT 语句模板）
+{"id":"req-gen-001","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":100,"total":2,"index":1,"sql":"INSERT INTO `users` (`name`, `email`, `age`, `phone`, `created_at`) VALUES (?, ?, ?, ?, ?)"}}
+{"id":"req-gen-001","success":true,"stream":true,"end":false,"data":{"table":"orders","inserted":500,"total":2,"index":2,"sql":"INSERT INTO `orders` (`user_id`, `amount`, `status`, `created_at`) VALUES (?, ?, ?, ?)"}}
+{"id":"req-gen-001","success":true,"stream":true,"end":true,"data":null}
+```
+
+**外键引用示例**（先造父表，再造子表，通过 `lastId()` 获取父表自增 ID）：
+
+```json
+{
+  "payload": {
+    "tables": [
+      {
+        "tableName": "categories",
+        "count": 10,
+        "script": "for i = 1, count do\n  insert('categories', {\n    name = '分类_' .. i,\n    description = random_string(20)\n  })\nend"
+      },
+      {
+        "tableName": "products",
+        "count": 100,
+        "script": "local catId = lastId()\nfor i = 1, count do\n  insert('products', {\n    category_id = random_int(catId - 9, catId),\n    name = '商品_' .. random_string(6),\n    price = random_int(100, 99999) / 100.0\n  })\nend"
+      }
+    ]
+  }
+}
+```
+
 ## 6. 安全与健壮性保障 (Security & Reliability)
 
 1. **防进程孤儿 (Graceful Shutdown)**：
@@ -584,6 +664,7 @@ idb_engine/                          Gradle 多模块项目
         │   ├── SchemaHandler.kt
         │   ├── TableHandler.kt
         │   ├── DataHandler.kt
+        │   ├── GenerateHandler.kt     造数引擎（LuaJIT 脚本 + 批量插入 + 事务）
         │   ├── UserHandler.kt
         │   ├── SqlEngineHandler.kt
         │   └── SystemHandler.kt       JVM 系统信息采集
@@ -592,12 +673,13 @@ idb_engine/                          Gradle 多模块项目
         │   └── DialectLoader.kt       扫描 dialects/ 目录，ServiceLoader 加载方言插件
         └── models/                    数据契约
             ├── Request.kt             Request / Category / Action / ConnectionConfig
-            └── Response.kt            Response
+            ├── Response.kt            Response
+            └── GenerateModels.kt      GeneratePayload / TableGenerateConfig
 
 构建产物结构：
 engine/build/libs/
 ├── idb-engine.jar       主引擎瘦包
-├── libs/                运行时依赖（Kotlin、HikariCP、日志、api）
+├── libs/                运行时依赖（Kotlin、HikariCP、日志、api、LuaJIT）
 ├── drivers/             JDBC 驱动（mysql-connector-j、postgresql）
 └── dialects/            方言插件
     ├── idb-dialect-mysql.jar
@@ -616,7 +698,12 @@ engine/build/libs/
 ```
 engine/build/libs/
 ├── idb-engine.jar       主引擎瘦包
-├── libs/                运行时依赖（Kotlin、HikariCP、日志、api）
+├── libs/                运行时依赖
+│   ├── luajava-4.1.0.jar
+│   ├── luajit-4.1.0.jar
+│   ├── luajit-platform-4.1.0-natives-desktop.jar
+│   ├── HikariCP-7.0.2.jar
+│   ├── ...
 ├── drivers/             JDBC 驱动
 │   ├── mysql-connector-j-9.7.0.jar
 │   └── postgresql-42.7.11.jar
@@ -673,6 +760,7 @@ response := scanner.Text()
 - SYSTEM INFO 返回 JVM 运行时信息（版本、内存、CPU、PID、运行时长等）
 - PostgreSQL 方言全面优化（listSchemas 用 pg_namespace、listTables 含视图、listUsers 用 pg_roles、MODIFY_COLUMN 补齐 nullable/default、GET_DDL 含约束与索引、正则预编译）
 - 用户管理完整 CRUD（CREATE/DELETE 用户、修改密码、查询指定用户权限，MySQL 与 PostgreSQL 均已实现）
+- 造数引擎（LuaJIT 嵌入式脚本 + 多表按序造数 + 外键引用 `lastId()` + 批量插入 + 单事务 + Lua 沙箱 + 流式进度回报）
 
 ⏳ 待扩展：
 - GraalVM Native Image 编译
