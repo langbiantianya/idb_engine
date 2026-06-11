@@ -29,10 +29,8 @@ object GenerateHandler {
     )
     private val ALPHANUMERIC = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
-    /** 每 accumulate BATCH_SIZE 行后 executeBatch */
+    /** 每 accumulate BATCH_SIZE 行后 executeBatch + commit */
     private const val BATCH_SIZE = 1000
-    /** 每累计 COMMIT_THRESHOLD 行后 commit 一次，释放数据库锁 */
-    private const val COMMIT_THRESHOLD = 10_000
 
     /**
      * 造数状态：跨 insert() / flushBatch() 共享的可变上下文
@@ -67,10 +65,8 @@ object GenerateHandler {
             totalInserted += batchCount
             batchCount = 0
 
-            // 累计达到阈值时 commit，释放数据库锁
-            if (totalInserted % COMMIT_THRESHOLD < BATCH_SIZE) {
-                conn.commit()
-            }
+            // 每批立即 commit，避免长时间锁表
+            conn.commit()
         }
     }
 
@@ -104,12 +100,9 @@ object GenerateHandler {
                         L.run(tableConfig.script)
                     }
 
-                    // 脚本执行完毕，刷掉剩余批次
+                    // 脚本执行完毕，刷掉剩余批次（内部已 commit）
                     state.flushBatch()
-                    // 关闭 preparedStmt
                     state.currentStmt?.close()
-
-                    conn.commit()
 
                     onProgress?.invoke(buildJsonObject {
                         put("table", tableConfig.tableName)
