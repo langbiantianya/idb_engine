@@ -509,10 +509,10 @@ payload 含 `password` 且无 `privileges` 字段时走密码修改路径。`hos
 基于嵌入式 LuaJIT 脚本的批量造数功能，支持多表按序生成（自动处理外键依赖）。Lua 脚本由调用方提供，每张表独立执行。
 
 **核心机制**：
-- `insert()` 调用时实时写库（每 1000 行 executeBatch + 立即 commit），不在内存积累全部数据，不长时间锁表
+- `insert()` 调用时逐条写库（单条 INSERT + 立即返回自增 ID），不在内存积累数据
+- 每条插入后实时流式回报进度（Go 端可即时展示当前行数）
 - 表按 `tables` 数组顺序执行，先创建的表先入库（满足外键约束）
-- `lastId()` 返回当前表最近一次批量写入的自增 ID（用于外键引用）
-- 流式响应逐表回报造数进度
+- `lastId()` 返回当前表最近一条插入的自增 ID（用于外键引用）
 - Lua 沙箱禁用 `os`/`io`/`debug`/`package`/`require` 等危险模块
 
 **内置 Lua 辅助函数**：`insert(tableName, rowTable)` / `lastId()` / `random_int(min, max)` / `random_float(min, max)` / `random_string(length)` / `random_date(start, end)` / `random_email()` / `random_phone()` / `random_name()` / `random_enum(...)` / `random_uuid()`
@@ -520,19 +520,22 @@ payload 含 `password` 且无 `privileges` 字段时走密码修改路径。`hos
 **Lua 引擎版本**：通过 `payload.luaVersion` 选择，默认 `"luajit"`，可选 `"5.1"` / `"5.2"` / `"5.3"` / `"5.4"` / `"5.5"`。
 
 ```json
-{"id":"30","category":"DATA","action":"GENERATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"luaVersion":"5.4","tables":[{"tableName":"users","count":100,"script":"for i = 1, count do\n  insert('users', {\n    name = 'user_' .. i,\n    email = random_email(),\n    age = random_int(18, 65)\n  })\nend"},{"tableName":"orders","count":500,"script":"for i = 1, count do\n  insert('orders', {\n    user_id = random_int(1, 100),\n    amount = random_int(100, 99999) / 100.0,\n    status = random_enum('pending', 'paid', 'shipped'),\n    created_at = random_date('2024-01-01', '2024-12-31')\n  })\nend"}]}}
+{"id":"30","category":"DATA","action":"GENERATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"luaVersion":"5.4","tables":[{"count":100,"script":"for i = 1, count do\n  insert('users', {\n    name = 'user_' .. i,\n    email = random_email(),\n    age = random_int(18, 65)\n  })\nend"},{"count":500,"script":"for i = 1, count do\n  insert('orders', {\n    user_id = random_int(1, 100),\n    amount = random_int(100, 99999) / 100.0,\n    status = random_enum('pending', 'paid', 'shipped'),\n    created_at = random_date('2024-01-01', '2024-12-31')\n  })\nend"}]}}
 ```
 
-响应（流式，每张表一条进度，含执行的 INSERT SQL）：
+响应（流式，每插入一行回报进度，含执行的 INSERT SQL）：
 ```
-{"id":"30","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":100,"total":2,"index":1,"sql":"INSERT INTO `users` (`name`, `email`, `age`) VALUES (?, ?, ?)"}}
-{"id":"30","success":true,"stream":true,"end":false,"data":{"table":"orders","inserted":500,"total":2,"index":2,"sql":"INSERT INTO `orders` (`user_id`, `amount`, `status`, `created_at`) VALUES (?, ?, ?, ?)"}}
+{"id":"30","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":1,"total":2,"index":1,"sql":"INSERT INTO `users` (`name`, `email`, `age`) VALUES (?, ?, ?)"}}
+{"id":"30","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":2,"total":2,"index":1,"sql":"INSERT INTO `users` (`name`, `email`, `age`) VALUES (?, ?, ?)"}}
+...
+{"id":"30","success":true,"stream":true,"end":false,"data":{"table":"orders","inserted":1,"total":2,"index":2,"sql":"INSERT INTO `orders` (`user_id`, `amount`, `status`, `created_at`) VALUES (?, ?, ?, ?)"}}
+...
 {"id":"30","success":true,"stream":true,"end":true,"data":null}
 ```
 
 外键引用示例（通过 `lastId()` 获取父表自增 ID）：
 ```json
-{"tables":[{"tableName":"categories","count":10,"script":"for i = 1, count do\n  insert('categories', { name = '分类_' .. i })\nend"},{"tableName":"products","count":100,"script":"local catId = lastId()\nfor i = 1, count do\n  insert('products', {\n    category_id = random_int(catId - 9, catId),\n    name = '商品_' .. random_string(6),\n    price = random_int(100, 99999) / 100.0\n  })\nend"}]}
+{"tables":[{"count":10,"script":"for i = 1, count do\n  insert('categories', { name = '分类_' .. i })\nend"},{"count":100,"script":"local catId = lastId()\nfor i = 1, count do\n  insert('products', {\n    category_id = random_int(catId - 9, catId),\n    name = '商品_' .. random_string(6),\n    price = random_int(100, 99999) / 100.0\n  })\nend"}]}
 ```
 
 ---

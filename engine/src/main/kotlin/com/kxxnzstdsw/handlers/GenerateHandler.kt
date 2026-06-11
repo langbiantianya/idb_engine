@@ -5,6 +5,7 @@ import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.models.*
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import party.iroiro.luajava.JFunction
@@ -34,44 +35,25 @@ object GenerateHandler {
     )
     private val ALPHANUMERIC = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
-    /** 每 accumulate BATCH_SIZE 行后 executeBatch + commit */
-    private const val BATCH_SIZE = 1000
-
     /**
-     * 造数状态：跨 insert() / flushBatch() 共享的可变上下文
+     * 造数状态：跨 insert() / lastId() 共享的可变上下文
      */
     private class GenerateState(
         val conn: Connection,
         val dialect: DatabaseDialect,
-        val tableName: String,
+        val scriptIndex: Int,
+        val totalScripts: Int,
+        val onProgress: (suspend (JsonElement) -> Unit)?,
+        var currentTable: String = "",
         var currentStmt: PreparedStatement? = null,
         var currentColumns: List<String>? = null,
         var currentSql: String = "",
-        var batchCount: Int = 0,
         var totalInserted: Long = 0,
         var lastGeneratedId: Long? = null
     ) {
-        fun flushBatch() {
-            val stmt = currentStmt ?: return
-            if (batchCount == 0) return
-
-            stmt.executeBatch()
-
-            try {
-                stmt.generatedKeys.use { rs ->
-                    while (rs.next()) {
-                        lastGeneratedId = rs.getLong(1)
-                    }
-                }
-            } catch (e: Exception) {
-                logger.debug("Could not retrieve generated keys: ${e.message}")
-            }
-
-            totalInserted += batchCount
-            batchCount = 0
-
-            // 每批立即 commit，避免长时间锁表
-            conn.commit()
+        fun closeStmt() {
+            currentStmt?.close()
+            currentStmt = null
         }
     }
 
@@ -89,13 +71,14 @@ object GenerateHandler {
         val dialect = DialectLoader.getDialect(config.driver)
 
         connection.use { conn ->
-            val originalAutoCommit = conn.autoCommit
-            conn.autoCommit = false
             try {
                 for ((index, tableConfig) in generatePayload.tables.withIndex()) {
-                    val state = GenerateState(conn = conn, dialect = dialect, tableName = tableConfig.tableName)
+                    val state = GenerateState(
+                        conn = conn, dialect = dialect,
+                        scriptIndex = index, totalScripts = generatePayload.tables.size,
+                        onProgress = onProgress
+                    )
 
-                    // 创建 Lua VM（按 luaVersion 选择引擎），执行脚本（insert 实时写库）
                     createLuaEngine(generatePayload.luaVersion).use { L ->
                         L.openLibraries()
                         applySandbox(L)
@@ -105,23 +88,10 @@ object GenerateHandler {
                         L.run(tableConfig.script)
                     }
 
-                    // 脚本执行完毕，刷掉剩余批次（内部已 commit）
-                    state.flushBatch()
-                    state.currentStmt?.close()
-
-                    onProgress?.invoke(buildJsonObject {
-                        put("table", tableConfig.tableName)
-                        put("inserted", state.totalInserted)
-                        put("total", generatePayload.tables.size)
-                        put("index", index + 1)
-                        put("sql", state.currentSql)
-                    })
+                    state.closeStmt()
                 }
             } catch (e: Exception) {
-                conn.rollback()
                 throw e
-            } finally {
-                conn.autoCommit = originalAutoCommit
             }
         }
 
@@ -131,10 +101,6 @@ object GenerateHandler {
         }
     }
 
-    /**
-     * 按版本标识创建 Lua 引擎实例
-     * 支持: "luajit"(默认), "5.1", "5.2", "5.3", "5.4", "5.5"
-     */
     private fun createLuaEngine(version: String): Lua = when (version.lowercase()) {
         "luajit", "jit" -> LuaJit()
         "5.1", "lua51", "lua5.1" -> Lua51()
@@ -148,13 +114,12 @@ object GenerateHandler {
     }
 
     private fun applySandbox(L: Lua) {
-        val dangerous = listOf(
+        for (name in listOf(
             "os", "io", "debug", "package", "require",
             "loadfile", "dofile", "loadstring", "load",
             "rawget", "rawset", "rawequal",
             "setfenv", "getfenv", "newproxy"
-        )
-        for (name in dangerous) {
+        )) {
             L.pushNil()
             L.setGlobal(name)
         }
@@ -181,13 +146,9 @@ object GenerateHandler {
         return result
     }
 
-    /**
-     * 将一行绑定到 PreparedStatement 的当前批次
-     */
     private fun bindRow(stmt: PreparedStatement, columns: List<String>, row: Map<String, Any?>) {
         for ((i, col) in columns.withIndex()) {
-            val v = row[col]
-            when (v) {
+            when (val v = row[col]) {
                 is Long    -> stmt.setLong(i + 1, v)
                 is Double  -> stmt.setDouble(i + 1, v)
                 is Boolean -> stmt.setBoolean(i + 1, v)
@@ -199,42 +160,58 @@ object GenerateHandler {
 
     private fun registerHelpers(L: Lua, state: GenerateState) {
 
-        // ── insert(tableName, rowTable) ─ 实时写库 ───────────────────────────
+        // ── insert(tableName, rowTable) — 逐条插入 + 实时流式回报 ──
         L.push(JFunction { lua ->
             if (!lua.isTable(2)) return@JFunction 0
 
+            val tableName = lua.toString(1) ?: return@JFunction 0
             val row = readLuaTable(lua, 2)
             val columns = state.currentColumns
 
-            // 首次调用或列结构变化：刷旧批次，创建新 PreparedStatement
-            if (columns == null || row.keys.toList() != columns) {
-                state.flushBatch()
-                state.currentStmt?.close()
-
+            // 表名或列结构变化时重建 PreparedStatement
+            if (tableName != state.currentTable || columns == null || row.keys.toList() != columns) {
+                state.closeStmt()
                 val cols = row.keys.toList()
                 val colList = cols.joinToString(", ") { state.dialect.quoteIdentifier(it) }
                 val placeholders = cols.joinToString(", ", "(", ")") { "?" }
-                val sql = "INSERT INTO ${state.dialect.quoteIdentifier(state.tableName)} ($colList) VALUES $placeholders"
-
+                val sql = "INSERT INTO ${state.dialect.quoteIdentifier(tableName)} ($colList) VALUES $placeholders"
                 state.currentStmt = state.conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)
+                state.currentTable = tableName
                 state.currentColumns = cols
                 state.currentSql = sql
-                state.batchCount = 0
             }
 
             bindRow(state.currentStmt!!, state.currentColumns!!, row)
-            state.currentStmt!!.addBatch()
-            state.batchCount++
+            state.currentStmt!!.executeUpdate()
 
-            // 达到批次大小 → 执行并 commit
-            if (state.batchCount >= BATCH_SIZE) {
-                state.flushBatch()
+            // 获取自增 ID
+            try {
+                state.currentStmt!!.generatedKeys.use { rs ->
+                    if (rs.next()) state.lastGeneratedId = rs.getLong(1)
+                }
+            } catch (e: Exception) {
+                logger.debug("Could not retrieve generated key: ${e.message}")
+            }
+
+            state.totalInserted++
+
+            // 实时流式回报
+            state.onProgress?.let { cb ->
+                runBlocking {
+                    cb(buildJsonObject {
+                        put("table", state.currentTable)
+                        put("inserted", state.totalInserted)
+                        put("total", state.totalScripts)
+                        put("index", state.scriptIndex + 1)
+                        put("sql", state.currentSql)
+                    })
+                }
             }
             0
         })
         L.setGlobal("insert")
 
-        // ── lastId() ─ 当前表最近一次 flush 获取的自增 ID ──────────────────
+        // ── lastId() — 当前表最近一条插入的自增 ID ──
         L.push(JFunction { lua ->
             val id = state.lastGeneratedId
             if (id != null) lua.push(id) else lua.pushNil()
@@ -242,11 +219,9 @@ object GenerateHandler {
         })
         L.setGlobal("lastId")
 
-        // ── random 辅助函数 ───────────────────────────────────────────────
+        // ── random 辅助函数 ──
         L.push(JFunction { lua ->
-            val min = lua.toInteger(1).toInt()
-            val max = lua.toInteger(2).toInt()
-            lua.push(Random.nextLong(min.toLong(), max.toLong() + 1))
+            lua.push(Random.nextLong(lua.toInteger(1), lua.toInteger(2) + 1))
             1
         })
         L.setGlobal("random_int")
@@ -270,8 +245,8 @@ object GenerateHandler {
             val start = LocalDate.parse(lua.toString(1) ?: "2020-01-01", DateTimeFormatter.ISO_LOCAL_DATE)
             val end   = LocalDate.parse(lua.toString(2) ?: "2025-12-31", DateTimeFormatter.ISO_LOCAL_DATE)
             val days  = java.time.temporal.ChronoUnit.DAYS.between(start, end).toInt()
-            val d = if (days > 0) Random.nextInt(0, days + 1) else 0
-            lua.push(start.plusDays(d.toLong()).format(DateTimeFormatter.ISO_LOCAL_DATE))
+            lua.push(start.plusDays((if (days > 0) Random.nextInt(0, days + 1) else 0).toLong())
+                .format(DateTimeFormatter.ISO_LOCAL_DATE))
             1
         })
         L.setGlobal("random_date")

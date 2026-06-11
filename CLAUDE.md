@@ -540,10 +540,10 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
 基于嵌入式 LuaJIT 脚本引擎的造数功能，支持单表或多表按序造数（自动处理外键依赖）。Lua 脚本由调用方（Go/Wails 前端）提供，每张表独立执行一个脚本。
 
 **核心机制**：
-- 每张表创建独立的 Lua 虚拟机，`insert()` 调用时**实时写库**（每 1000 行 `executeBatch` + 立即 `commit`），不在内存中积累全部数据，不长时间锁表
+- 每张表创建独立的 Lua 虚拟机，`insert()` 调用时**逐条写库**（`executeUpdate` 单条 INSERT），不在内存中积累数据
+- 每条插入后实时流式回报进度（`stream: true`，`data` 含 `table`/`inserted`/`sql`）
 - 表按 `tables` 数组顺序执行，先创建的表数据先入库（满足外键约束）
-- 通过 `RETURN_GENERATED_KEYS` 获取自增主键，`lastId()` 返回当前表最近一次 flush 的自增 ID，供后续表或行引用
-- 使用流式响应逐表回报造数进度
+- 通过 `RETURN_GENERATED_KEYS` 获取自增主键，`lastId()` 返回当前表最近一条插入的自增 ID，供后续表或行引用
 
 **Lua 沙箱**：禁用 `os`、`io`、`debug`、`package`、`require`、`loadfile`、`dofile`、`loadstring`、`rawget`、`rawset`、`rawequal`、`setfenv`、`getfenv`、`newproxy` 等危险模块。保留 `math`、`string`、`table`、`tostring`、`tonumber`、`type`、`pairs`、`ipairs`、`pcall`、`error`、`assert` 等安全模块。
 
@@ -578,12 +578,10 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
     "luaVersion": "5.4",
     "tables": [
       {
-        "tableName": "users",
         "count": 100,
         "script": "for i = 1, count do\n  insert('users', {\n    name = 'user_' .. i,\n    email = random_email(),\n    age = random_int(18, 65),\n    phone = random_phone(),\n    created_at = random_date('2024-01-01', '2024-12-31')\n  })\nend"
       },
       {
-        "tableName": "orders",
         "count": 500,
         "script": "for i = 1, count do\n  insert('orders', {\n    user_id = random_int(1, 100),\n    amount = random_int(100, 99999) / 100.0,\n    status = random_enum('pending', 'paid', 'shipped', 'completed'),\n    created_at = random_date('2024-06-01', '2025-06-01')\n  })\nend"
       }
@@ -591,9 +589,12 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
   }
 }
 
-// 响应序列（流式，每张表一条进度 + 结束标记，sql 为该表使用的 INSERT 语句模板）
-{"id":"req-gen-001","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":100,"total":2,"index":1,"sql":"INSERT INTO `users` (`name`, `email`, `age`, `phone`, `created_at`) VALUES (?, ?, ?, ?, ?)"}}
-{"id":"req-gen-001","success":true,"stream":true,"end":false,"data":{"table":"orders","inserted":500,"total":2,"index":2,"sql":"INSERT INTO `orders` (`user_id`, `amount`, `status`, `created_at`) VALUES (?, ?, ?, ?)"}}
+// 响应序列（流式，每插入一行回报一次进度，sql 为该表使用的 INSERT 语句模板）
+{"id":"req-gen-001","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":1,"total":2,"index":1,"sql":"INSERT INTO `users` (`name`, `email`, `age`, `phone`, `created_at`) VALUES (?, ?, ?, ?, ?)"}}
+{"id":"req-gen-001","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":2,"total":2,"index":1,"sql":"INSERT INTO `users` (`name`, `email`, `age`, `phone`, `created_at`) VALUES (?, ?, ?, ?, ?)"}}
+...
+{"id":"req-gen-001","success":true,"stream":true,"end":false,"data":{"table":"orders","inserted":1,"total":2,"index":2,"sql":"INSERT INTO `orders` (`user_id`, `amount`, `status`, `created_at`) VALUES (?, ?, ?, ?)"}}
+...
 {"id":"req-gen-001","success":true,"stream":true,"end":true,"data":null}
 ```
 
@@ -604,12 +605,10 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
   "payload": {
     "tables": [
       {
-        "tableName": "categories",
         "count": 10,
         "script": "for i = 1, count do\n  insert('categories', {\n    name = '分类_' .. i,\n    description = random_string(20)\n  })\nend"
       },
       {
-        "tableName": "products",
         "count": 100,
         "script": "local catId = lastId()\nfor i = 1, count do\n  insert('products', {\n    category_id = random_int(catId - 9, catId),\n    name = '商品_' .. random_string(6),\n    price = random_int(100, 99999) / 100.0\n  })\nend"
       }
