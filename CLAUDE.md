@@ -10,13 +10,14 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 
 ## 2. 技术栈选型 (Technology Stack)
 
-- **核心语言**：Kotlin 2.3.21 / JDK 21
+- **核心语言**：Kotlin 2.4.0 / JDK 25
 - **异步框架**：kotlinx-coroutines 1.11.0 (协程实现非阻塞并发)
 - **数据库驱动**：原生 JDBC (MySQL Connector/J 9.7.0, PostgreSQL JDBC Driver 42.7.11)
 - **连接池管理**：HikariCP 7.0.2 (业界最高性能、资源占用低的连接池)
 - **数据序列化**：`kotlinx.serialization` 1.11.0 (无反射、轻量化、原生支持 Kotlin 协程与数据类)
 - **日志框架**：SLF4J 2.0.18 + Logback 1.5.13 (日志输出到本地滚动文件，不污染 stdout)
 - **构建与分发**：Gradle + ShadowJar 9.3.0+ (构建为瘦包 + 外部依赖，后续可通过 GraalVM Native Image 编译为无 JRE 依赖的二进制文件)
+- **脚本引擎**：LuaJIT 4.1.0 + Lua 5.1~5.5 via luajava (嵌入式 Lua 脚本引擎，用于造数功能中的数据生成规则定义，支持多版本切换)
 
 ## 3. 核心机制设计 (Core Mechanisms)
 
@@ -51,8 +52,8 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 ```json
 {
   "id": "req-uuid-1234",
-  "category": "SCHEMA | USER | TABLE | DATA | SQL",
-  "action": "LIST | CREATE | UPDATE | DELETE | EXECUTE | GET_DDL",
+  "category": "SCHEMA | USER | TABLE | DATA | SQL | SYSTEM",
+  "action": "LIST | CREATE | UPDATE | DELETE | EXECUTE | GET_DDL | INFO | GRANTS | GENERATE",
   "connection": {
     "driver": "mysql | postgresql",
     "host": "127.0.0.1",
@@ -91,14 +92,19 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 ## 5. 功能模块详细设计 (Feature Modules)
 
-为兼容 MySQL 与 PostgreSQL，采用**方言抽象层 (Dialect Abstraction Layer)** 设计模式：
+为兼容 MySQL 与 PostgreSQL，采用**方言抽象层 (Dialect Abstraction Layer)** + **SPI 插件动态加载**设计模式：
 
-- **DatabaseDialect 接口**：定义所有数据库特定操作的抽象方法
-- **MySQLDialect / PostgreSQLDialect**：分别实现 MySQL 和 PostgreSQL 的具体方言
-- **DialectFactory**：根据 `ConnectionConfig.driver` 实例化对应的方言实现
-- **Handler 层**：通过 `DialectFactory.getDialect(config.driver)` 获取方言实例，调用统一接口
+- **DatabaseDialect SPI 接口**（`api` 模块）：定义所有数据库特定操作的抽象方法，通过 `driverName` 属性声明所处理的驱动
+- **MySQLDialect / PostgreSQLDialect**（独立插件模块）：分别实现 MySQL 和 PostgreSQL 的具体方言，打包为独立 JAR
+- **DialectLoader**（`engine` 模块）：启动时扫描 `dialects/` 目录，通过 `ServiceLoader<DatabaseDialect>` 自动发现并注册所有方言插件
+- **Handler 层**：通过 `DialectLoader.getDialect(driverName)` 获取方言实例，调用统一接口
 
-这种设计使得新增数据库支持（如 Oracle、SQL Server）只需实现 `DatabaseDialect` 接口，无需修改 Handler 层代码。
+这种设计使得新增数据库支持（如 Oracle、SQL Server）只需：
+1. 实现 `DatabaseDialect` 接口
+2. 在 `META-INF/services/` 中声明实现类
+3. 将 JAR 放入 `dialects/` 目录
+
+无需修改或重新编译主引擎代码。
 
 ### 5.1 架构管理 (Schema Management) — `category: "SCHEMA"`
 
@@ -106,7 +112,7 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 **LIST** — 获取可用架构列表
 
-- MySQL 走 `SHOW DATABASES`；PG 走 `information_schema.schemata`（过滤 `pg_catalog` / `information_schema`）
+- MySQL 走 `SHOW DATABASES`；PG 走 `pg_catalog.pg_namespace`（过滤 `pg_%` 系统 schema 和 `information_schema`）
 - payload 为空对象
 
 ```json
@@ -119,9 +125,14 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 **CREATE** — 创建 Database / Schema
 
+可选 `options` 对象（MySQL 支持 `charset`、`collate`，PostgreSQL 忽略）：
+
 ```json
-// 请求 payload
+// 请求 payload（基础）
 {"name": "new_db"}
+
+// 请求 payload（带字符集选项，仅 MySQL 有效）
+{"name": "new_db", "options": {"charset": "utf8mb4", "collate": "utf8mb4_unicode_ci"}}
 
 // 响应 data
 {"created": "new_db"}
@@ -142,15 +153,74 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 **LIST** — 查询数据库用户列表
 
 - MySQL 查 `mysql.user`，返回 `user` + `host`
-- PG 查 `pg_user`，返回 `user`
+- PG 查 `pg_roles`（`rolcanlogin = true`），返回 `user`
 - payload 为空对象
 
 ```json
+// 请求
+{"id":"req-002","category":"USER","action":"LIST","connection":{"driver":"mysql","host":"127.0.0.1","port":3306,"user":"root","password":"secret","database":"mysql"},"payload":{}}
+
 // MySQL 响应 data
 [{"user": "root", "host": "localhost"}, {"user": "app_user", "host": "%"}]
 
 // PostgreSQL 响应 data
 [{"user": "postgres"}, {"user": "app_user"}]
+```
+
+**LIST（查询指定用户权限）** — payload 含 `user` 字段时，返回该用户的权限列表
+
+```json
+// 请求 payload
+{"user": "dev", "host": "%"}
+```
+
+- MySQL 走 `SHOW GRANTS FOR 'user'@'host'`，返回授权语句列表
+- PostgreSQL 走 `information_schema.table_privileges`，返回 `schema` + `table` + `privilege`
+
+```json
+// MySQL 响应 data
+[{"grant": "GRANT SELECT ON `test_db`.* TO 'dev'@'%'"}, {"grant": "GRANT INSERT ON `test_db`.* TO 'dev'@'%'"}]
+
+// PostgreSQL 响应 data
+[{"schema": "public", "table": "users", "privilege": "SELECT"}, {"schema": "public", "table": "users", "privilege": "INSERT"}]
+```
+
+**GRANTS** — 查询指定用户被授权的所有表及权限（按 schema + table 聚合）
+
+```json
+// 请求 payload（host 仅 MySQL 使用，PostgreSQL 忽略，默认 "%"）
+{"user": "dev", "host": "%"}
+```
+
+- MySQL 解析 `SHOW GRANTS` 输出，过滤 `*.*` 全局授权，提取表级权限
+- PostgreSQL 聚合 `information_schema.table_privileges`
+
+```json
+// MySQL 响应 data
+[{"schema": "test_db", "table": "users", "privileges": "SELECT, INSERT"}, {"schema": "test_db", "table": "orders", "privileges": "SELECT"}]
+
+// PostgreSQL 响应 data
+[{"schema": "public", "table": "users", "privileges": "INSERT, SELECT"}, {"schema": "public", "table": "orders", "privileges": "SELECT"}]
+```
+
+**CREATE** — 创建数据库用户
+
+```json
+// 请求 payload（host 仅 MySQL 使用，PostgreSQL 忽略，默认 "%"）
+{"user": "new_user", "password": "secret123", "host": "%"}
+
+// 响应 data
+{"created": "new_user"}
+```
+
+**DELETE** — 删除数据库用户
+
+```json
+// 请求 payload（host 仅 MySQL 使用，PostgreSQL 忽略，默认 "%"）
+{"user": "old_user", "host": "%"}
+
+// 响应 data
+{"deleted": "old_user"}
 ```
 
 **UPDATE** — 授予或回收权限（`GRANT ... ON schema.* TO user` / `REVOKE ...`）
@@ -167,6 +237,19 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 // 响应 data（回收）
 {"user": "dev", "action": "revoked"}
+```
+
+**UPDATE（修改密码）** — payload 含 `password` 且无 `privileges` 时走密码修改路径
+
+- MySQL 走 `ALTER USER ... IDENTIFIED BY`
+- PostgreSQL 走 `ALTER USER ... PASSWORD`
+
+```json
+// 请求 payload
+{"user": "dev", "password": "new_secret", "host": "%"}
+
+// 响应 data
+{"user": "dev", "action": "password_changed"}
 ```
 
 ### 5.3 表结构元数据 (Table Metadata) — `category: "TABLE"`
@@ -195,10 +278,18 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 ]
 ```
 
-**CREATE** — 创建表，支持主键定义
+**CREATE** — 创建表，支持主键定义和表级选项
+
+可选 `options` 对象：
+- MySQL 支持：`engine`、`charset`、`collate`、`comment`
+- PostgreSQL 支持：`comment`（通过 `COMMENT ON TABLE` 实现，其余忽略）
+
+列定义支持 `autoIncrement: true`（仅对主键列有效）：
+- MySQL：生成 `INT AUTO_INCREMENT`
+- PostgreSQL：将 `INT` 替换为 `SERIAL`（`BIGINT` → `BIGSERIAL`）
 
 ```json
-// 请求 payload
+// 请求 payload（基础）
 {
   "tableName": "products",
   "columns": [
@@ -207,6 +298,27 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
     {"name": "price", "type": "DECIMAL", "nullable": true, "defaultValue": "0.00"},
     {"name": "created_at", "type": "TIMESTAMP", "nullable": true, "defaultValue": "CURRENT_TIMESTAMP"}
   ]
+}
+
+// 请求 payload（带自增主键）
+{
+  "tableName": "products",
+  "columns": [
+    {"name": "id", "type": "INT", "nullable": false, "isPrimaryKey": true, "autoIncrement": true},
+    {"name": "name", "type": "VARCHAR", "size": 255, "nullable": false}
+  ]
+}
+
+// 请求 payload（带表级选项）
+{
+  "tableName": "products",
+  "columns": [...],
+  "options": {
+    "engine": "InnoDB",
+    "charset": "utf8mb4",
+    "collate": "utf8mb4_unicode_ci",
+    "comment": "商品表"
+  }
 }
 
 // 响应 data
@@ -241,7 +353,7 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 {"tableName": "products", "operation": "DROP_COLUMN"}
 ```
 
-修改列（MySQL 使用 `CHANGE COLUMN`，PostgreSQL 使用 `ALTER COLUMN ... TYPE`），可选 `newName` 同时重命名：
+修改列（MySQL 使用 `CHANGE COLUMN`，PostgreSQL 使用 `ALTER COLUMN ... TYPE / SET NOT NULL / SET DEFAULT` 多子命令），可选 `newName` 同时重命名：
 ```json
 // 请求 payload（仅修改类型）
 {
@@ -263,7 +375,7 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 **GET_DDL** — 返回建表语句（CREATE TABLE DDL）
 
-- MySQL 使用 `SHOW CREATE TABLE`；PostgreSQL 从 `information_schema` 元数据重建
+- MySQL 使用 `SHOW CREATE TABLE`；PostgreSQL 从 `information_schema` + `pg_catalog` 重建（含主键、UNIQUE、CHECK 约束及索引）
 
 ```json
 // 请求 payload
@@ -323,7 +435,7 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 }
 ```
 
-**LIST（流式全量）** — `pageSize: 0` 触发流式模式，通过 JDBC fetchSize 逐行读取，防止 OOM。一条请求产生多行响应：
+**LIST（流式全量）** — `pageSize: 0` 触发流式模式，通过 JDBC 游标（`TYPE_FORWARD_ONLY` + `CONCUR_READ_ONLY` + `fetchSize=100`）逐行读取，防止 OOM。PostgreSQL 端需临时关闭 `autoCommit` 以启用服务端游标，读取完毕后恢复。一条请求产生多行响应：
 
 ```json
 // 请求 payload
@@ -372,7 +484,7 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
 
 **EXECUTE** — 接收任意 SQL 字符串，通过 `statement.execute()` 执行
 
-- 若返回结果集（SELECT）：走流式输出，data 结构与 DATA LIST 一致（`total: -1` 表示无法预知总行数），通过 fetchSize 防止 OOM
+- 若返回结果集（SELECT）：走流式输出，data 结构与 DATA LIST 一致（`total: -1` 表示无法预知总行数），通过 JDBC 游标（`TYPE_FORWARD_ONLY` + `CONCUR_READ_ONLY` + `fetchSize=100`）防止 OOM，PostgreSQL 端临时关闭 `autoCommit` 启用服务端游标
 - 若为更新操作（INSERT/UPDATE/DELETE/DDL）：返回单次响应 `{ "affectedRows": N }`
 
 ```json
@@ -390,6 +502,119 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
 
 // 响应 data（更新，非流式）
 {"affectedRows": 1}
+```
+
+### 5.6 系统信息 (System Info) — `category: "SYSTEM"`
+
+**INFO** — 返回当前 JVM 运行时信息，无需数据库连接（`connection` 字段仍需传递，但会被忽略）
+
+- 通过 `Runtime`、`OperatingSystemMXBean`、`RuntimeMXBean` 采集
+- `memory` 中各字段单位为字节（Bytes）
+
+```json
+// 请求
+{"id":"req-010","category":"SYSTEM","action":"INFO","connection":{"driver":"mysql","host":"127.0.0.1","port":3306,"user":"root","password":"secret","database":"mysql"},"payload":{}}
+
+// 响应 data
+{
+  "jvmVersion": "21.0.2",
+  "jvmVendor": "Oracle Corporation",
+  "jvmName": "OpenJDK 64-Bit Server VM",
+  "osName": "Windows 11",
+  "osArch": "amd64",
+  "osVersion": "10.0",
+  "availableProcessors": 16,
+  "memory": {
+    "max": 4294967296,
+    "total": 268435456,
+    "used": 134217728,
+    "free": 134217728
+  },
+  "uptime": 120000,
+  "pid": 12345
+}
+```
+
+### 5.7 造数引擎 (Data Generation) — `category: "DATA"`, `action: "GENERATE"`
+
+基于嵌入式 LuaJIT 脚本引擎的造数功能，支持单表或多表按序造数（自动处理外键依赖）。Lua 脚本由调用方（Go/Wails 前端）提供，每张表独立执行一个脚本。
+
+**核心机制**：
+- 每张表创建独立的 Lua 虚拟机，`insert()` 调用时**逐条写库**（`executeUpdate` 单条 INSERT），不在内存中积累数据
+- 每条插入后实时流式回报进度（`stream: true`，`data` 含 `table`/`inserted`/`sql`）
+- 表按 `tables` 数组顺序执行，先创建的表数据先入库（满足外键约束）
+- 通过 `RETURN_GENERATED_KEYS` 获取自增主键，`lastId()` 返回当前表最近一条插入的自增 ID，供后续表或行引用
+
+**Lua 沙箱**：禁用 `os`、`io`、`debug`、`package`、`require`、`loadfile`、`dofile`、`loadstring`、`rawget`、`rawset`、`rawequal`、`setfenv`、`getfenv`、`newproxy` 等危险模块。保留 `math`、`string`、`table`、`tostring`、`tonumber`、`type`、`pairs`、`ipairs`、`pcall`、`error`、`assert` 等安全模块。
+
+**Lua 内置辅助函数**：
+
+| 函数 | 说明 |
+|---|---|
+| `insert(tableName, rowTable)` | 收集一行待插入数据（Lua table → JDBC 行） |
+| `lastId()` | 获取上一张表最后插入的自增 ID（用于外键引用，无自增 ID 时返回 nil） |
+| `random_int(min, max)` | 随机整数 [min, max] |
+| `random_float(min, max)` | 随机浮点数 [min, max) |
+| `random_string(length)` | 指定长度的随机字母数字字符串 |
+| `random_date(start, end)` | 两个日期之间的随机日期（参数格式 `YYYY-MM-DD`，返回同格式字符串） |
+| `random_email()` | 随机邮箱地址（`user_<random>@example.com`） |
+| `random_phone()` | 随机 11 位手机号 |
+| `random_name()` | 随机姓名（内置中文 + 英文姓名池） |
+| `random_enum(...)` | 从可变参数中随机选取一个值 |
+| `random_uuid()` | 随机 UUID 字符串 |
+
+**请求 payload 顶层字段**：
+- `tables` — 表配置数组（必填，按顺序执行）
+- `luaVersion` — Lua 引擎版本（可选，默认 `"luajit"`，支持 `"5.1"` / `"5.2"` / `"5.3"` / `"5.4"` / `"5.5"`）
+
+```json
+// 请求（使用 Lua 5.4 引擎）
+{
+  "id": "req-gen-001",
+  "category": "DATA",
+  "action": "GENERATE",
+  "connection": {"driver": "mysql", "host": "127.0.0.1", "port": 3306, "user": "root", "password": "secret", "database": "test_db"},
+  "payload": {
+    "luaVersion": "5.4",
+    "tables": [
+      {
+        "count": 100,
+        "script": "for i = 1, count do\n  insert('users', {\n    name = 'user_' .. i,\n    email = random_email(),\n    age = random_int(18, 65),\n    phone = random_phone(),\n    created_at = random_date('2024-01-01', '2024-12-31')\n  })\nend"
+      },
+      {
+        "count": 500,
+        "script": "for i = 1, count do\n  insert('orders', {\n    user_id = random_int(1, 100),\n    amount = random_int(100, 99999) / 100.0,\n    status = random_enum('pending', 'paid', 'shipped', 'completed'),\n    created_at = random_date('2024-06-01', '2025-06-01')\n  })\nend"
+      }
+    ]
+  }
+}
+
+// 响应序列（流式，每插入一行回报一次进度，sql 为该表使用的 INSERT 语句模板）
+{"id":"req-gen-001","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":1,"total":2,"index":1,"sql":"INSERT INTO `users` (`name`, `email`, `age`, `phone`, `created_at`) VALUES (?, ?, ?, ?, ?)"}}
+{"id":"req-gen-001","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":2,"total":2,"index":1,"sql":"INSERT INTO `users` (`name`, `email`, `age`, `phone`, `created_at`) VALUES (?, ?, ?, ?, ?)"}}
+...
+{"id":"req-gen-001","success":true,"stream":true,"end":false,"data":{"table":"orders","inserted":1,"total":2,"index":2,"sql":"INSERT INTO `orders` (`user_id`, `amount`, `status`, `created_at`) VALUES (?, ?, ?, ?)"}}
+...
+{"id":"req-gen-001","success":true,"stream":true,"end":true,"data":null}
+```
+
+**外键引用示例**（先造父表，再造子表，通过 `lastId()` 获取父表自增 ID）：
+
+```json
+{
+  "payload": {
+    "tables": [
+      {
+        "count": 10,
+        "script": "for i = 1, count do\n  insert('categories', {\n    name = '分类_' .. i,\n    description = random_string(20)\n  })\nend"
+      },
+      {
+        "count": 100,
+        "script": "local catId = lastId()\nfor i = 1, count do\n  insert('products', {\n    category_id = random_int(catId - 9, catId),\n    name = '商品_' .. random_string(6),\n    price = random_int(100, 99999) / 100.0\n  })\nend"
+      }
+    ]
+  }
+}
 ```
 
 ## 6. 安全与健壮性保障 (Security & Reliability)
@@ -412,31 +637,56 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
 ## 7. 工程目录结构 (Directory Structure)
 
 ```
-src/main/kotlin/
-├── Main.kt                    // 入口点，维护协程主循环与 Channel 输出串行化
-├── dispatcher/
-│   └── RequestDispatcher.kt   // 解析 JSON，分发请求路由
-├── pool/
-│   └── PoolManager.kt         // HikariCP 动态管理与 SHA-256 缓存
-├── dialect/                   // 数据库方言抽象层
-│   ├── DatabaseDialect.kt     // 方言接口定义
-│   ├── MySQLDialect.kt        // MySQL 方言实现
-│   ├── PostgreSQLDialect.kt   // PostgreSQL 方言实现
-│   └── DialectFactory.kt      // 方言工厂（根据 Driver 实例化）
-├── handlers/                  // 业务处理层（调用方言接口）
-│   ├── SchemaHandler.kt
-│   ├── TableHandler.kt
-│   ├── DataHandler.kt
-│   ├── UserHandler.kt
-│   └── SqlEngineHandler.kt
-├── loader/                    // 动态 JDBC 驱动加载
-│   └── DriverLoader.kt        // 扫描 drivers/ 目录，URLClassLoader 动态加载
-└── models/                    // 数据契约
-    ├── Request.kt             // Request / Category / Action / ConnectionConfig / Driver
-    └── Response.kt            // Response
+idb_engine/                          Gradle 多模块项目
+├── settings.gradle.kts              模块注册
+├── build.gradle.kts                 根项目（聚合）
+│
+├── api/                             公共 API 模块（零外部依赖）
+│   └── src/main/kotlin/
+│       ├── dialect/DatabaseDialect.kt   方言 SPI 接口（含 driverName）
+│       └── models/Driver.kt             驱动枚举
+│
+├── dialect-mysql/                   MySQL 方言插件
+│   └── src/main/kotlin/
+│       └── dialect/MySQLDialect.kt
+│       + META-INF/services/com.kxxnzstdsw.dialect.DatabaseDialect
+│
+├── dialect-postgresql/              PostgreSQL 方言插件
+│   └── src/main/kotlin/
+│       └── dialect/PostgreSQLDialect.kt
+│       + META-INF/services/com.kxxnzstdsw.dialect.DatabaseDialect
+│
+└── engine/                          主引擎模块
+    └── src/main/kotlin/
+        ├── Main.kt                    入口点，协程主循环与 Channel 输出串行化
+        ├── dispatcher/
+        │   └── RequestDispatcher.kt   解析 JSON，分发请求路由
+        ├── pool/
+        │   └── PoolManager.kt         HikariCP 动态管理与 SHA-256 缓存
+        ├── handlers/                  业务处理层（通过 DialectLoader 获取方言）
+        │   ├── SchemaHandler.kt
+        │   ├── TableHandler.kt
+        │   ├── DataHandler.kt
+        │   ├── GenerateHandler.kt     造数引擎（LuaJIT 脚本 + 批量插入 + 事务）
+        │   ├── UserHandler.kt
+        │   ├── SqlEngineHandler.kt
+        │   └── SystemHandler.kt       JVM 系统信息采集
+        ├── loader/                    动态加载
+        │   ├── DriverLoader.kt        扫描 drivers/ 目录，ServiceLoader 加载 JDBC 驱动
+        │   └── DialectLoader.kt       扫描 dialects/ 目录，ServiceLoader 加载方言插件
+        └── models/                    数据契约
+            ├── Request.kt             Request / Category / Action / ConnectionConfig
+            ├── Response.kt            Response
+            └── GenerateModels.kt      GeneratePayload / TableGenerateConfig
 
-src/main/resources/
-└── logback.xml                // 日志配置（滚动文件输出，每日归档，30天保留）
+构建产物结构：
+engine/build/libs/
+├── idb-engine.jar       主引擎瘦包
+├── libs/                运行时依赖（Kotlin、HikariCP、日志、api、LuaJIT）
+├── drivers/             JDBC 驱动（mysql-connector-j、postgresql）
+└── dialects/            方言插件
+    ├── idb-dialect-mysql.jar
+    └── idb-dialect-postgresql.jar
 ```
 
 ## 8. 构建与部署 (Build & Deploy)
@@ -444,17 +694,35 @@ src/main/resources/
 ### 8.1 构建
 
 ```bash
-./gradlew jar
+./gradlew engine:jar
 ```
 
-产物结构：
+产物结构（位于 `engine/build/libs/`）：
 ```
-build/libs/
-├── idb-engine.jar      // 瘦包（项目代码 + 资源）
-├── libs/               // 运行时依赖（Kotlin、HikariCP、日志等）
-└── drivers/            // JDBC 驱动（构建时内置 + 用户可追加）
-    ├── mysql-connector-j-9.7.0.jar
-    └── postgresql-42.7.11.jar
+engine/build/libs/
+├── idb-engine.jar       主引擎瘦包
+├── libs/                运行时依赖
+│   ├── luajava-4.1.0.jar
+│   ├── luajit-4.1.0.jar
+│   ├── luajit-platform-4.1.0-natives-desktop.jar
+│   ├── lua51-4.1.0.jar
+│   ├── lua51-platform-4.1.0-natives-desktop.jar
+│   ├── lua52-4.1.0.jar
+│   ├── lua52-platform-4.1.0-natives-desktop.jar
+│   ├── lua53-4.1.0.jar
+│   ├── lua53-platform-4.1.0-natives-desktop.jar
+│   ├── lua54-4.1.0.jar
+│   ├── lua54-platform-4.1.0-natives-desktop.jar
+│   ├── lua55-4.1.0.jar
+│   ├── lua55-platform-4.1.0-natives-desktop.jar
+│   ├── HikariCP-7.0.2.jar
+│   ├── ...
+├── drivers/             JDBC 驱动
+│   ├── mysql-connector-j-9.7.0.jar
+│   └── postgresql-42.7.11.jar
+└── dialects/            方言插件（SPI 动态加载）
+    ├── idb-dialect-mysql.jar
+    └── idb-dialect-postgresql.jar
 ```
 
 Main-Class 为 `com.kxxnzstdsw.MainKt`，Manifest 中 Class-Path 指向同级 `libs/` 目录。
@@ -462,7 +730,7 @@ Main-Class 为 `com.kxxnzstdsw.MainKt`，Manifest 中 Class-Path 指向同级 `l
 ### 8.2 运行
 
 ```bash
-cd build/libs && java -jar idb-engine.jar
+cd engine/build/libs && java -jar idb-engine.jar
 ```
 
 ### 8.3 与 Wails 集成
@@ -490,19 +758,24 @@ response := scanner.Text()
 ✅ 已完成：
 - 核心架构与通信协议（支持流式响应：stream/end 字段）
 - 异步非阻塞处理（Kotlin 协程 + Channel 输出串行化）
-- 数据库方言抽象层（DatabaseDialect 接口 + MySQL/PostgreSQL 实现）
+- 数据库方言抽象层（DatabaseDialect SPI 接口 + MySQL/PostgreSQL 插件）
 - 连接池管理（HikariCP + SHA-256 缓存）
 - 五大业务模块（Schema/Table/Data/User/SQL）全部改为 suspend 函数
-- 流式大数据输出（DATA LIST pageSize=0 / SQL SELECT，fetchSize 防 OOM）
+- 流式大数据输出（DATA LIST pageSize=0 / SQL SELECT，JDBC 游标模式防 OOM）
 - 动态 JDBC 驱动加载（扫描 drivers/ 目录，URLClassLoader + ServiceLoader）
+- 方言插件化动态加载（Gradle 多模块 + SPI，扫描 dialects/ 目录，DialectLoader 自动发现注册）
 - MODIFY_COLUMN 支持同时重命名（可选 newName）
 - 长驻运行机制（协程 + BufferedReader + Shutdown Hook）
 - 日志隔离（滚动文件，不污染 stdout/stderr）
 - 构建配置（Gradle 瘦包 + 外部依赖）
 - GET_DDL 返回建表语句（MySQL: SHOW CREATE TABLE / PG: information_schema 重建）
 - DATA LIST 支持 `where`/`orderBy` 原始 SQL 片段过滤与排序，方言级注入校验
+- SYSTEM INFO 返回 JVM 运行时信息（版本、内存、CPU、PID、运行时长等）
+- PostgreSQL 方言全面优化（listSchemas 用 pg_namespace、listTables 含视图、listUsers 用 pg_roles、MODIFY_COLUMN 补齐 nullable/default、GET_DDL 含约束与索引、正则预编译）
+- 用户管理完整 CRUD（CREATE/DELETE 用户、修改密码、查询指定用户权限，MySQL 与 PostgreSQL 均已实现）
+- 造数引擎（LuaJIT 嵌入式脚本 + 多表按序造数 + 外键引用 `lastId()` + 批量插入 + 单事务 + Lua 沙箱 + 流式进度回报）
 
 ⏳ 待扩展：
 - GraalVM Native Image 编译
-- 更多数据库方言支持（Oracle, SQL Server, SQLite）
+- 更多数据库方言插件（Oracle, SQL Server, SQLite — 只需实现 SPI 接口，放入 dialects/ 即可）
 - 性能监控与指标上报

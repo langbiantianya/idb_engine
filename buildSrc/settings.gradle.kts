@@ -7,23 +7,25 @@ pluginManagement {
     }
 }
 
-gradle.allprojects {
+
+dependencyResolutionManagement {
+
+    // Use Maven Central and the Gradle Plugin Portal for resolving dependencies in the shared build logic (`buildSrc`) project.
+    @Suppress("UnstableApiUsage")
     repositories {
         maven("https://maven.aliyun.com/repository/central")
         maven("https://maven.aliyun.com/repository/gradle-plugin")
         gradlePluginPortal()
+        mavenLocal()
         mavenCentral()
+    }
+
+    // Reuse the version catalog from the main build.
+    versionCatalogs {
+        create("libs") {
+            from(files("../gradle/libs.versions.toml"))
+        }
     }
 }
 
-
-plugins {
-    id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
-}
-
-rootProject.name = "idb_engine"
-
-include("api")
-include("dialect-mysql")
-include("dialect-postgresql")
-include("engine")
+rootProject.name = "buildSrc"

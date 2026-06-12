@@ -1,28 +1,53 @@
 # IDB Engine - Database Management Backend
 
-基于 Kotlin + JDBC 的无头数据库管理引擎，通过 stdin/stdout 与 Wails 前端通信。
+基于 Kotlin + JDBC 的无头数据库管理引擎，通过 stdin/stdout 与 Wails 前端通信。方言层采用 SPI 插件化架构，支持动态加载。
+
+## 项目结构
+
+Gradle 多模块项目，方言与引擎解耦：
+
+```
+idb_engine/
+├── api/                        公共 SPI 接口（DatabaseDialect + Driver 枚举）
+├── dialect-mysql/              MySQL 方言插件 JAR
+├── dialect-postgresql/         PostgreSQL 方言插件 JAR
+└── engine/                     主引擎（业务逻辑 + 动态加载）
+```
+
+引擎启动时通过 `ServiceLoader` 自动扫描 `dialects/` 目录，发现并注册所有方言插件，无需硬编码。
 
 ## 构建
 
 ```bash
-./gradlew jar
+./gradlew engine:jar
 ```
 
-构建产物结构：
+产物位于 `engine/build/libs/`：
 ```
-build/libs/
-├── idb-engine.jar      ← 主程序瘦包
-├── libs/               ← 运行时依赖（Kotlin、HikariCP、日志等）
-└── drivers/            ← JDBC 驱动（内置 MySQL/PostgreSQL，可追加）
+engine/build/libs/
+├── idb-engine.jar              ← 主引擎瘦包
+├── libs/                       ← 运行时依赖（Kotlin、HikariCP、日志、api）
+├── drivers/                    ← JDBC 驱动（内置 MySQL/PostgreSQL，可追加）
+└── dialects/                   ← 方言插件（SPI 动态加载）
+    ├── idb-dialect-mysql.jar
+    └── idb-dialect-postgresql.jar
 ```
 
 ## 运行
 
 ```bash
-cd build/libs && java -jar idb-engine.jar
+cd engine/build/libs && java -jar idb-engine.jar
 ```
 
-程序启动后会监听标准输入，等待 JSON 请求。
+程序启动后自动加载 `dialects/` 目录中的方言插件和 `drivers/` 目录中的 JDBC 驱动，然后监听标准输入等待 JSON 请求。
+
+## 添加新方言
+
+1. 创建 Gradle 模块，依赖 `api` 项目
+2. 实现 `DatabaseDialect` 接口，声明 `override val driverName = "YourDriver"`
+3. 在 `src/main/resources/META-INF/services/com.kxxnzstdsw.dialect.DatabaseDialect` 中写入实现类全限定名
+4. 构建后将 JAR 放入 `engine/build/libs/dialects/` 目录
+5. 无需修改主引擎代码，重启即自动加载
 
 ## 通信协议
 
@@ -31,8 +56,8 @@ cd build/libs && java -jar idb-engine.jar
 ```json
 {
   "id": "req-uuid-1234",
-  "category": "SCHEMA|USER|TABLE|DATA|SQL",
-  "action": "LIST|CREATE|UPDATE|DELETE|EXECUTE|GET_DDL",
+  "category": "SCHEMA|USER|TABLE|DATA|SQL|SYSTEM",
+  "action": "LIST|CREATE|UPDATE|DELETE|EXECUTE|GET_DDL|INFO|GRANTS|GENERATE",
   "connection": {
     "driver": "mysql|postgresql",
     "host": "127.0.0.1",
@@ -79,8 +104,15 @@ cd build/libs && java -jar idb-engine.jar
 
 **创建数据库**
 
+可选 `options` 对象（MySQL 支持 `charset`、`collate`，PostgreSQL 忽略）。
+
 ```json
 {"id":"2","category":"SCHEMA","action":"CREATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"mysql"},"payload":{"name":"new_db"}}
+```
+
+带字符集选项（仅 MySQL）：
+```json
+{"id":"2b","category":"SCHEMA","action":"CREATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"mysql"},"payload":{"name":"new_db","options":{"charset":"utf8mb4","collate":"utf8mb4_unicode_ci"}}}
 ```
 
 响应：
@@ -125,6 +157,76 @@ cd build/libs && java -jar idb-engine.jar
 {"id":"5","success":true,"error":null,"data":[{"user":"postgres"},{"user":"app_user"}]}
 ```
 
+**查询指定用户权限（MySQL）**
+
+payload 含 `user` 字段时返回该用户的权限列表（`host` 可选，默认 `"%"`）：
+
+```json
+{"id":"4b","category":"USER","action":"LIST","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"mysql"},"payload":{"user":"app_user"}}
+```
+
+响应：
+```json
+{"id":"4b","success":true,"error":null,"data":[{"grant":"GRANT SELECT ON `test_db`.* TO 'app_user'@'%'"},{"grant":"GRANT INSERT ON `test_db`.* TO 'app_user'@'%'"}]}
+```
+
+**查询指定用户权限（PostgreSQL）**
+
+```json
+{"id":"5b","category":"USER","action":"LIST","connection":{"driver":"postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"postgres"},"payload":{"user":"app_user"}}
+```
+
+响应：
+```json
+{"id":"5b","success":true,"error":null,"data":[{"schema":"public","table":"users","privilege":"SELECT"},{"schema":"public","table":"users","privilege":"INSERT"}]}
+```
+
+**查询用户被授权的所有表与权限（GRANTS）**
+
+按 schema + table 聚合返回。`host` 仅 MySQL 使用。
+
+```json
+{"id":"5c","category":"USER","action":"GRANTS","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"mysql"},"payload":{"user":"app_user"}}
+```
+
+响应（MySQL）：
+```json
+{"id":"5c","success":true,"error":null,"data":[{"schema":"test_db","table":"users","privileges":"SELECT, INSERT"},{"schema":"test_db","table":"orders","privileges":"SELECT"}]}
+```
+
+```json
+{"id":"5d","category":"USER","action":"GRANTS","connection":{"driver":"postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"postgres"},"payload":{"user":"app_user"}}
+```
+
+响应（PostgreSQL）：
+```json
+{"id":"5d","success":true,"error":null,"data":[{"schema":"public","table":"users","privileges":"INSERT, SELECT"},{"schema":"public","table":"orders","privileges":"SELECT"}]}
+```
+
+**创建用户**
+
+`host` 仅 MySQL 使用（PostgreSQL 忽略），默认 `"%"`。
+
+```json
+{"id":"4c","category":"USER","action":"CREATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"mysql"},"payload":{"user":"new_user","password":"secret123"}}
+```
+
+响应：
+```json
+{"id":"4c","success":true,"error":null,"data":{"created":"new_user"}}
+```
+
+**删除用户**
+
+```json
+{"id":"4d","category":"USER","action":"DELETE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"mysql"},"payload":{"user":"old_user"}}
+```
+
+响应：
+```json
+{"id":"4d","success":true,"error":null,"data":{"deleted":"old_user"}}
+```
+
 **授予权限**
 
 ```json
@@ -145,6 +247,23 @@ cd build/libs && java -jar idb-engine.jar
 响应：
 ```json
 {"id":"7","success":true,"error":null,"data":{"user":"app_user","action":"revoked"}}
+```
+
+**修改密码**
+
+payload 含 `password` 且无 `privileges` 字段时走密码修改路径。`host` 仅 MySQL 使用。
+
+```json
+{"id":"7b","category":"USER","action":"UPDATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"mysql"},"payload":{"user":"app_user","password":"new_secret"}}
+```
+
+```json
+{"id":"7c","category":"USER","action":"UPDATE","connection":{"driver":"postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"postgres"},"payload":{"user":"app_user","password":"new_secret"}}
+```
+
+响应：
+```json
+{"id":"7b","success":true,"error":null,"data":{"user":"app_user","action":"password_changed"}}
 ```
 
 ---
@@ -175,8 +294,22 @@ cd build/libs && java -jar idb-engine.jar
 
 **创建表**
 
+可选 `options` 对象：MySQL 支持 `engine`/`charset`/`collate`/`comment`，PostgreSQL 支持 `comment`。
+
+列定义支持 `"autoIncrement": true`（仅对主键有效）：MySQL 生成 `AUTO_INCREMENT`，PostgreSQL `INT` → `SERIAL`，`BIGINT` → `BIGSERIAL`；`SERIAL` 自带 `NOT NULL` 和 `DEFAULT`。
+
 ```json
 {"id":"10","category":"TABLE","action":"CREATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"products","columns":[{"name":"id","type":"INT","nullable":false,"isPrimaryKey":true},{"name":"name","type":"VARCHAR","size":255,"nullable":false},{"name":"price","type":"DECIMAL","nullable":true,"defaultValue":"0.00"}]}}
+```
+
+带自增主键：
+```json
+{"id":"10a","category":"TABLE","action":"CREATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"products","columns":[{"name":"id","type":"INT","nullable":false,"isPrimaryKey":true,"autoIncrement":true},{"name":"name","type":"VARCHAR","size":255,"nullable":false}]}}
+```
+
+带表级选项（仅 MySQL 有效）：
+```json
+{"id":"10b","category":"TABLE","action":"CREATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"tableName":"products","columns":[{"name":"id","type":"INT","nullable":false,"isPrimaryKey":true,"autoIncrement":true},{"name":"name","type":"VARCHAR","size":255,"nullable":false}],"options":{"engine":"InnoDB","charset":"utf8mb4","collate":"utf8mb4_unicode_ci","comment":"商品表"}}}
 ```
 
 响应：
@@ -288,7 +421,9 @@ cd build/libs && java -jar idb-engine.jar
 {"orderBy": "name ASC, created_at DESC"}
 ```
 
-**流式全量查询（`pageSize: 0`，防 OOM）**
+**流式全量查询（`pageSize: 0`，JDBC 游标模式防 OOM）**
+
+通过 JDBC 游标（`TYPE_FORWARD_ONLY` + `CONCUR_READ_ONLY` + `fetchSize=100`）逐行读取，PostgreSQL 端自动临时关闭 `autoCommit` 以启用服务端游标，读取完毕后恢复。
 
 请求：
 ```json
@@ -369,6 +504,264 @@ cd build/libs && java -jar idb-engine.jar
 
 ---
 
+### DATA — 造数引擎 (GENERATE)
+
+基于嵌入式 Lua 脚本的批量造数功能，支持多表按序生成（自动处理外键依赖）。Lua 脚本由调用方提供，每个脚本独立执行。
+
+**核心机制**：
+- `insert()` 调用时逐条写库（单条 INSERT + 立即返回自增 ID），不在内存积累数据
+- 每条插入后实时流式回报进度（Go 端可即时展示当前行数）
+- 表按 `tables` 数组顺序执行，先创建的表先入库（满足外键约束）
+- `lastId()` 返回当前表最近一条插入的自增 ID（用于外键引用）
+- Lua 沙箱禁用 `os`/`io`/`debug`/`package`/`require` 等危险模块
+
+**Lua 引擎版本**：通过 `payload.luaVersion` 选择，默认 `"luajit"`，可选 `"5.1"` / `"5.2"` / `"5.3"` / `"5.4"` / `"5.5"`。
+
+#### 内置函数详解
+
+**数据写入**
+
+| 函数 | 说明 |
+|---|---|
+| `insert(tableName, rowTable)` | 向指定表插入一行。`tableName` 为表名字符串，`rowTable` 为 Lua table（键=列名，值=列值）。每次调用立即执行 INSERT 并返回自增 ID。列值支持 `string`/`number`/`boolean`/`nil`，`number` 自动区分整数（Long）和浮点数（Double） |
+| `lastId()` | 获取当前表最近一次 `insert()` 生成的自增主键值（BIGINT）。无自增列时返回 `nil`。常用于子表引用父表 ID |
+
+**随机数据生成**
+
+| 函数 | 参数 | 返回值 | 说明 |
+|---|---|---|---|
+| `random_int(min, max)` | 两个整数 | 整数 | 闭区间 `[min, max]` 随机整数 |
+| `random_float(min, max)` | 两个浮点数 | 浮点数 | 左闭右开区间 `[min, max)` 随机浮点数 |
+| `random_string(length)` | 正整数 | 字符串 | 指定长度的随机字母数字串（`a-zA-Z0-9`） |
+| `random_date(start, end)` | 两个日期字符串 | 字符串 | `YYYY-MM-DD` 格式之间的随机日期 |
+| `random_email()` | 无 | 字符串 | 格式 `user_<随机数字>@example.com` |
+| `random_phone()` | 无 | 字符串 | 11 位手机号（`138/139/150/...` 开头） |
+| `random_name()` | 无 | 字符串 | 随机姓名（内置中英文姓名池，如 `张三`/`Alice`） |
+| `random_enum(...)` | 可变参数 | 同参数类型 | 从传入的参数中随机选取一个 |
+| `random_uuid()` | 无 | 字符串 | 标准 UUID 格式（`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`） |
+
+**全局变量**
+
+| 变量 | 说明 |
+|---|---|
+| `count` | 请求 payload 中该表配置的 `count` 值，脚本中直接使用 |
+
+---
+
+#### 造数脚本示例
+
+**示例 1 — 最简单的单表造数**
+
+向 `users` 表插入 100 条基础数据：
+
+```lua
+for i = 1, count do
+  insert('users', {
+    name = 'user_' .. i,
+    email = 'user_' .. i .. '@test.com'
+  })
+end
+```
+
+```json
+{"tables":[{"count":100,"script":"for i = 1, count do\n  insert('users', {\n    name = 'user_' .. i,\n    email = 'user_' .. i .. '@test.com'\n  })\nend"}]}
+```
+
+---
+
+**示例 2 — 使用随机函数生成真实感数据**
+
+```lua
+for i = 1, count do
+  insert('users', {
+    name = random_name(),
+    email = random_email(),
+    age = random_int(18, 65),
+    phone = random_phone(),
+    gender = random_enum('男', '女'),
+    status = random_enum('active', 'inactive', 'banned'),
+    bio = random_string(50),
+    created_at = random_date('2023-01-01', '2025-06-01')
+  })
+end
+```
+
+---
+
+**示例 3 — 外键引用（父表 → 子表）**
+
+先造 `categories`，再造 `products`，通过 `lastId()` 获取父表自增 ID：
+
+```json
+{"payload":{"tables":[
+  {"count":10,"script":"for i = 1, count do\n  insert('categories', {\n    name = '分类_' .. i,\n    sort_order = i\n  })\nend"},
+  {"count":100,"script":"for i = 1, count do\n  insert('products', {\n    category_id = random_int(1, 10),\n    name = '商品_' .. random_string(6),\n    price = random_int(100, 99999) / 100.0,\n    stock = random_int(0, 500)\n  })\nend"}
+]}}
+```
+
+如果子表需要精确引用父表最后一行的 ID：
+
+```lua
+-- 父表脚本：造 5 个分类
+for i = 1, 5 do
+  insert('categories', { name = '分类_' .. i })
+end
+
+-- 子表脚本：用 lastId() 获取父表最后一个自增 ID
+local lastCatId = lastId()
+for i = 1, count do
+  insert('products', {
+    category_id = random_int(lastCatId - 4, lastCatId),
+    name = '商品_' .. i,
+    price = random_int(10, 99999) / 100.0
+  })
+end
+```
+
+---
+
+**示例 4 — 同一脚本写多张表**
+
+一个脚本内可以多次调用 `insert()` 写不同表，适合一对一关系：
+
+```lua
+for i = 1, count do
+  insert('users', {
+    username = 'user_' .. i,
+    email = random_email(),
+    password_hash = random_string(32)
+  })
+
+  local uid = lastId()
+
+  insert('user_profiles', {
+    user_id = uid,
+    nickname = random_name(),
+    avatar = 'https://avatar.example.com/' .. random_string(8) .. '.png',
+    bio = random_string(100),
+    birthday = random_date('1970-01-01', '2005-12-31')
+  })
+end
+```
+
+---
+
+**示例 5 — 复杂业务场景（电商订单）**
+
+多表外键链：`users` → `orders` → `order_items`，使用 Lua 变量和表暂存中间数据：
+
+```json
+{"payload":{"luaVersion":"5.4","tables":[
+  {"count":50,"script":"for i = 1, count do\n  insert('users', {\n    username = 'buyer_' .. i,\n    email = random_email(),\n    phone = random_phone(),\n    balance = random_int(0, 1000000) / 100.0\n  })\nend"},
+  {"count":200,"script":"for i = 1, count do\n  local userId = random_int(1, 50)\n  insert('orders', {\n    user_id = userId,\n    order_no = 'ORD-' .. random_string(12),\n    total_amount = random_int(100, 500000) / 100.0,\n    status = random_enum('pending', 'paid', 'shipped', 'completed', 'cancelled'),\n    created_at = random_date('2024-01-01', '2025-06-01')\n  })\nend"},
+  {"count":500,"script":"for i = 1, count do\n  insert('order_items', {\n    order_id = random_int(1, 200),\n    product_id = random_int(1, 100),\n    quantity = random_int(1, 10),\n    unit_price = random_int(100, 99999) / 100.0\n  })\nend"}
+]}}
+```
+
+---
+
+**示例 6 — 使用 Lua 语言特性生成复杂数据**
+
+利用 Lua 的 `table`、`string`、`math` 库和控制流：
+
+```lua
+local statuses = {'pending', 'paid', 'shipped', 'completed', 'cancelled'}
+local weights = {10, 30, 25, 30, 5}  -- 权重分布
+
+-- 加权随机选择
+local function weighted_enum(values, weights)
+  local total = 0
+  for _, w in ipairs(weights) do total = total + w end
+  local r = random_int(1, total)
+  local acc = 0
+  for i, w in ipairs(weights) do
+    acc = acc + w
+    if r <= acc then return values[i] end
+  end
+  return values[#values]
+end
+
+for i = 1, count do
+  local amount = random_int(100, 999999) / 100.0
+
+  -- 大额订单更可能是 completed
+  local status
+  if amount > 5000 then
+    status = weighted_enum(statuses, {2, 20, 30, 45, 3})
+  else
+    status = weighted_enum(statuses, weights)
+  end
+
+  insert('orders', {
+    user_id = random_int(1, 50),
+    amount = amount,
+    discount = math.floor(amount * random_int(0, 30) / 100 * 100) / 100,
+    status = status,
+    remark = '订单 #' .. i .. ' - ' .. random_name() .. ' 的订单',
+    created_at = random_date('2024-01-01', '2025-06-01')
+  })
+end
+```
+
+---
+
+**请求协议**
+
+```json
+{
+  "id": "30",
+  "category": "DATA",
+  "action": "GENERATE",
+  "connection": {"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},
+  "payload": {
+    "luaVersion": "5.4",
+    "tables": [
+      {"count": 100, "script": "..."},
+      {"count": 500, "script": "..."}
+    ]
+  }
+}
+```
+
+**响应**（流式，每插入一行回报进度）：
+
+```json
+{"id":"30","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":1,"total":2,"index":1,"sql":"INSERT INTO `users` (`name`, `email`) VALUES (?, ?)"}}
+{"id":"30","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":2,"total":2,"index":1,"sql":"INSERT INTO `users` (`name`, `email`) VALUES (?, ?)"}}
+...
+{"id":"30","success":true,"stream":true,"end":false,"data":{"table":"orders","inserted":1,"total":2,"index":2,"sql":"INSERT INTO `orders` (`user_id`, `amount`) VALUES (?, ?)"}}
+...
+{"id":"30","success":true,"stream":true,"end":true,"data":null}
+```
+
+---
+
+### SYSTEM — 系统信息
+
+**获取 JVM 运行时信息（无需数据库连接，`connection` 字段仍需传递但会被忽略）**
+
+```json
+{"id":"21","category":"SYSTEM","action":"INFO","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"mysql"},"payload":{}}
+```
+
+响应（`memory` 字段单位为字节）：
+```json
+{"id":"21","success":true,"error":null,"data":{"jvmVersion":"21.0.2","jvmVendor":"Oracle Corporation","jvmName":"OpenJDK 64-Bit Server VM","osName":"Windows 11","osArch":"amd64","osVersion":"10.0","availableProcessors":16,"memory":{"max":4294967296,"total":268435456,"used":134217728,"free":134217728},"uptime":120000,"pid":12345}}
+```
+
+字段说明：
+- `jvmVersion` / `jvmVendor` / `jvmName` — JVM 版本信息
+- `osName` / `osArch` / `osVersion` — 操作系统信息
+- `availableProcessors` — 可用 CPU 核心数
+- `memory.max` — JVM 最大可用内存
+- `memory.total` — JVM 当前已分配内存
+- `memory.used` — 已使用内存
+- `memory.free` — 已分配中的空闲内存
+- `uptime` — JVM 启动至今的毫秒数
+- `pid` — 进程 ID
+
+---
+
 ### 错误响应示例
 
 连接失败、SQL 语法错误等异常均返回统一错误格式：
@@ -385,21 +778,25 @@ cd build/libs && java -jar idb-engine.jar
 
 ## 架构特性
 
+- **方言插件化**：方言以独立 JAR 通过 SPI 动态加载，新增数据库无需改主引擎
 - **异步非阻塞**：基于 Kotlin 协程实现高并发请求处理
 - **输出串行化**：通过 Channel 确保标准输出不会交错混乱
 - **无状态设计**：每次请求携带完整连接信息
 - **连接池复用**：基于 SHA-256 Hash 缓存 HikariCP 实例
 - **自动资源回收**：10 分钟空闲自动释放连接池
 - **安全防护**：强制使用 PreparedStatement 防止 SQL 注入
+- **JDBC 游标流式**：大结果集通过服务端游标逐行拉取，避免客户端内存溢出
 - **日志隔离**：所有日志输出到滚动文件 (`~/.config/idb/logs/idb-engine.log`)，不污染 stdout JSON 流
+- **嵌入式造数引擎**：LuaJIT 脚本驱动，支持多表按序造数、外键引用、沙箱隔离、流式进度回报
 
 ## 技术栈
 
-- Kotlin 2.3.21
-- JDK 21
+- Kotlin 2.4.0
+- JDK 25
 - kotlinx-coroutines 1.11.0
 - HikariCP 7.0.2
 - MySQL Connector/J 9.7.0
 - PostgreSQL JDBC 42.7.11
 - kotlinx.serialization 1.11.0
+- LuaJIT 4.1.0 (luajava — 嵌入式脚本引擎，造数功能)
 - SLF4J 2.0.18 + Logback 1.5.13
