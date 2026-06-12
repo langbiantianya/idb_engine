@@ -506,7 +506,7 @@ payload 含 `password` 且无 `privileges` 字段时走密码修改路径。`hos
 
 ### DATA — 造数引擎 (GENERATE)
 
-基于嵌入式 LuaJIT 脚本的批量造数功能，支持多表按序生成（自动处理外键依赖）。Lua 脚本由调用方提供，每张表独立执行。
+基于嵌入式 Lua 脚本的批量造数功能，支持多表按序生成（自动处理外键依赖）。Lua 脚本由调用方提供，每个脚本独立执行。
 
 **核心机制**：
 - `insert()` 调用时逐条写库（单条 INSERT + 立即返回自增 ID），不在内存积累数据
@@ -515,27 +515,223 @@ payload 含 `password` 且无 `privileges` 字段时走密码修改路径。`hos
 - `lastId()` 返回当前表最近一条插入的自增 ID（用于外键引用）
 - Lua 沙箱禁用 `os`/`io`/`debug`/`package`/`require` 等危险模块
 
-**内置 Lua 辅助函数**：`insert(tableName, rowTable)` / `lastId()` / `random_int(min, max)` / `random_float(min, max)` / `random_string(length)` / `random_date(start, end)` / `random_email()` / `random_phone()` / `random_name()` / `random_enum(...)` / `random_uuid()`
-
 **Lua 引擎版本**：通过 `payload.luaVersion` 选择，默认 `"luajit"`，可选 `"5.1"` / `"5.2"` / `"5.3"` / `"5.4"` / `"5.5"`。
 
-```json
-{"id":"30","category":"DATA","action":"GENERATE","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"luaVersion":"5.4","tables":[{"count":100,"script":"for i = 1, count do\n  insert('users', {\n    name = 'user_' .. i,\n    email = random_email(),\n    age = random_int(18, 65)\n  })\nend"},{"count":500,"script":"for i = 1, count do\n  insert('orders', {\n    user_id = random_int(1, 100),\n    amount = random_int(100, 99999) / 100.0,\n    status = random_enum('pending', 'paid', 'shipped'),\n    created_at = random_date('2024-01-01', '2024-12-31')\n  })\nend"}]}}
+#### 内置函数详解
+
+**数据写入**
+
+| 函数 | 说明 |
+|---|---|
+| `insert(tableName, rowTable)` | 向指定表插入一行。`tableName` 为表名字符串，`rowTable` 为 Lua table（键=列名，值=列值）。每次调用立即执行 INSERT 并返回自增 ID。列值支持 `string`/`number`/`boolean`/`nil`，`number` 自动区分整数（Long）和浮点数（Double） |
+| `lastId()` | 获取当前表最近一次 `insert()` 生成的自增主键值（BIGINT）。无自增列时返回 `nil`。常用于子表引用父表 ID |
+
+**随机数据生成**
+
+| 函数 | 参数 | 返回值 | 说明 |
+|---|---|---|---|
+| `random_int(min, max)` | 两个整数 | 整数 | 闭区间 `[min, max]` 随机整数 |
+| `random_float(min, max)` | 两个浮点数 | 浮点数 | 左闭右开区间 `[min, max)` 随机浮点数 |
+| `random_string(length)` | 正整数 | 字符串 | 指定长度的随机字母数字串（`a-zA-Z0-9`） |
+| `random_date(start, end)` | 两个日期字符串 | 字符串 | `YYYY-MM-DD` 格式之间的随机日期 |
+| `random_email()` | 无 | 字符串 | 格式 `user_<随机数字>@example.com` |
+| `random_phone()` | 无 | 字符串 | 11 位手机号（`138/139/150/...` 开头） |
+| `random_name()` | 无 | 字符串 | 随机姓名（内置中英文姓名池，如 `张三`/`Alice`） |
+| `random_enum(...)` | 可变参数 | 同参数类型 | 从传入的参数中随机选取一个 |
+| `random_uuid()` | 无 | 字符串 | 标准 UUID 格式（`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`） |
+
+**全局变量**
+
+| 变量 | 说明 |
+|---|---|
+| `count` | 请求 payload 中该表配置的 `count` 值，脚本中直接使用 |
+
+---
+
+#### 造数脚本示例
+
+**示例 1 — 最简单的单表造数**
+
+向 `users` 表插入 100 条基础数据：
+
+```lua
+for i = 1, count do
+  insert('users', {
+    name = 'user_' .. i,
+    email = 'user_' .. i .. '@test.com'
+  })
+end
 ```
 
-响应（流式，每插入一行回报进度，含执行的 INSERT SQL）：
+```json
+{"tables":[{"count":100,"script":"for i = 1, count do\n  insert('users', {\n    name = 'user_' .. i,\n    email = 'user_' .. i .. '@test.com'\n  })\nend"}]}
 ```
-{"id":"30","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":1,"total":2,"index":1,"sql":"INSERT INTO `users` (`name`, `email`, `age`) VALUES (?, ?, ?)"}}
-{"id":"30","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":2,"total":2,"index":1,"sql":"INSERT INTO `users` (`name`, `email`, `age`) VALUES (?, ?, ?)"}}
+
+---
+
+**示例 2 — 使用随机函数生成真实感数据**
+
+```lua
+for i = 1, count do
+  insert('users', {
+    name = random_name(),
+    email = random_email(),
+    age = random_int(18, 65),
+    phone = random_phone(),
+    gender = random_enum('男', '女'),
+    status = random_enum('active', 'inactive', 'banned'),
+    bio = random_string(50),
+    created_at = random_date('2023-01-01', '2025-06-01')
+  })
+end
+```
+
+---
+
+**示例 3 — 外键引用（父表 → 子表）**
+
+先造 `categories`，再造 `products`，通过 `lastId()` 获取父表自增 ID：
+
+```json
+{"payload":{"tables":[
+  {"count":10,"script":"for i = 1, count do\n  insert('categories', {\n    name = '分类_' .. i,\n    sort_order = i\n  })\nend"},
+  {"count":100,"script":"for i = 1, count do\n  insert('products', {\n    category_id = random_int(1, 10),\n    name = '商品_' .. random_string(6),\n    price = random_int(100, 99999) / 100.0,\n    stock = random_int(0, 500)\n  })\nend"}
+]}}
+```
+
+如果子表需要精确引用父表最后一行的 ID：
+
+```lua
+-- 父表脚本：造 5 个分类
+for i = 1, 5 do
+  insert('categories', { name = '分类_' .. i })
+end
+
+-- 子表脚本：用 lastId() 获取父表最后一个自增 ID
+local lastCatId = lastId()
+for i = 1, count do
+  insert('products', {
+    category_id = random_int(lastCatId - 4, lastCatId),
+    name = '商品_' .. i,
+    price = random_int(10, 99999) / 100.0
+  })
+end
+```
+
+---
+
+**示例 4 — 同一脚本写多张表**
+
+一个脚本内可以多次调用 `insert()` 写不同表，适合一对一关系：
+
+```lua
+for i = 1, count do
+  insert('users', {
+    username = 'user_' .. i,
+    email = random_email(),
+    password_hash = random_string(32)
+  })
+
+  local uid = lastId()
+
+  insert('user_profiles', {
+    user_id = uid,
+    nickname = random_name(),
+    avatar = 'https://avatar.example.com/' .. random_string(8) .. '.png',
+    bio = random_string(100),
+    birthday = random_date('1970-01-01', '2005-12-31')
+  })
+end
+```
+
+---
+
+**示例 5 — 复杂业务场景（电商订单）**
+
+多表外键链：`users` → `orders` → `order_items`，使用 Lua 变量和表暂存中间数据：
+
+```json
+{"payload":{"luaVersion":"5.4","tables":[
+  {"count":50,"script":"for i = 1, count do\n  insert('users', {\n    username = 'buyer_' .. i,\n    email = random_email(),\n    phone = random_phone(),\n    balance = random_int(0, 1000000) / 100.0\n  })\nend"},
+  {"count":200,"script":"for i = 1, count do\n  local userId = random_int(1, 50)\n  insert('orders', {\n    user_id = userId,\n    order_no = 'ORD-' .. random_string(12),\n    total_amount = random_int(100, 500000) / 100.0,\n    status = random_enum('pending', 'paid', 'shipped', 'completed', 'cancelled'),\n    created_at = random_date('2024-01-01', '2025-06-01')\n  })\nend"},
+  {"count":500,"script":"for i = 1, count do\n  insert('order_items', {\n    order_id = random_int(1, 200),\n    product_id = random_int(1, 100),\n    quantity = random_int(1, 10),\n    unit_price = random_int(100, 99999) / 100.0\n  })\nend"}
+]}}
+```
+
+---
+
+**示例 6 — 使用 Lua 语言特性生成复杂数据**
+
+利用 Lua 的 `table`、`string`、`math` 库和控制流：
+
+```lua
+local statuses = {'pending', 'paid', 'shipped', 'completed', 'cancelled'}
+local weights = {10, 30, 25, 30, 5}  -- 权重分布
+
+-- 加权随机选择
+local function weighted_enum(values, weights)
+  local total = 0
+  for _, w in ipairs(weights) do total = total + w end
+  local r = random_int(1, total)
+  local acc = 0
+  for i, w in ipairs(weights) do
+    acc = acc + w
+    if r <= acc then return values[i] end
+  end
+  return values[#values]
+end
+
+for i = 1, count do
+  local amount = random_int(100, 999999) / 100.0
+
+  -- 大额订单更可能是 completed
+  local status
+  if amount > 5000 then
+    status = weighted_enum(statuses, {2, 20, 30, 45, 3})
+  else
+    status = weighted_enum(statuses, weights)
+  end
+
+  insert('orders', {
+    user_id = random_int(1, 50),
+    amount = amount,
+    discount = math.floor(amount * random_int(0, 30) / 100 * 100) / 100,
+    status = status,
+    remark = '订单 #' .. i .. ' - ' .. random_name() .. ' 的订单',
+    created_at = random_date('2024-01-01', '2025-06-01')
+  })
+end
+```
+
+---
+
+**请求协议**
+
+```json
+{
+  "id": "30",
+  "category": "DATA",
+  "action": "GENERATE",
+  "connection": {"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},
+  "payload": {
+    "luaVersion": "5.4",
+    "tables": [
+      {"count": 100, "script": "..."},
+      {"count": 500, "script": "..."}
+    ]
+  }
+}
+```
+
+**响应**（流式，每插入一行回报进度）：
+
+```json
+{"id":"30","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":1,"total":2,"index":1,"sql":"INSERT INTO `users` (`name`, `email`) VALUES (?, ?)"}}
+{"id":"30","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":2,"total":2,"index":1,"sql":"INSERT INTO `users` (`name`, `email`) VALUES (?, ?)"}}
 ...
-{"id":"30","success":true,"stream":true,"end":false,"data":{"table":"orders","inserted":1,"total":2,"index":2,"sql":"INSERT INTO `orders` (`user_id`, `amount`, `status`, `created_at`) VALUES (?, ?, ?, ?)"}}
+{"id":"30","success":true,"stream":true,"end":false,"data":{"table":"orders","inserted":1,"total":2,"index":2,"sql":"INSERT INTO `orders` (`user_id`, `amount`) VALUES (?, ?)"}}
 ...
 {"id":"30","success":true,"stream":true,"end":true,"data":null}
-```
-
-外键引用示例（通过 `lastId()` 获取父表自增 ID）：
-```json
-{"tables":[{"count":10,"script":"for i = 1, count do\n  insert('categories', { name = '分类_' .. i })\nend"},{"count":100,"script":"local catId = lastId()\nfor i = 1, count do\n  insert('products', {\n    category_id = random_int(catId - 9, catId),\n    name = '商品_' .. random_string(6),\n    price = random_int(100, 99999) / 100.0\n  })\nend"}]}
 ```
 
 ---
