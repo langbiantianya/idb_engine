@@ -37,6 +37,14 @@ interface DatabaseDialect {
     }
 
     /**
+     * 设置当前连接的 schema/search_path 上下文（PostgreSQL 用，MySQL 空实现）。
+     * 自定义 SQL 执行前调用，确保无前缀表名能正确解析。
+     */
+    fun setSearchPath(conn: Connection, schema: String) {
+        // 默认空实现，MySQL 不需要
+    }
+
+    /**
      * List all schemas/databases.
      * @param database 可选的数据库名。为空时返回数据库列表；有值时返回该库下的 schema 列表（PG）。
      */
@@ -56,8 +64,9 @@ interface DatabaseDialect {
 
     /**
      * List all tables in a specific database/schema
+     * @param schema 可选的 schema 名。为空时使用默认行为（MySQL: database, PG: search_path）。
      */
-    suspend fun listTables(conn: Connection, database: String): List<Map<String, String>>
+    suspend fun listTables(conn: Connection, database: String, schema: String = ""): List<Map<String, String>>
 
     /**
      * List all users

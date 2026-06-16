@@ -49,7 +49,7 @@ class MySQLDialect : DatabaseDialect {
         true
     }
 
-    override suspend fun listTables(conn: Connection, database: String): List<Map<String, String>> = withContext(Dispatchers.IO) {
+    override suspend fun listTables(conn: Connection, database: String, schema: String): List<Map<String, String>> = withContext(Dispatchers.IO) {
         val safeDb = sanitizeIdentifier(database, "database name")
         val tables = mutableListOf<Map<String, String>>()
         conn.createStatement().use { stmt ->

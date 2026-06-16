@@ -293,8 +293,19 @@ payload 含 `password` 且无 `privileges` 字段时走密码修改路径。`hos
 
 **列出所有表**
 
+MySQL：
 ```json
 {"id":"8","category":"TABLE","action":"LIST","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{}}
+```
+
+PostgreSQL — 使用 search_path 默认 schema（通常含 `public`）：
+```json
+{"id":"8a","category":"TABLE","action":"LIST","connection":{"driver":"Postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"my_app_db"},"payload":{}}
+```
+
+PostgreSQL — 指定 schema：
+```json
+{"id":"8b","category":"TABLE","action":"LIST","connection":{"driver":"Postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"my_app_db"},"payload":{"schema":"public"}}
 ```
 
 响应：
@@ -511,6 +522,16 @@ payload 含 `password` 且无 `privileges` 字段时走密码修改路径。`hos
 ...
 {"id":"19","success":true,"stream":true,"end":true,"data":null}
 ```
+
+**PostgreSQL 带 schema 上下文的查询**
+
+payload 含 `schema` 字段时，引擎在执行 SQL 前自动设置 `search_path`，确保无前缀表名能正确解析：
+
+```json
+{"id":"19b","category":"SQL","action":"EXECUTE","connection":{"driver":"Postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"my_app_db"},"payload":{"sql":"SELECT id, name FROM users WHERE id > 10 LIMIT 5","schema":"public"}}
+```
+
+MySQL 无需指定 `schema`，忽略该字段。
 
 **更新/DDL（返回受影响行数）**
 
@@ -780,6 +801,21 @@ end
 - `memory.free` — 已分配中的空闲内存
 - `uptime` — JVM 启动至今的毫秒数
 - `pid` — 进程 ID
+
+---
+
+### PostgreSQL Schema 支持
+
+所有 TABLE / DATA / SQL 操作均支持在 `payload` 中携带 `schema` 字段，指定 PostgreSQL 的 search_path：
+
+```json
+// 任何操作都可以加 schema 参数
+{"payload": {"schema": "public", ...}}
+```
+
+- 传入 `schema` 后，引擎自动执行 `SET search_path TO <schema>`，确保无前缀表名正确解析到目标 schema
+- 不传时使用 PostgreSQL 默认 search_path（通常含 `public`）
+- MySQL 忽略 `schema` 参数
 
 ---
 

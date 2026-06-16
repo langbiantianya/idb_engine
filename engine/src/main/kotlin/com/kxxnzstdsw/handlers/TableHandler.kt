@@ -8,12 +8,13 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 
 object TableHandler {
-    suspend fun list(config: ConnectionConfig): JsonElement = withContext(Dispatchers.IO) {
-        val connection = PoolManager.getConnection(config)
+    suspend fun list(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
+        val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
+        val connection = PoolManager.getConnection(config, schema)
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
-            val tables = dialect.listTables(conn, config.database)
+            val tables = dialect.listTables(conn, config.database, schema)
             Json.encodeToJsonElement(tables)
         }
     }
@@ -21,7 +22,8 @@ object TableHandler {
     suspend fun columnList(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
         val tableName = payload["tableName"]?.jsonPrimitive?.content
             ?: throw IllegalArgumentException("Missing 'tableName' in payload")
-        val connection = PoolManager.getConnection(config)
+        val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
+        val connection = PoolManager.getConnection(config, schema)
         return@withContext connection.use { conn ->
             val columns = mutableListOf<JsonObject>()
             val metaData = conn.metaData
@@ -66,8 +68,9 @@ object TableHandler {
         val options = payload["options"]?.jsonObject?.let { obj ->
             obj.entries.associate { it.key to it.value.jsonPrimitive.content }
         } ?: emptyMap()
+        val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
 
-        val connection = PoolManager.getConnection(config)
+        val connection = PoolManager.getConnection(config, schema)
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
@@ -123,8 +126,9 @@ object TableHandler {
             ?: throw IllegalArgumentException("Missing 'tableName'")
         val operation = payload["operation"]?.jsonPrimitive?.content
             ?: throw IllegalArgumentException("Missing 'operation' (ADD_COLUMN|DROP_COLUMN|MODIFY_COLUMN)")
+        val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
 
-        val connection = PoolManager.getConnection(config)
+        val connection = PoolManager.getConnection(config, schema)
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
@@ -179,7 +183,8 @@ object TableHandler {
     suspend fun getDDL(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
         val tableName = payload["tableName"]?.jsonPrimitive?.content
             ?: throw IllegalArgumentException("Missing 'tableName' in payload")
-        val connection = PoolManager.getConnection(config)
+        val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
+        val connection = PoolManager.getConnection(config, schema)
         val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
             JsonPrimitive(dialect.getCreateTableDDL(conn, tableName))
@@ -189,7 +194,8 @@ object TableHandler {
     suspend fun delete(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
         val tableName = payload["tableName"]?.jsonPrimitive?.content
             ?: throw IllegalArgumentException("Missing 'tableName'")
-        val connection = PoolManager.getConnection(config)
+        val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
+        val connection = PoolManager.getConnection(config, schema)
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->

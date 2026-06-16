@@ -20,6 +20,18 @@ object PoolManager {
         return dataSource.connection
     }
 
+    /**
+     * 获取连接并设置 schema 上下文（PostgreSQL: SET search_path, MySQL: 忽略）。
+     * 用于需要指定 schema 的操作（TABLE/DATA/SQL 等）。
+     */
+    fun getConnection(config: ConnectionConfig, schema: String): Connection {
+        val conn = getConnection(config)
+        if (schema.isNotBlank()) {
+            DialectLoader.getDialect(config.driver).setSearchPath(conn, schema)
+        }
+        return conn
+    }
+
     private fun generateHashKey(config: ConnectionConfig): String {
         val input = "${config.driver}:${config.host}:${config.port}:${config.user}:${config.password}:${config.database}"
         val digest = MessageDigest.getInstance("SHA-256")

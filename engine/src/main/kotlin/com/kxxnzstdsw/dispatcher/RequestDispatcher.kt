@@ -172,7 +172,7 @@ object RequestDispatcher {
                 if (request.payload.containsKey("tableName")) {
                     TableHandler.columnList(request.connection, request.payload)
                 } else {
-                    TableHandler.list(request.connection)
+                    TableHandler.list(request.connection, request.payload)
                 }
             }
             Action.CREATE -> TableHandler.create(request.connection, request.payload)

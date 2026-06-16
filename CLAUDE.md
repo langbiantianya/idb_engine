@@ -270,9 +270,16 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 **LIST（表列表）** — 通过 `connection.metaData.getTables` 获取，payload 不含 `tableName`
 
+所有 TABLE / DATA / SQL 操作均支持可选 `schema` 参数（PostgreSQL 有效，MySQL 忽略）：
+- 传入 `schema` 时，引擎自动 `SET search_path TO <schema>`，确保 SQL 在该 schema 上下文中执行
+- 不传时使用 PostgreSQL 默认 search_path（通常含 `public`）
+
 ```json
-// 请求 payload
+// 请求 payload（基础，使用默认 schema）
 {}
+
+// 请求 payload（PostgreSQL 指定 schema）
+{"schema": "public"}
 
 // 响应 data
 [{"name": "users", "type": "TABLE"}, {"name": "orders", "type": "TABLE"}]
@@ -500,9 +507,13 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
 
 - 若返回结果集（SELECT）：走流式输出，data 结构与 DATA LIST 一致（`total: -1` 表示无法预知总行数），通过 JDBC 游标（`TYPE_FORWARD_ONLY` + `CONCUR_READ_ONLY` + `fetchSize=100`）防止 OOM，PostgreSQL 端临时关闭 `autoCommit` 启用服务端游标
 - 若为更新操作（INSERT/UPDATE/DELETE/DDL）：返回单次响应 `{ "affectedRows": N }`
+- **PostgreSQL schema 上下文**：payload 可选 `schema` 字段，引擎在执行 SQL 前自动 `SET search_path TO <schema>`，确保无前缀表名（如 `SELECT * FROM users`）能正确解析到目标 schema
 
 ```json
-// 请求 payload（查询）
+// 请求 payload（查询，PostgreSQL 带 schema 上下文）
+{"sql": "SELECT id, name FROM users WHERE id > 10 LIMIT 5", "schema": "public"}
+
+// 请求 payload（查询，MySQL 或不需要指定 schema 时）
 {"sql": "SELECT id, name FROM users WHERE id > 10 LIMIT 5"}
 
 // 响应（流式，每行一条 JSON）
@@ -785,7 +796,7 @@ response := scanner.Text()
 - GET_DDL 返回建表语句（MySQL: SHOW CREATE TABLE / PG: information_schema 重建）
 - DATA LIST 支持 `where`/`orderBy` 原始 SQL 片段过滤与排序，方言级注入校验
 - SYSTEM INFO 返回 JVM 运行时信息（版本、内存、CPU、PID、运行时长等）
-- PostgreSQL 方言全面优化（listSchemas 支持两级查询：database 列表 + schema 列表、listTables 用 current_schema()、listUsers 用 pg_roles、MODIFY_COLUMN 补齐 nullable/default、GET_DDL 含约束与索引、正则预编译）
+- PostgreSQL 方言全面优化（listSchemas 支持两级查询：database 列表 + schema 列表、listTables 用 current_schemas(true)、所有 TABLE/DATA/SQL 操作支持 payload.schema 指定 search_path、listUsers 用 pg_roles、MODIFY_COLUMN 补齐 nullable/default、GET_DDL 含约束与索引、正则预编译）
 - 用户管理完整 CRUD（CREATE/DELETE 用户、修改密码、查询指定用户权限，MySQL 与 PostgreSQL 均已实现）
 - 造数引擎（LuaJIT 嵌入式脚本 + 多表按序造数 + 外键引用 `lastId()` + 批量插入 + 单事务 + Lua 沙箱 + 流式进度回报）
 

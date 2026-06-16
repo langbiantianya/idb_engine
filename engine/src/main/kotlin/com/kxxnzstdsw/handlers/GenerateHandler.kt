@@ -62,12 +62,13 @@ object GenerateHandler {
         payload: JsonObject,
         onProgress: (suspend (JsonElement) -> Unit)? = null
     ): JsonElement = withContext(Dispatchers.IO) {
+        val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
         val generatePayload = json.decodeFromJsonElement<GeneratePayload>(payload)
         if (generatePayload.tables.isEmpty()) {
             throw IllegalArgumentException("'tables' must not be empty")
         }
 
-        val connection = PoolManager.getConnection(config)
+        val connection = PoolManager.getConnection(config, schema)
         val dialect = DialectLoader.getDialect(config.driver)
 
         connection.use { conn ->

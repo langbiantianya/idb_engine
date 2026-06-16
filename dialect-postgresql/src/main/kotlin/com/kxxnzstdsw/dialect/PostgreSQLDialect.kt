@@ -18,6 +18,13 @@ class PostgreSQLDialect : DatabaseDialect {
         return original
     }
 
+    override fun setSearchPath(conn: Connection, schema: String) {
+        if (schema.isBlank()) return
+        conn.createStatement().use { stmt ->
+            stmt.execute("SET search_path TO ${quoteIdentifier(schema)}")
+        }
+    }
+
     // region companion object — 预编译正则与常量集合
 
     companion object {
@@ -101,14 +108,19 @@ class PostgreSQLDialect : DatabaseDialect {
         true
     }
 
-    override suspend fun listTables(conn: Connection, database: String): List<Map<String, String>> = withContext(Dispatchers.IO) {
+    override suspend fun listTables(conn: Connection, database: String, schema: String): List<Map<String, String>> = withContext(Dispatchers.IO) {
         val tables = mutableListOf<Map<String, String>>()
-        // PostgreSQL 的 connection.database 是 JDBC 连接的真实数据库名（如 postgres），而非 schema 名。
-        // table_schema 应使用当前连接 search_path 中的默认 schema（通常为 public）。
-        conn.prepareStatement(
+        val query = if (schema.isNotBlank()) {
+            // 指定了 schema → 精确过滤
             "SELECT table_name, table_type FROM information_schema.tables " +
-            "WHERE table_schema = current_schema() AND table_type IN ('BASE TABLE', 'VIEW') ORDER BY table_name"
-        ).use { stmt ->
+            "WHERE table_schema = ? AND table_type IN ('BASE TABLE', 'VIEW') ORDER BY table_name"
+        } else {
+            // 未指定 → 匹配 search_path 中所有 schema
+            "SELECT table_name, table_type FROM information_schema.tables " +
+            "WHERE table_schema = ANY(current_schemas(true)) AND table_type IN ('BASE TABLE', 'VIEW') ORDER BY table_name"
+        }
+        conn.prepareStatement(query).use { stmt ->
+            if (schema.isNotBlank()) stmt.setString(1, schema)
             stmt.executeQuery().use { rs ->
                 while (rs.next()) {
                     tables.add(mapOf(

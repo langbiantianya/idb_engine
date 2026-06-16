@@ -25,8 +25,9 @@ object DataHandler {
 
         val whereRaw = payload["where"]?.jsonPrimitive?.contentOrNull
         val orderByRaw = payload["orderBy"]?.jsonPrimitive?.contentOrNull
+        val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
 
-        val connection = PoolManager.getConnection(config)
+        val connection = PoolManager.getConnection(config, schema)
         val dialect = DialectLoader.getDialect(config.driver)
 
         // 按方言规则校验 SQL 片段安全性
@@ -126,8 +127,9 @@ object DataHandler {
             ?: throw IllegalArgumentException("Missing 'tableName'")
         val values = payload["values"]?.jsonObject
             ?: throw IllegalArgumentException("Missing 'values'")
+        val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
 
-        val connection = PoolManager.getConnection(config)
+        val connection = PoolManager.getConnection(config, schema)
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
@@ -152,8 +154,9 @@ object DataHandler {
             ?: throw IllegalArgumentException("Missing 'changes'")
         val where = payload["where"]?.jsonObject
             ?: throw IllegalArgumentException("Missing 'where'")
+        val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
 
-        val connection = PoolManager.getConnection(config)
+        val connection = PoolManager.getConnection(config, schema)
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
@@ -180,8 +183,9 @@ object DataHandler {
             ?: throw IllegalArgumentException("Missing 'tableName'")
         val where = payload["where"]?.jsonObject
             ?: throw IllegalArgumentException("Missing 'where'")
+        val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
 
-        val connection = PoolManager.getConnection(config)
+        val connection = PoolManager.getConnection(config, schema)
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
