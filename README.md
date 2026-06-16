@@ -93,6 +93,7 @@ cd engine/build/libs && java -jar idb-engine.jar
 
 **列出所有数据库/Schema**
 
+MySQL（与之前一致）：
 ```json
 {"id":"1","category":"SCHEMA","action":"LIST","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"mysql"},"payload":{}}
 ```
@@ -100,6 +101,26 @@ cd engine/build/libs && java -jar idb-engine.jar
 响应：
 ```json
 {"id":"1","success":true,"error":null,"data":["information_schema","mysql","test_db"]}
+```
+
+PostgreSQL — 获取数据库列表（payload 不含 `database`）：
+```json
+{"id":"1a","category":"SCHEMA","action":"LIST","connection":{"driver":"Postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"postgres"},"payload":{}}
+```
+
+响应：
+```json
+{"id":"1a","success":true,"error":null,"data":["postgres","my_app_db"]}
+```
+
+PostgreSQL — 获取指定数据库下的 schema 列表（payload 含 `database`）：
+```json
+{"id":"1b","category":"SCHEMA","action":"LIST","connection":{"driver":"Postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"postgres"},"payload":{"database":"my_app_db"}}
+```
+
+响应：
+```json
+{"id":"1b","success":true,"error":null,"data":["public","myschema"]}
 ```
 
 **创建数据库**

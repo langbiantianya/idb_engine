@@ -37,9 +37,10 @@ interface DatabaseDialect {
     }
 
     /**
-     * List all schemas/databases
+     * List all schemas/databases.
+     * @param database 可选的数据库名。为空时返回数据库列表；有值时返回该库下的 schema 列表（PG）。
      */
-    suspend fun listSchemas(conn: Connection): List<String>
+    suspend fun listSchemas(conn: Connection, database: String = ""): List<String>
 
     /**
      * Create a new schema/database

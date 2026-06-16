@@ -56,16 +56,29 @@ class PostgreSQLDialect : DatabaseDialect {
 
     // region Schema / Table / User 管理
 
-    override suspend fun listSchemas(conn: Connection): List<String> = withContext(Dispatchers.IO) {
+    override suspend fun listSchemas(conn: Connection, database: String): List<String> = withContext(Dispatchers.IO) {
         val schemas = mutableListOf<String>()
         conn.createStatement().use { stmt ->
-            stmt.executeQuery(
-                "SELECT nspname FROM pg_catalog.pg_namespace " +
-                "WHERE nspname NOT LIKE 'pg_%' AND nspname != 'information_schema' " +
-                "ORDER BY nspname"
-            ).use { rs ->
-                while (rs.next()) {
-                    schemas.add(rs.getString(1))
+            if (database.isBlank()) {
+                // 未指定数据库 → 返回所有数据库列表
+                stmt.executeQuery(
+                    "SELECT datname FROM pg_catalog.pg_database " +
+                    "WHERE datistemplate = false ORDER BY datname"
+                ).use { rs ->
+                    while (rs.next()) {
+                        schemas.add(rs.getString(1))
+                    }
+                }
+            } else {
+                // 指定了数据库 → 返回该库下的所有 schema（排除系统 schema）
+                stmt.executeQuery(
+                    "SELECT nspname FROM pg_catalog.pg_namespace " +
+                    "WHERE nspname NOT LIKE 'pg_%' AND nspname != 'information_schema' " +
+                    "ORDER BY nspname"
+                ).use { rs ->
+                    while (rs.next()) {
+                        schemas.add(rs.getString(1))
+                    }
                 }
             }
         }
@@ -89,13 +102,13 @@ class PostgreSQLDialect : DatabaseDialect {
     }
 
     override suspend fun listTables(conn: Connection, database: String): List<Map<String, String>> = withContext(Dispatchers.IO) {
-        val safeDb = sanitizeIdentifier(database, "database name")
         val tables = mutableListOf<Map<String, String>>()
+        // PostgreSQL 的 connection.database 是 JDBC 连接的真实数据库名（如 postgres），而非 schema 名。
+        // table_schema 应使用当前连接 search_path 中的默认 schema（通常为 public）。
         conn.prepareStatement(
             "SELECT table_name, table_type FROM information_schema.tables " +
-            "WHERE table_schema = ? AND table_type IN ('BASE TABLE', 'VIEW') ORDER BY table_name"
+            "WHERE table_schema = current_schema() AND table_type IN ('BASE TABLE', 'VIEW') ORDER BY table_name"
         ).use { stmt ->
-            stmt.setString(1, safeDb)
             stmt.executeQuery().use { rs ->
                 while (rs.next()) {
                     tables.add(mapOf(

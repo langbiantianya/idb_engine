@@ -110,17 +110,31 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 处理不同库的物理层级差异。MySQL 将其视为 `Database`，PG 将其视为 `Database -> Schema`。
 
-**LIST** — 获取可用架构列表
+**LIST** — 获取可用架构列表（支持两级查询）
 
-- MySQL 走 `SHOW DATABASES`；PG 走 `pg_catalog.pg_namespace`（过滤 `pg_%` 系统 schema 和 `information_schema`）
-- payload 为空对象
+- **MySQL**：`SHOW DATABASES`，忽略 `database` 参数
+- **PostgreSQL 两级模式**：
+  - payload 不含 `database`（或为空）→ 查 `pg_database`，返回**数据库列表**
+  - payload 含 `database`（如 `"myapp_db"`）→ 查 `pg_namespace`，返回该数据库下的 **schema 列表**（过滤 `pg_%` 和 `information_schema`）
 
 ```json
-// 请求
-{"id":"req-001","category":"SCHEMA","action":"LIST","connection":{"driver":"mysql","host":"127.0.0.1","port":3306,"user":"root","password":"secret","database":"mysql"},"payload":{}}
+// MySQL 请求（与之前一致，payload 可为空）
+{"id":"req-001","category":"SCHEMA","action":"LIST","connection":{"driver":"Mysql","host":"127.0.0.1","port":3306,"user":"root","password":"secret","database":"mysql"},"payload":{}}
 
-// 响应 data
+// MySQL 响应 data
 ["information_schema", "mysql", "my_app_db"]
+
+// PostgreSQL 请求 — 获取数据库列表（payload 不含 database）
+{"id":"req-001","category":"SCHEMA","action":"LIST","connection":{"driver":"Postgresql","host":"127.0.0.1","port":5432,"user":"postgres","password":"secret","database":"postgres"},"payload":{}}
+
+// PostgreSQL 响应 data（数据库列表）
+["postgres", "my_app_db"]
+
+// PostgreSQL 请求 — 获取指定数据库下的 schema 列表（payload 含 database）
+{"id":"req-002","category":"SCHEMA","action":"LIST","connection":{"driver":"Postgresql","host":"127.0.0.1","port":5432,"user":"postgres","password":"secret","database":"postgres"},"payload":{"database":"my_app_db"}}
+
+// PostgreSQL 响应 data（schema 列表）
+["public", "myschema"]
 ```
 
 **CREATE** — 创建 Database / Schema
@@ -771,7 +785,7 @@ response := scanner.Text()
 - GET_DDL 返回建表语句（MySQL: SHOW CREATE TABLE / PG: information_schema 重建）
 - DATA LIST 支持 `where`/`orderBy` 原始 SQL 片段过滤与排序，方言级注入校验
 - SYSTEM INFO 返回 JVM 运行时信息（版本、内存、CPU、PID、运行时长等）
-- PostgreSQL 方言全面优化（listSchemas 用 pg_namespace、listTables 含视图、listUsers 用 pg_roles、MODIFY_COLUMN 补齐 nullable/default、GET_DDL 含约束与索引、正则预编译）
+- PostgreSQL 方言全面优化（listSchemas 支持两级查询：database 列表 + schema 列表、listTables 用 current_schema()、listUsers 用 pg_roles、MODIFY_COLUMN 补齐 nullable/default、GET_DDL 含约束与索引、正则预编译）
 - 用户管理完整 CRUD（CREATE/DELETE 用户、修改密码、查询指定用户权限，MySQL 与 PostgreSQL 均已实现）
 - 造数引擎（LuaJIT 嵌入式脚本 + 多表按序造数 + 外键引用 `lastId()` + 批量插入 + 单事务 + Lua 沙箱 + 流式进度回报）
 

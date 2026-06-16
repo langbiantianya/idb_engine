@@ -18,7 +18,7 @@ class MySQLDialect : DatabaseDialect {
         return original
     }
 
-    override suspend fun listSchemas(conn: Connection): List<String> = withContext(Dispatchers.IO) {
+    override suspend fun listSchemas(conn: Connection, database: String): List<String> = withContext(Dispatchers.IO) {
         val schemas = mutableListOf<String>()
         conn.createStatement().use { stmt ->
             stmt.executeQuery("SHOW DATABASES").use { rs ->

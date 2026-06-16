@@ -159,7 +159,7 @@ object RequestDispatcher {
 
     private suspend fun handleSchema(request: Request): JsonElement {
         return when (request.action) {
-            Action.LIST -> SchemaHandler.list(request.connection)
+            Action.LIST -> SchemaHandler.list(request.connection, request.payload)
             Action.CREATE -> SchemaHandler.create(request.connection, request.payload)
             Action.DELETE -> SchemaHandler.delete(request.connection, request.payload)
             else -> throw UnsupportedOperationException("Action ${request.action} not supported for SCHEMA")
