@@ -49,6 +49,7 @@ object GenerateHandler {
         var currentColumns: List<String>? = null,
         var currentSql: String = "",
         var totalInserted: Long = 0,
+        var scriptInserted: Long = 0,
         var lastGeneratedId: Long? = null
     ) {
         fun closeStmt() {
@@ -84,8 +85,6 @@ object GenerateHandler {
                         L.openLibraries()
                         applySandbox(L)
                         registerHelpers(L, state)
-                        L.push(tableConfig.count.toLong())
-                        L.setGlobal("count")
                         L.run(tableConfig.script)
                     }
 
@@ -195,6 +194,7 @@ object GenerateHandler {
             }
 
             state.totalInserted++
+            state.scriptInserted++
 
             // 实时流式回报
             state.onProgress?.let { cb ->
@@ -202,8 +202,9 @@ object GenerateHandler {
                     cb(buildJsonObject {
                         put("table", state.currentTable)
                         put("inserted", state.totalInserted)
-                        put("total", state.totalScripts)
-                        put("index", state.scriptIndex + 1)
+                        put("scriptInserted", state.scriptInserted)
+                        put("scriptIndex", state.scriptIndex + 1)
+                        put("totalScripts", state.totalScripts)
                         put("sql", state.currentSql)
                     })
                 }

@@ -562,21 +562,21 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
 
 ### 5.7 造数引擎 (Data Generation) — `category: "DATA"`, `action: "GENERATE"`
 
-基于嵌入式 LuaJIT 脚本引擎的造数功能，支持单表或多表按序造数（自动处理外键依赖）。Lua 脚本由调用方（Go/Wails 前端）提供，每张表独立执行一个脚本。
+基于嵌入式 LuaJIT 脚本引擎的造数功能，支持单表或多表按序造数（自动处理外键依赖）。Lua 脚本由调用方（Go/Wails 前端）提供，脚本内部自行控制循环次数。
 
 **核心机制**：
 - 每张表创建独立的 Lua 虚拟机，`insert()` 调用时**逐条写库**（`executeUpdate` 单条 INSERT），不在内存中积累数据
-- 每条插入后实时流式回报进度（`stream: true`，`data` 含 `table`/`inserted`/`sql`）
+- 每条插入后实时流式回报进度（`stream: true`，`data` 含 `table`/`inserted`/`scriptInserted`/`scriptIndex`/`totalScripts`）
 - 表按 `tables` 数组顺序执行，先创建的表数据先入库（满足外键约束）
 - 通过 `RETURN_GENERATED_KEYS` 获取自增主键，`lastId()` 返回当前表最近一条插入的自增 ID，供后续表或行引用
 
-**Lua 沙箱**：禁用 `os`、`io`、`debug`、`package`、`require`、`loadfile`、`dofile`、`loadstring`、`rawget`、`rawset`、`rawequal`、`setfenv`、`getfenv`、`newproxy` 等危险模块。保留 `math`、`string`、`table`、`tostring`、`tonumber`、`type`、`pairs`、`ipairs`、`pcall`、`error`、`assert` 等安全模块。
+**Lua 沙箱**：禁用 `os`、`io`、`debug`、`package`、`require`、`loadfile`、`dofile`、`loadstring`、`load`、`rawget`、`rawset`、`rawequal`、`setfenv`、`getfenv`、`newproxy` 等危险模块。保留 `math`、`string`、`table`、`tostring`、`tonumber`、`type`、`pairs`、`ipairs`、`pcall`、`error`、`assert` 等安全模块。
 
 **Lua 内置辅助函数**：
 
 | 函数 | 说明 |
 |---|---|
-| `insert(tableName, rowTable)` | 收集一行待插入数据（Lua table → JDBC 行） |
+| `insert(tableName, rowTable)` | 收集一行待插入数据（Lua table → JDBC 行），每调用一次立即执行 INSERT |
 | `lastId()` | 获取上一张表最后插入的自增 ID（用于外键引用，无自增 ID 时返回 nil） |
 | `random_int(min, max)` | 随机整数 [min, max] |
 | `random_float(min, max)` | 随机浮点数 [min, max) |
@@ -593,32 +593,31 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
 - `luaVersion` — Lua 引擎版本（可选，默认 `"luajit"`，支持 `"5.1"` / `"5.2"` / `"5.3"` / `"5.4"` / `"5.5"`）
 
 ```json
-// 请求（使用 Lua 5.4 引擎）
+// 请求（脚本内部控制循环次数，不再传 count）
 {
   "id": "req-gen-001",
   "category": "DATA",
   "action": "GENERATE",
   "connection": {"driver": "mysql", "host": "127.0.0.1", "port": 3306, "user": "root", "password": "secret", "database": "test_db"},
   "payload": {
-    "luaVersion": "5.4",
+    "luaVersion": "luajit",
+    "schema": "public",
     "tables": [
       {
-        "count": 100,
-        "script": "for i = 1, count do\n  insert('users', {\n    name = 'user_' .. i,\n    email = random_email(),\n    age = random_int(18, 65),\n    phone = random_phone(),\n    created_at = random_date('2024-01-01', '2024-12-31')\n  })\nend"
+        "script": "for i = 1, 100 do\n  insert('users', {\n    name = 'user_' .. i,\n    email = random_email(),\n    age = random_int(18, 65),\n    phone = random_phone(),\n    created_at = random_date('2024-01-01', '2024-12-31')\n  })\nend"
       },
       {
-        "count": 500,
-        "script": "for i = 1, count do\n  insert('orders', {\n    user_id = random_int(1, 100),\n    amount = random_int(100, 99999) / 100.0,\n    status = random_enum('pending', 'paid', 'shipped', 'completed'),\n    created_at = random_date('2024-06-01', '2025-06-01')\n  })\nend"
+        "script": "for i = 1, 500 do\n  insert('orders', {\n    user_id = random_int(1, 100),\n    amount = random_int(100, 99999) / 100.0,\n    status = random_enum('pending', 'paid', 'shipped', 'completed'),\n    created_at = random_date('2024-06-01', '2025-06-01')\n  })\nend"
       }
     ]
   }
 }
 
-// 响应序列（流式，每插入一行回报一次进度，sql 为该表使用的 INSERT 语句模板）
-{"id":"req-gen-001","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":1,"total":2,"index":1,"sql":"INSERT INTO `users` (`name`, `email`, `age`, `phone`, `created_at`) VALUES (?, ?, ?, ?, ?)"}}
-{"id":"req-gen-001","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":2,"total":2,"index":1,"sql":"INSERT INTO `users` (`name`, `email`, `age`, `phone`, `created_at`) VALUES (?, ?, ?, ?, ?)"}}
+// 响应序列（流式，每插入一行回报一次进度）
+{"id":"req-gen-001","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":1,"scriptInserted":1,"scriptIndex":1,"totalScripts":2,"sql":"INSERT INTO `users` (`name`, `email`, `age`, `phone`, `created_at`) VALUES (?, ?, ?, ?, ?)"}}
+{"id":"req-gen-001","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":2,"scriptInserted":2,"scriptIndex":1,"totalScripts":2,"sql":"INSERT INTO `users` (`name`, `email`, `age`, `phone`, `created_at`) VALUES (?, ?, ?, ?, ?)"}}
 ...
-{"id":"req-gen-001","success":true,"stream":true,"end":false,"data":{"table":"orders","inserted":1,"total":2,"index":2,"sql":"INSERT INTO `orders` (`user_id`, `amount`, `status`, `created_at`) VALUES (?, ?, ?, ?)"}}
+{"id":"req-gen-001","success":true,"stream":true,"end":false,"data":{"table":"orders","inserted":101,"scriptInserted":1,"scriptIndex":2,"totalScripts":2,"sql":"INSERT INTO `orders` (`user_id`, `amount`, `status`, `created_at`) VALUES (?, ?, ?, ?)"}}
 ...
 {"id":"req-gen-001","success":true,"stream":true,"end":true,"data":null}
 ```
@@ -630,12 +629,10 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
   "payload": {
     "tables": [
       {
-        "count": 10,
-        "script": "for i = 1, count do\n  insert('categories', {\n    name = '分类_' .. i,\n    description = random_string(20)\n  })\nend"
+        "script": "for i = 1, 10 do\n  insert('categories', {\n    name = '分类_' .. i,\n    description = random_string(20)\n  })\nend"
       },
       {
-        "count": 100,
-        "script": "local catId = lastId()\nfor i = 1, count do\n  insert('products', {\n    category_id = random_int(catId - 9, catId),\n    name = '商品_' .. random_string(6),\n    price = random_int(100, 99999) / 100.0\n  })\nend"
+        "script": "local catId = lastId()\nfor i = 1, 100 do\n  insert('products', {\n    category_id = random_int(catId - 9, catId),\n    name = '商品_' .. random_string(6),\n    price = random_int(100, 99999) / 100.0\n  })\nend"
       }
     ]
   }

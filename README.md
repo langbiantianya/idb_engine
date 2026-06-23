@@ -582,11 +582,7 @@ MySQL 无需指定 `schema`，忽略该字段。
 | `random_enum(...)` | 可变参数 | 同参数类型 | 从传入的参数中随机选取一个 |
 | `random_uuid()` | 无 | 字符串 | 标准 UUID 格式（`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`） |
 
-**全局变量**
-
-| 变量 | 说明 |
-|---|---|
-| `count` | 请求 payload 中该表配置的 `count` 值，脚本中直接使用 |
+**循环次数由脚本内部控制**，不再通过 `count` 参数传递。Lua 脚本中自行决定循环次数，如 `for i = 1, 1000 do ... end`。
 
 ---
 
@@ -597,7 +593,7 @@ MySQL 无需指定 `schema`，忽略该字段。
 向 `users` 表插入 100 条基础数据：
 
 ```lua
-for i = 1, count do
+for i = 1, 100 do
   insert('users', {
     name = 'user_' .. i,
     email = 'user_' .. i .. '@test.com'
@@ -606,7 +602,7 @@ end
 ```
 
 ```json
-{"tables":[{"count":100,"script":"for i = 1, count do\n  insert('users', {\n    name = 'user_' .. i,\n    email = 'user_' .. i .. '@test.com'\n  })\nend"}]}
+{"tables":[{"script":"for i = 1, 100 do\n  insert('users', {\n    name = 'user_' .. i,\n    email = 'user_' .. i .. '@test.com'\n  })\nend"}]}
 ```
 
 ---
@@ -614,7 +610,7 @@ end
 **示例 2 — 使用随机函数生成真实感数据**
 
 ```lua
-for i = 1, count do
+for i = 1, 1000 do
   insert('users', {
     name = random_name(),
     email = random_email(),
@@ -636,25 +632,25 @@ end
 
 ```json
 {"payload":{"tables":[
-  {"count":10,"script":"for i = 1, count do\n  insert('categories', {\n    name = '分类_' .. i,\n    sort_order = i\n  })\nend"},
-  {"count":100,"script":"for i = 1, count do\n  insert('products', {\n    category_id = random_int(1, 10),\n    name = '商品_' .. random_string(6),\n    price = random_int(100, 99999) / 100.0,\n    stock = random_int(0, 500)\n  })\nend"}
+  {"script":"for i = 1, 10 do\n  insert('categories', {\n    name = '分类_' .. i,\n    sort_order = i\n  })\nend"},
+  {"script":"for i = 1, 100 do\n  insert('products', {\n    category_id = random_int(1, 10),\n    name = '商品_' .. random_string(6),\n    price = random_int(100, 99999) / 100.0,\n    stock = random_int(0, 500)\n  })\nend"}
 ]}}
 ```
 
 如果子表需要精确引用父表最后一行的 ID：
 
 ```lua
--- 父表脚本：造 5 个分类
-for i = 1, 5 do
+-- 父表脚本：造 10 个分类
+for i = 1, 10 do
   insert('categories', { name = '分类_' .. i })
 end
 
 -- 子表脚本：用 lastId() 获取父表最后一个自增 ID
 local lastCatId = lastId()
-for i = 1, count do
+for i = 1, 100 do
   insert('products', {
-    category_id = random_int(lastCatId - 4, lastCatId),
-    name = '商品_' .. i,
+    category_id = random_int(lastCatId - 9, lastCatId),
+    name = '商品_' .. random_string(6),
     price = random_int(10, 99999) / 100.0
   })
 end
@@ -667,7 +663,7 @@ end
 一个脚本内可以多次调用 `insert()` 写不同表，适合一对一关系：
 
 ```lua
-for i = 1, count do
+for i = 1, 500 do
   insert('users', {
     username = 'user_' .. i,
     email = random_email(),
@@ -694,9 +690,9 @@ end
 
 ```json
 {"payload":{"luaVersion":"5.4","tables":[
-  {"count":50,"script":"for i = 1, count do\n  insert('users', {\n    username = 'buyer_' .. i,\n    email = random_email(),\n    phone = random_phone(),\n    balance = random_int(0, 1000000) / 100.0\n  })\nend"},
-  {"count":200,"script":"for i = 1, count do\n  local userId = random_int(1, 50)\n  insert('orders', {\n    user_id = userId,\n    order_no = 'ORD-' .. random_string(12),\n    total_amount = random_int(100, 500000) / 100.0,\n    status = random_enum('pending', 'paid', 'shipped', 'completed', 'cancelled'),\n    created_at = random_date('2024-01-01', '2025-06-01')\n  })\nend"},
-  {"count":500,"script":"for i = 1, count do\n  insert('order_items', {\n    order_id = random_int(1, 200),\n    product_id = random_int(1, 100),\n    quantity = random_int(1, 10),\n    unit_price = random_int(100, 99999) / 100.0\n  })\nend"}
+  {"script":"for i = 1, 50 do\n  insert('users', {\n    username = 'buyer_' .. i,\n    email = random_email(),\n    phone = random_phone(),\n    balance = random_int(0, 1000000) / 100.0\n  })\nend"},
+  {"script":"for i = 1, 200 do\n  local userId = random_int(1, 50)\n  insert('orders', {\n    user_id = userId,\n    order_no = 'ORD-' .. random_string(12),\n    total_amount = random_int(100, 500000) / 100.0,\n    status = random_enum('pending', 'paid', 'shipped', 'completed', 'cancelled'),\n    created_at = random_date('2024-01-01', '2025-06-01')\n  })\nend"},
+  {"script":"for i = 1, 500 do\n  insert('order_items', {\n    order_id = random_int(1, 200),\n    product_id = random_int(1, 100),\n    quantity = random_int(1, 10),\n    unit_price = random_int(100, 99999) / 100.0\n  })\nend"}
 ]}}
 ```
 

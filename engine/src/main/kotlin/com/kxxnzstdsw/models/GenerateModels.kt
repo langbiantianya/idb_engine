@@ -10,6 +10,5 @@ data class GeneratePayload(
 
 @Serializable
 data class TableGenerateConfig(
-    val count: Int,
     val script: String
 )
