@@ -14,12 +14,12 @@ data class Request(
 
 @Serializable
 enum class Category {
-    SCHEMA, USER, TABLE, DATA, SQL, SYSTEM
+    SCHEMA, USER, TABLE, DATA, SQL, SYSTEM, FUNCTION
 }
 
 @Serializable
 enum class Action {
-    LIST, CREATE, UPDATE, DELETE, EXECUTE, GET_DDL, INFO, GRANTS, GENERATE
+    LIST, CREATE, UPDATE, DELETE, EXECUTE, GET_DDL, INFO, GRANTS, GENERATE, DEBUG, CALL
 }
 
 @Serializable

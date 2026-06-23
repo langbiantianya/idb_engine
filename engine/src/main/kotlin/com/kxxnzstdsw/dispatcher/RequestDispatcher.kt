@@ -1,6 +1,7 @@
 package com.kxxnzstdsw.dispatcher
 
 import com.kxxnzstdsw.handlers.DataHandler
+import com.kxxnzstdsw.handlers.FunctionHandler
 import com.kxxnzstdsw.handlers.GenerateHandler
 import com.kxxnzstdsw.handlers.SchemaHandler
 import com.kxxnzstdsw.handlers.SqlEngineHandler
@@ -59,6 +60,7 @@ object RequestDispatcher {
                 Category.TABLE -> handleTable(request)
                 Category.DATA -> handleData(request)
                 Category.USER -> handleUser(request)
+                Category.FUNCTION -> handleFunction(request)
                 else -> throw UnsupportedOperationException("Unsupported request")
             }
 
@@ -201,6 +203,20 @@ object RequestDispatcher {
             Action.DELETE -> UserHandler.delete(request.connection, request.payload)
             Action.GRANTS -> UserHandler.listAllGrants(request.connection, request.payload)
             else -> throw UnsupportedOperationException("Action ${request.action} not supported for USER")
+        }
+    }
+
+    private suspend fun handleFunction(request: Request): JsonElement {
+        return when (request.action) {
+            Action.LIST -> FunctionHandler.list(request.connection, request.payload)
+            Action.INFO -> FunctionHandler.info(request.connection, request.payload)
+            Action.GET_DDL -> FunctionHandler.getDDL(request.connection, request.payload)
+            Action.CREATE -> FunctionHandler.create(request.connection, request.payload)
+            Action.DELETE -> FunctionHandler.delete(request.connection, request.payload)
+            Action.CALL -> FunctionHandler.call(request.connection, request.payload)
+            Action.DEBUG -> FunctionHandler.debug(request.connection, request.payload)
+            Action.UPDATE -> FunctionHandler.validate(request.connection, request.payload) // UPDATE as validate
+            else -> throw UnsupportedOperationException("Action ${request.action} not supported for FUNCTION")
         }
     }
 

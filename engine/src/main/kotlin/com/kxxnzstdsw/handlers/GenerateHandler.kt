@@ -166,9 +166,9 @@ object GenerateHandler {
 
             val tableName = lua.toString(1) ?: return@JFunction 0
             val row = readLuaTable(lua, 2)
-            val columns = state.currentColumns
 
             // 表名或列结构变化时重建 PreparedStatement
+            val columns = state.currentColumns
             if (tableName != state.currentTable || columns == null || row.keys.toList() != columns) {
                 state.closeStmt()
                 val cols = row.keys.toList()
@@ -196,7 +196,7 @@ object GenerateHandler {
             state.totalInserted++
             state.scriptInserted++
 
-            // 实时流式回报
+            // 实时流式回报（包含 SQL 和实际插入的数据）
             state.onProgress?.let { cb ->
                 runBlocking {
                     cb(buildJsonObject {
@@ -206,6 +206,17 @@ object GenerateHandler {
                         put("scriptIndex", state.scriptIndex + 1)
                         put("totalScripts", state.totalScripts)
                         put("sql", state.currentSql)
+                        put("data", buildJsonObject {
+                            row.forEach { (k, v) ->
+                                when (v) {
+                                    is Long -> put(k, v)
+                                    is Double -> put(k, v)
+                                    is Boolean -> put(k, v)
+                                    null -> put(k, JsonNull)
+                                    else -> put(k, v.toString())
+                                }
+                            }
+                        })
                     })
                 }
             }

@@ -194,4 +194,115 @@ interface DatabaseDialect {
         defaultValue: String?,
         newName: String? = null
     ): String
+
+    // region 函数/存储过程管理
+
+    /**
+     * 列出 schema 下的所有函数和存储过程
+     * @param schema Schema 名称（为空使用默认 schema）
+     * @return 函数/存储过程列表，包含 name, type, return type, language 等字段
+     */
+    suspend fun listRoutines(conn: Connection, schema: String): List<Map<String, String>>
+
+    /**
+     * 获取函数/存储过程的详细信息
+     * @param routineName 函数/存储过程名称
+     * @param routineType 类型：FUNCTION 或 PROCEDURE
+     * @param schema Schema 名称
+     * @return 包含参数、返回类型、安全性、稳定性等详细信息
+     */
+    suspend fun getRoutineInfo(conn: Connection, routineName: String, routineType: String, schema: String): Map<String, String?>
+
+    /**
+     * 获取函数/存储过程的 DDL 定义
+     * @param routineName 函数/存储过程名称
+     * @param routineType 类型：FUNCTION 或 PROCEDURE
+     * @param schema Schema 名称
+     * @return DDL 字符串（CREATE OR REPLACE ...）
+     */
+    suspend fun getRoutineDDL(conn: Connection, routineName: String, routineType: String, schema: String): String
+
+    /**
+     * 创建函数或存储过程
+     * @param routineName 函数/存储过程名称
+     * @param routineType 类型：FUNCTION 或 PROCEDURE
+     * @param schema Schema 名称
+     * @param args 参数列表：[{name, mode (IN/OUT/INOUT), dataType, defaultValue}]
+     * @param returnType 返回类型（函数有效）
+     * @param language 语言（plpgsql, sql 等）
+     * @param body 函数体源代码
+     * @param options 可选配置：security_definer, volatility, cost 等
+     */
+    suspend fun createRoutine(
+        conn: Connection,
+        routineName: String,
+        routineType: String,
+        schema: String,
+        args: List<Map<String, String?>>,
+        returnType: String?,
+        language: String,
+        body: String,
+        options: Map<String, String> = emptyMap()
+    ): Boolean
+
+    /**
+     * 删除函数或存储过程
+     * @param routineName 函数/存储过程名称
+     * @param routineType 类型：FUNCTION 或 PROCEDURE
+     * @param schema Schema 名称
+     * @param ifExists 是否添加 IF EXISTS
+     * @param cascade 是否级联删除依赖
+     */
+    suspend fun dropRoutine(
+        conn: Connection,
+        routineName: String,
+        routineType: String,
+        schema: String,
+        ifExists: Boolean = false,
+        cascade: Boolean = false
+    ): Boolean
+
+    /**
+     * 调用函数或存储过程
+     * @param routineName 函数/存储过程名称
+     * @param routineType 类型：FUNCTION 或 PROCEDURE
+     * @param schema Schema 名称
+     * @param args 参数值列表
+     * @return 执行结果（函数返回 result，存储过程返回 result_set）
+     */
+    suspend fun callRoutine(
+        conn: Connection,
+        routineName: String,
+        routineType: String,
+        schema: String,
+        args: List<String?>
+    ): Map<String, Any?>
+
+    /**
+     * 调试函数（EXPLAIN、执行计划、依赖分析等）
+     * @param routineName 函数名称
+     * @param schema Schema 名称
+     * @return 调试信息列表（EXPLAIN、INFO、DEPENDENCIES）
+     */
+    suspend fun debugRoutine(conn: Connection, routineName: String, schema: String): List<Map<String, String>>
+
+    /**
+     * 验证函数/存储过程体的语法（不创建）
+     * @param routineType 类型：FUNCTION 或 PROCEDURE
+     * @param args 参数定义
+     * @param returnType 返回类型
+     * @param language 语言
+     * @param body 函数体
+     * @return 验证是否通过
+     */
+    suspend fun validateRoutineBody(
+        conn: Connection,
+        routineType: String,
+        args: List<Map<String, String?>>,
+        returnType: String?,
+        language: String,
+        body: String
+    ): Boolean
+
+    // endregion
 }

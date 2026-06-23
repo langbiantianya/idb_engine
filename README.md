@@ -56,8 +56,8 @@ cd engine/build/libs && java -jar idb-engine.jar
 ```json
 {
   "id": "req-uuid-1234",
-  "category": "SCHEMA|USER|TABLE|DATA|SQL|SYSTEM",
-  "action": "LIST|CREATE|UPDATE|DELETE|EXECUTE|GET_DDL|INFO|GRANTS|GENERATE",
+  "category": "SCHEMA|USER|TABLE|DATA|SQL|SYSTEM|FUNCTION",
+  "action": "LIST|CREATE|UPDATE|DELETE|EXECUTE|GET_DDL|INFO|GRANTS|GENERATE|CALL|DEBUG",
   "connection": {
     "driver": "mysql|postgresql",
     "host": "127.0.0.1",
@@ -761,13 +761,13 @@ end
 }
 ```
 
-**响应**（流式，每插入一行回报进度）：
+**响应**（流式，每插入一行回报进度，包含实际插入的数据）：
 
 ```json
-{"id":"30","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":1,"total":2,"index":1,"sql":"INSERT INTO `users` (`name`, `email`) VALUES (?, ?)"}}
-{"id":"30","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":2,"total":2,"index":1,"sql":"INSERT INTO `users` (`name`, `email`) VALUES (?, ?)"}}
+{"id":"30","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":1,"scriptInserted":1,"scriptIndex":1,"totalScripts":2,"sql":"INSERT INTO `users` (`name`, `email`) VALUES (?, ?)","data":{"name":"user_1","email":"user_123456@example.com"}}}
+{"id":"30","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":2,"scriptInserted":2,"scriptIndex":1,"totalScripts":2,"sql":"INSERT INTO `users` (`name`, `email`) VALUES (?, ?)","data":{"name":"user_2","email":"user_234567@example.com"}}}
 ...
-{"id":"30","success":true,"stream":true,"end":false,"data":{"table":"orders","inserted":1,"total":2,"index":2,"sql":"INSERT INTO `orders` (`user_id`, `amount`) VALUES (?, ?)"}}
+{"id":"30","success":true,"stream":true,"end":false,"data":{"table":"orders","inserted":101,"scriptInserted":1,"scriptIndex":2,"totalScripts":2,"sql":"INSERT INTO `orders` (`user_id`, `amount`) VALUES (?, ?)","data":{"user_id":50,"amount":299.99}}}
 ...
 {"id":"30","success":true,"stream":true,"end":true,"data":null}
 ```
@@ -797,6 +797,113 @@ end
 - `memory.free` — 已分配中的空闲内存
 - `uptime` — JVM 启动至今的毫秒数
 - `pid` — 进程 ID
+
+---
+
+### FUNCTION — 函数与存储过程管理 (PostgreSQL)
+
+> ⚠️ **注意**：MySQL 当前为占位实现，调用时会抛出 `UnsupportedOperationException`。
+
+PostgreSQL 函数和存储过程管理模块，支持创建、查询、调用、调试等功能。
+
+**列出所有函数/存储过程**
+
+```json
+{"id":"fn1","category":"FUNCTION","action":"LIST","connection":{"driver":"Postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"test_db"},"payload":{"schema":"public"}}
+```
+
+响应：
+```json
+{"id":"fn1","success":true,"error":null,"data":[{"name":"get_user_by_id","routine_type":"FUNCTION","return_type":"SETOF users","language":"plpgsql","security_definer":"SECURITY INVOKER","volatility":"STABLE","arg_count":"1","arg_names":"user_id","schema":"public","description":"根据ID获取用户信息"},{"name":"create_order","routine_type":"PROCEDURE","return_type":"","language":"plpgsql","security_definer":"SECURITY INVOKER","volatility":"VOLATILE","arg_count":"3","arg_names":"user_id, product_id, quantity","schema":"public","description":""}]}
+```
+
+**获取函数详细信息**
+
+```json
+{"id":"fn2","category":"FUNCTION","action":"INFO","connection":{"driver":"Postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"test_db"},"payload":{"name":"get_user_by_id","routineType":"FUNCTION","schema":"public"}}
+```
+
+响应：
+```json
+{"id":"fn2","success":true,"error":null,"data":{"name":"get_user_by_id","routine_type":"FUNCTION","schema":"public","return_type":"SETOF users","language":"plpgsql","source_code":"BEGIN\n  RETURN QUERY SELECT * FROM users WHERE id = user_id;\nEND","security_definer":"SECURITY INVOKER","volatility":"STABLE","returns_set":"true","identity_args":"user_id integer","description":"根据ID获取用户信息","args":"IN user_id integer"}}
+```
+
+**获取函数 DDL**
+
+```json
+{"id":"fn3","category":"FUNCTION","action":"GET_DDL","connection":{"driver":"Postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"test_db"},"payload":{"name":"get_user_by_id","routineType":"FUNCTION","schema":"public"}}
+```
+
+响应：
+```json
+{"id":"fn3","success":true,"error":null,"data":"CREATE OR REPLACE FUNCTION public.get_user_by_id(user_id integer)\n RETURNS SETOF users\n LANGUAGE plpgsql\n STABLE\nAS $function$\nBEGIN\n  RETURN QUERY SELECT * FROM users WHERE id = user_id;\nEND\n$function$"}
+```
+
+**创建函数/存储过程**
+
+```json
+{"id":"fn4","category":"FUNCTION","action":"CREATE","connection":{"driver":"Postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"test_db"},"payload":{"name":"calculate_total","routineType":"FUNCTION","schema":"public","args":[{"name":"price","mode":"IN","dataType":"DECIMAL","defaultValue":null},{"name":"tax_rate","mode":"IN","dataType":"DECIMAL","defaultValue":"0.1"}],"returnType":"DECIMAL","language":"plpgsql","body":"BEGIN\n  RETURN price * (1 + tax_rate);\nEND","options":{"security_definer":"false","volatility":"IMMUTABLE","cost":"100"}}}
+```
+
+响应：
+```json
+{"id":"fn4","success":true,"error":null,"data":{"created":"calculate_total","routineType":"FUNCTION","schema":"public"}}
+```
+
+**调用函数**
+
+```json
+{"id":"fn5","category":"FUNCTION","action":"CALL","connection":{"driver":"Postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"test_db"},"payload":{"name":"calculate_total","routineType":"FUNCTION","schema":"public","args":["100.00","0.15"]}}
+```
+
+响应（函数返回结果）：
+```json
+{"id":"fn5","success":true,"error":null,"data":{"result":115.0,"row_count":1}}
+```
+
+**调用存储过程**
+
+```json
+{"id":"fn6","category":"FUNCTION","action":"CALL","connection":{"driver":"Postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"test_db"},"payload":{"name":"create_order","routineType":"PROCEDURE","schema":"public","args":["1","100","5"]}}
+```
+
+响应：
+```json
+{"id":"fn6","success":true,"error":null,"data":{"update_count":1}}
+```
+
+**调试函数（EXPLAIN、执行计划、依赖分析）**
+
+```json
+{"id":"fn7","category":"FUNCTION","action":"DEBUG","connection":{"driver":"Postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"test_db"},"payload":{"name":"get_user_by_id","schema":"public"}}
+```
+
+响应：
+```json
+{"id":"fn7","success":true,"error":null,"data":[{"type":"EXPLAIN","output":"[{\"Plan\":{\"Node Type\":\"Seq Scan\",\"Relation Name\":\"users\",\"Filter\":\"(id = $1)\"}}]"},{"type":"INFO","output":"函数名: get_user_by_id\nSchema: public\n语言: plpgsql\n返回类型: SETOF users\n稳定性: STABLE\n安全性: SECURITY INVOKER\n参数: user_id integer"},{"type":"DEPENDENCIES","output":"TABLE: users"}]}
+```
+
+**验证函数体语法（不创建，用于编辑时的语法检查）**
+
+```json
+{"id":"fn8","category":"FUNCTION","action":"UPDATE","connection":{"driver":"Postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"test_db"},"payload":{"routineType":"FUNCTION","args":[{"name":"x","mode":"IN","dataType":"INTEGER"}],"returnType":"INTEGER","language":"plpgsql","body":"BEGIN RETURN x * 2; END"}}
+```
+
+响应：
+```json
+{"id":"fn8","success":true,"error":null,"data":{"valid":true,"routineType":"FUNCTION","language":"plpgsql"}}
+```
+
+**删除函数/存储过程**
+
+```json
+{"id":"fn9","category":"FUNCTION","action":"DELETE","connection":{"driver":"Postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"test_db"},"payload":{"name":"old_function","routineType":"FUNCTION","schema":"public","ifExists":true,"cascade":false}}
+```
+
+响应：
+```json
+{"id":"fn9","success":true,"error":null,"data":{"deleted":"old_function","routineType":"FUNCTION","schema":"public"}}
+```
 
 ---
 
@@ -841,6 +948,7 @@ end
 - **JDBC 游标流式**：大结果集通过服务端游标逐行拉取，避免客户端内存溢出
 - **日志隔离**：所有日志输出到滚动文件 (`~/.config/idb/logs/idb-engine.log`)，不污染 stdout JSON 流
 - **嵌入式造数引擎**：LuaJIT 脚本驱动，支持多表按序造数、外键引用、沙箱隔离、流式进度回报
+- **函数与存储过程管理**：PostgreSQL 完整实现（创建/查询/调用/调试/删除），MySQL 占位
 
 ## 技术栈
 

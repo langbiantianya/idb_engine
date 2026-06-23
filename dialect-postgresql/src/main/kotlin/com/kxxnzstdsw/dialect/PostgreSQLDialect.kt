@@ -532,23 +532,541 @@ class PostgreSQLDialect : DatabaseDialect {
 
     // region SQL 安全校验
 
+    /**
+     * 校验 SQL 片段的安全性
+     */
     override fun validateSqlFragment(sql: String, label: String) {
-        if (sql.contains(' ')) throw IllegalArgumentException("$label contains null byte")
+        if (sql.contains(' ')) throw IllegalArgumentException("$label 包含空字节")
         val bare = sql.replace(QUOTED_STRING_REGEX, "")
-        if (bare.contains(';')) throw IllegalArgumentException("$label contains illegal character ';'")
-        if (bare.contains("--") || bare.contains("/*")) throw IllegalArgumentException("$label contains illegal comment")
+        if (bare.contains(';')) throw IllegalArgumentException("$label 包含非法字符 ';'")
+        if (bare.contains("--") || bare.contains("/*")) throw IllegalArgumentException("$label 包含非法注释")
         val upper = bare.uppercase()
         for (regex in DANGEROUS_KEYWORD_REGEXES) {
             if (regex.containsMatchIn(upper)) {
                 val kw = regex.pattern.substringAfter("\\b").substringBefore("\\b")
-                throw IllegalArgumentException("$label contains forbidden keyword: $kw")
+                throw IllegalArgumentException("$label 包含禁止关键词: $kw")
             }
         }
     }
 
+    /**
+     * 校验 ORDER BY 子句格式
+     */
     override fun validateOrderBy(sql: String) {
         if (!ORDER_BY_REGEX.matches(sql)) {
-            throw IllegalArgumentException("Invalid ORDER BY format: $sql")
+            throw IllegalArgumentException("无效的 ORDER BY 格式: $sql")
+        }
+    }
+
+    // endregion
+
+    // region 函数/存储过程管理
+
+    /**
+     * 列出 schema 下所有函数和存储过程
+     */
+    override suspend fun listRoutines(conn: Connection, schema: String): List<Map<String, String>> = withContext(Dispatchers.IO) {
+        val routines = mutableListOf<Map<String, String>>()
+        val schemaFilter = if (schema.isNotBlank()) "AND n.nspname = ?" else ""
+        val query = """
+            SELECT p.proname AS name,
+                   CASE p.prokind
+                       WHEN 'f' THEN 'FUNCTION'
+                       WHEN 'p' THEN 'PROCEDURE'
+                       WHEN 'w' THEN 'AGGREGATE'
+                       ELSE 'FUNCTION'
+                   END AS routine_type,
+                   pg_catalog.format_type(p.prorettype, NULL) AS return_type,
+                   l.lanname AS language,
+                   p.prosecdef AS security_definer,
+                   CASE p.provolatile
+                       WHEN 'i' THEN 'IMMUTABLE'
+                       WHEN 's' THEN 'STABLE'
+                       ELSE 'VOLATILE'
+                   END AS volatility,
+                   p.pronargs AS arg_count,
+                   p.proargnames AS arg_names,
+                   p.proargtypes AS arg_types,
+                   obj_description(p.oid, 'pg_proc') AS description
+            FROM pg_catalog.pg_proc p
+            JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+            JOIN pg_catalog.pg_language l ON l.oid = p.prolang
+            WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+            $schemaFilter
+            ORDER BY n.nspname, p.proname
+        """.trimIndent()
+
+        conn.prepareStatement(query).use { stmt ->
+            if (schema.isNotBlank()) stmt.setString(1, schema)
+            stmt.executeQuery().use { rs ->
+                while (rs.next()) {
+                    @Suppress("UNCHECKED_CAST")
+                    val argNames = (rs.getArray("arg_names")?.array as? Array<String>) ?: emptyArray()
+
+                    routines.add(mapOf(
+                        "name" to rs.getString("name"),
+                        "routine_type" to rs.getString("routine_type"),
+                        "return_type" to rs.getString("return_type"),
+                        "language" to rs.getString("language"),
+                        "security_definer" to if (rs.getBoolean("security_definer")) "SECURITY DEFINER" else "SECURITY INVOKER",
+                        "volatility" to rs.getString("volatility"),
+                        "arg_count" to rs.getInt("arg_count").toString(),
+                        "arg_names" to argNames.joinToString(", "),
+                        "schema" to (if (schema.isNotBlank()) schema else "public"),
+                        "description" to (rs.getString("description") ?: "")
+                    ))
+                }
+            }
+        }
+        routines
+    }
+
+    /**
+     * 获取函数/存储过程的详细信息
+     */
+    override suspend fun getRoutineInfo(conn: Connection, routineName: String, routineType: String, schema: String): Map<String, String?> = withContext(Dispatchers.IO) {
+        val targetSchema = if (schema.isNotBlank()) schema else "public"
+        val kindFilter = when (routineType.uppercase()) {
+            "FUNCTION" -> "p.prokind = 'f'"
+            "PROCEDURE" -> "p.prokind = 'p'"
+            else -> "(p.prokind = 'f' OR p.prokind = 'p')"
+        }
+
+        val query = """
+            SELECT p.proname AS name,
+                   CASE p.prokind
+                       WHEN 'f' THEN 'FUNCTION'
+                       WHEN 'p' THEN 'PROCEDURE'
+                       ELSE 'FUNCTION'
+                   END AS routine_type,
+                   pg_catalog.format_type(p.prorettype, NULL) AS return_type,
+                   l.lanname AS language,
+                   p.prosrc AS source_code,
+                   n.nspname AS schema_name,
+                   p.prosecdef AS security_definer,
+                   CASE p.provolatile
+                       WHEN 'i' THEN 'IMMUTABLE'
+                       WHEN 's' THEN 'STABLE'
+                       ELSE 'VOLATILE'
+                   END AS volatility,
+                   p.proretset AS returns_set,
+                   p.proargmodes AS arg_modes,
+                   p.proargnames AS arg_names,
+                   p.proallargtypes AS all_arg_types,
+                   pg_get_function_result(p.oid) AS return_type_detail,
+                   pg_get_function_identity_arguments(p.oid) AS identity_args,
+                   obj_description(p.oid, 'pg_proc') AS description,
+                   p.oid AS oid
+            FROM pg_catalog.pg_proc p
+            JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+            JOIN pg_catalog.pg_language l ON l.oid = p.prolang
+            WHERE p.proname = ? AND n.nspname = ? AND $kindFilter
+        """.trimIndent()
+
+        conn.prepareStatement(query).use { stmt ->
+            stmt.setString(1, routineName)
+            stmt.setString(2, targetSchema)
+            stmt.executeQuery().use { rs ->
+                if (rs.next()) {
+                    @Suppress("UNCHECKED_CAST")
+                    val argModes = (rs.getArray("arg_modes")?.array as? Array<String>) ?: emptyArray()
+                    @Suppress("UNCHECKED_CAST")
+                    val argNames = (rs.getArray("arg_names")?.array as? Array<String>) ?: emptyArray()
+                    @Suppress("UNCHECKED_CAST")
+                    val allArgTypes = (rs.getArray("all_arg_types")?.array as? Array<Int>) ?: emptyArray()
+
+                    // 构建参数详情
+                    val argsList = mutableListOf<Map<String, String>>()
+                    for (i in argNames.indices) {
+                        val mode = if (i < argModes.size) argModes[i] ?: "IN" else "IN"
+                        val typeOid = if (i < allArgTypes.size) allArgTypes[i] else 0
+                        argsList.add(mapOf(
+                            "position" to (i + 1).toString(),
+                            "name" to (argNames[i] ?: ""),
+                            "mode" to mode,
+                            "type" to getTypeNameByOid(conn, typeOid)
+                        ))
+                    }
+
+                    mapOf(
+                        "name" to rs.getString("name"),
+                        "routine_type" to rs.getString("routine_type"),
+                        "schema" to rs.getString("schema_name"),
+                        "return_type" to rs.getString("return_type"),
+                        "return_type_detail" to rs.getString("return_type_detail"),
+                        "language" to rs.getString("language"),
+                        "source_code" to rs.getString("source_code"),
+                        "security_definer" to if (rs.getBoolean("security_definer")) "SECURITY DEFINER" else "SECURITY INVOKER",
+                        "volatility" to rs.getString("volatility"),
+                        "returns_set" to rs.getBoolean("returns_set").toString(),
+                        "identity_args" to rs.getString("identity_args"),
+                        "description" to (rs.getString("description") ?: ""),
+                        "oid" to rs.getString("oid"),
+                        "args" to argsList.joinToString("; ") { "${it["mode"]} ${it["name"]} ${it["type"]}".trim() }
+                    )
+                } else {
+                    throw IllegalArgumentException("未找到函数/存储过程 '$routineName'，schema: '$targetSchema'")
+                }
+            }
+        }
+    }
+
+    /**
+     * 根据 OID 获取类型名称
+     */
+    private fun getTypeNameByOid(conn: Connection, oid: Int): String {
+        if (oid == 0) return "ANY"
+        conn.prepareStatement("SELECT format_type(?, NULL)").use { stmt ->
+            stmt.setInt(1, oid)
+            stmt.executeQuery().use { rs ->
+                return if (rs.next()) rs.getString(1) ?: "unknown" else "unknown"
+            }
+        }
+    }
+
+    /**
+     * 获取函数/存储过程的 DDL 定义
+     */
+    override suspend fun getRoutineDDL(conn: Connection, routineName: String, routineType: String, schema: String): String = withContext(Dispatchers.IO) {
+        val targetSchema = if (schema.isNotBlank()) schema else "public"
+        conn.prepareStatement("SELECT pg_get_functiondef(?) AS ddl").use { stmt ->
+            // 先获取函数 OID
+            val kindFilter = when (routineType.uppercase()) {
+                "FUNCTION" -> "prokind = 'f'"
+                "PROCEDURE" -> "prokind = 'p'"
+                else -> "(prokind = 'f' OR prokind = 'p')"
+            }
+            conn.prepareStatement(
+                "SELECT oid FROM pg_proc WHERE proname = ? AND pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = ?) AND $kindFilter"
+            ).use { oidStmt ->
+                oidStmt.setString(1, routineName)
+                oidStmt.setString(2, targetSchema)
+                oidStmt.executeQuery().use { oidRs ->
+                    if (oidRs.next()) {
+                        val oid = oidRs.getInt(1)
+                        stmt.setInt(1, oid)
+                        stmt.executeQuery().use { rs ->
+                            if (rs.next()) rs.getString(1) else throw IllegalArgumentException("无法获取 '$routineName' 的 DDL")
+                        }
+                    } else {
+                        throw IllegalArgumentException("未找到函数/存储过程 '$routineName'，schema: '$targetSchema'")
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 创建函数或存储过程
+     */
+    override suspend fun createRoutine(
+        conn: Connection,
+        routineName: String,
+        routineType: String,
+        schema: String,
+        args: List<Map<String, String?>>,
+        returnType: String?,
+        language: String,
+        body: String,
+        options: Map<String, String>
+    ): Boolean = withContext(Dispatchers.IO) {
+        val targetSchema = if (schema.isNotBlank()) schema else "public"
+        val safeRoutineName = sanitizeIdentifier(routineName, "routine name")
+        val safeSchema = sanitizeIdentifier(targetSchema, "schema name")
+        val isFunction = routineType.uppercase() != "PROCEDURE"
+
+        // 构建参数列表
+        val argDefs = args.mapIndexed { index, arg ->
+            val name = arg["name"] ?: "p$index"
+            val mode = arg["mode"] ?: "IN"
+            val dataType = arg["dataType"] ?: "TEXT"
+            val defaultVal = arg["defaultValue"]
+            buildString {
+                append("$mode ${quoteIdentifier(name)} $dataType")
+                if (defaultVal != null) append(" = $defaultVal")
+            }
+        }.joinToString(", ")
+
+        // 构建选项
+        val optionParts = mutableListOf<String>()
+        if (options["security_definer"] == "true") optionParts.add("SECURITY DEFINER")
+        else optionParts.add("SECURITY INVOKER")
+        options["volatility"]?.let { optionParts.add(it.uppercase()) }
+        options["cost"]?.let { optionParts.add("COST $it") }
+        options["rows"]?.let { optionParts.add("ROWS $it") }
+
+        val sql = buildString {
+            append("CREATE ")
+            if (isFunction) {
+                append("OR REPLACE FUNCTION ")
+                append("${quoteIdentifier(safeSchema)}.${quoteIdentifier(safeRoutineName)}")
+                append("($argDefs)")
+                if (returnType != null) append(" RETURNS $returnType")
+            } else {
+                append("PROCEDURE ")
+                append("${quoteIdentifier(safeSchema)}.${quoteIdentifier(safeRoutineName)}")
+                append("($argDefs)")
+            }
+            append(" LANGUAGE ${sanitizeIdentifier(language, "language")}")
+            if (optionParts.isNotEmpty()) append(" ${optionParts.joinToString(" ")}")
+            append(" AS \$\$\n$body\n\$\$")
+        }
+
+        conn.createStatement().use { stmt ->
+            stmt.execute(sql)
+        }
+        true
+    }
+
+    /**
+     * 删除函数或存储过程
+     */
+    override suspend fun dropRoutine(
+        conn: Connection,
+        routineName: String,
+        routineType: String,
+        schema: String,
+        ifExists: Boolean,
+        cascade: Boolean
+    ): Boolean = withContext(Dispatchers.IO) {
+        val targetSchema = if (schema.isNotBlank()) schema else "public"
+        val safeRoutineName = sanitizeIdentifier(routineName, "routine name")
+        val safeSchema = sanitizeIdentifier(targetSchema, "schema name")
+        val kind = if (routineType.uppercase() == "PROCEDURE") "PROCEDURE" else "FUNCTION"
+
+        val sql = buildString {
+            append("DROP $kind ")
+            if (ifExists) append("IF EXISTS ")
+            append("${quoteIdentifier(safeSchema)}.${quoteIdentifier(safeRoutineName)}")
+            if (cascade) append(" CASCADE")
+        }
+
+        conn.createStatement().use { stmt ->
+            stmt.execute(sql)
+        }
+        true
+    }
+
+    /**
+     * 调用函数或存储过程
+     */
+    override suspend fun callRoutine(
+        conn: Connection,
+        routineName: String,
+        routineType: String,
+        schema: String,
+        args: List<String?>
+    ): Map<String, Any?> = withContext(Dispatchers.IO) {
+        val targetSchema = if (schema.isNotBlank()) schema else "public"
+        val safeRoutineName = sanitizeIdentifier(routineName, "routine name")
+        val safeSchema = sanitizeIdentifier(targetSchema, "schema name")
+        val isFunction = routineType.uppercase() != "PROCEDURE"
+
+        val result = mutableMapOf<String, Any?>()
+
+        if (isFunction) {
+            // 函数调用: SELECT func(args...)
+            val placeholders = args.mapIndexed { i, _ -> "$${i + 1}" }.joinToString(", ")
+            val sql = "SELECT ${quoteIdentifier(safeSchema)}.${quoteIdentifier(safeRoutineName)}($placeholders)"
+
+            conn.prepareStatement(sql).use { stmt ->
+                args.forEachIndexed { i, arg ->
+                    stmt.setString(i + 1, arg)
+                }
+                stmt.executeQuery().use { rs ->
+                    if (rs.next()) {
+                        result["result"] = rs.getObject(1)
+                        result["row_count"] = 1
+                    }
+                }
+            }
+        } else {
+            // 存储过程调用: CALL proc(args...)
+            val placeholders = args.mapIndexed { i, _ -> "$${i + 1}" }.joinToString(", ")
+            val sql = "{ CALL ${quoteIdentifier(safeSchema)}.${quoteIdentifier(safeRoutineName)}($placeholders) }"
+
+            conn.prepareCall(sql).use { callableStmt ->
+                args.forEachIndexed { i, arg ->
+                    callableStmt.setString(i + 1, arg)
+                }
+                val hasResultSet = callableStmt.execute()
+                if (hasResultSet) {
+                    val rs = callableStmt.resultSet
+                    val rows = mutableListOf<Map<String, Any?>>()
+                    val metaData = rs.metaData
+                    val columnCount = metaData.columnCount
+                    while (rs.next()) {
+                        val row = mutableMapOf<String, Any?>()
+                        for (col in 1..columnCount) {
+                            row[metaData.getColumnLabel(col)] = rs.getObject(col)
+                        }
+                        rows.add(row)
+                    }
+                    result["result_set"] = rows
+                    result["row_count"] = rows.size
+                }
+                // 获取 OUT 参数
+                val updateCount = callableStmt.updateCount
+                if (updateCount >= 0) {
+                    result["update_count"] = updateCount
+                }
+            }
+        }
+
+        result
+    }
+
+    /**
+     * 调试函数（EXPLAIN、执行计划、依赖分析等）
+     */
+    override suspend fun debugRoutine(conn: Connection, routineName: String, schema: String): List<Map<String, String>> = withContext(Dispatchers.IO) {
+        val targetSchema = if (schema.isNotBlank()) schema else "public"
+
+        // 获取函数 OID
+        val oidQuery = """
+            SELECT p.oid FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE p.proname = ? AND n.nspname = ? AND p.prokind = 'f'
+        """.trimIndent()
+
+        conn.prepareStatement(oidQuery).use { oidStmt ->
+            oidStmt.setString(1, routineName)
+            oidStmt.setString(2, targetSchema)
+            oidStmt.executeQuery().use { oidRs ->
+                if (!oidRs.next()) {
+                    throw IllegalArgumentException("未找到函数 '$routineName'，schema: '$targetSchema'")
+                }
+                val funcOid = oidRs.getInt(1)
+
+                val results = mutableListOf<Map<String, String>>()
+
+                // 1. EXPLAIN 输出
+                conn.prepareStatement("EXPLAIN (FORMAT JSON) SELECT $routineName()").use { stmt ->
+                    stmt.executeQuery().use { rs ->
+                        if (rs.next()) {
+                            results.add(mapOf(
+                                "type" to "EXPLAIN",
+                                "output" to rs.getString(1)
+                            ))
+                        }
+                    }
+                }
+
+                // 2. 函数信息
+                conn.prepareStatement("""
+                    SELECT proname, nspname, lanname, prosrc,
+                           pg_get_function_result(oid) AS return_type,
+                           pg_get_function_identity_arguments(oid) AS args,
+                           provolatile, prosecdef, proargmodes, proargnames
+                    FROM pg_proc p
+                    JOIN pg_namespace n ON n.oid = pronamespace
+                    JOIN pg_language l ON l.oid = prolang
+                    WHERE p.oid = ?
+                """.trimIndent()).use { infoStmt ->
+                    infoStmt.setInt(1, funcOid)
+                    infoStmt.executeQuery().use { rs ->
+                        if (rs.next()) {
+                            @Suppress("UNCHECKED_CAST")
+                            val argModes = (rs.getArray("proargmodes")?.array as? Array<String>) ?: emptyArray()
+                            @Suppress("UNCHECKED_CAST")
+                            val argNames = (rs.getArray("proargnames")?.array as? Array<String>) ?: emptyArray()
+
+                            results.add(mapOf(
+                                "type" to "INFO",
+                                "output" to buildString {
+                                    appendLine("函数名: ${rs.getString("proname")}")
+                                    appendLine("Schema: ${rs.getString("nspname")}")
+                                    appendLine("语言: ${rs.getString("lanname")}")
+                                    appendLine("返回类型: ${rs.getString("return_type")}")
+                                    appendLine("稳定性: ${rs.getString("provolatile")}")
+                                    appendLine("安全性: ${if (rs.getBoolean("prosecdef")) "SECURITY DEFINER" else "SECURITY INVOKER"}")
+                                    appendLine("参数: ${rs.getString("args")}")
+                                }
+                            ))
+                        }
+                    }
+                }
+
+                // 3. 函数依赖
+                conn.prepareStatement("""
+                    SELECT DISTINCT c.relname AS dependent_object, c.relkind,
+                           CASE c.relkind WHEN 'r' THEN 'TABLE' WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'S' THEN 'SEQUENCE' ELSE 'UNKNOWN' END AS type
+                    FROM pg_depend d
+                    JOIN pg_proc p ON d.refobjid = p.oid
+                    JOIN pg_class c ON d.objid = c.oid
+                    WHERE d.refobjid = ? AND d.deptype = 'n'
+                    ORDER BY c.relkind, c.relname
+                """.trimIndent()).use { depStmt ->
+                    depStmt.setInt(1, funcOid)
+                    depStmt.executeQuery().use { rs ->
+                        val deps = mutableListOf<String>()
+                        while (rs.next()) {
+                            deps.add("${rs.getString("type")}: ${rs.getString("dependent_object")}")
+                        }
+                        if (deps.isNotEmpty()) {
+                            results.add(mapOf(
+                                "type" to "DEPENDENCIES",
+                                "output" to deps.joinToString("\n")
+                            ))
+                        }
+                    }
+                }
+
+                results
+            }
+        }
+    }
+
+    /**
+     * 验证函数/存储过程体的语法（不创建）
+     */
+    override suspend fun validateRoutineBody(
+        conn: Connection,
+        routineType: String,
+        args: List<Map<String, String?>>,
+        returnType: String?,
+        language: String,
+        body: String
+    ): Boolean = withContext(Dispatchers.IO) {
+        // 使用 DO 块来验证函数体语法
+        val isFunction = routineType.uppercase() != "PROCEDURE"
+        val argDefs = args.mapIndexed { index, arg ->
+            val name = arg["name"] ?: "_arg$index"
+            val dataType = arg["dataType"] ?: "TEXT"
+            "$name $dataType"
+        }.joinToString(", ")
+
+        val validationSql = if (isFunction) {
+            """
+            DO \$\$
+            DECLARE
+                ${if (argDefs.isNotEmpty()) argDefs else "_dummy_arg TEXT"}
+            BEGIN
+                -- 验证函数体
+                ${body.lines().joinToString("\n") { "RAISE NOTICE 'OK: ' || ($it);" }}
+            END;
+            \$\$ LANGUAGE plpgsql
+            """.trimIndent()
+        } else {
+            """
+            DO \$\$
+            DECLARE
+                ${if (argDefs.isNotEmpty()) argDefs else "_dummy_arg TEXT"}
+            BEGIN
+                -- 验证存储过程体
+                ${body.lines().joinToString("\n") { it }}
+            END;
+            \$\$ LANGUAGE plpgsql
+            """.trimIndent()
+        }
+
+        try {
+            conn.createStatement().use { stmt ->
+                stmt.execute(validationSql)
+            }
+            true
+        } catch (e: Exception) {
+            throw IllegalArgumentException("函数体语法验证失败: ${e.message}")
         }
     }
 
