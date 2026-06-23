@@ -14,24 +14,6 @@ import kotlinx.serialization.json.*
 object FunctionHandler {
 
     /**
-     * 解析 JSON 参数数组为 Map 列表
-     */
-    private fun parseArgs(jsonArray: JsonArray?): List<Map<String, String?>> {
-        if (jsonArray == null) return emptyList()
-        val result = mutableListOf<Map<String, String?>>()
-        for (element in jsonArray) {
-            val obj = element.jsonObject
-            val map = mutableMapOf<String, String?>()
-            map["name"] = obj["name"]?.jsonPrimitive?.contentOrNull
-            map["mode"] = obj["mode"]?.jsonPrimitive?.contentOrNull ?: "IN"
-            map["dataType"] = obj["dataType"]?.jsonPrimitive?.contentOrNull ?: "TEXT"
-            map["defaultValue"] = obj["defaultValue"]?.jsonPrimitive?.contentOrNull
-            result.add(map)
-        }
-        return result
-    }
-
-    /**
      * LIST — 获取函数/存储过程列表
      * payload: { "schema": "public" } (可选)
      */
@@ -47,27 +29,25 @@ object FunctionHandler {
     }
 
     /**
-     * INFO — 获取函数/存储过程详细信息
-     * payload: { "name": "函数名", "routineType": "FUNCTION", "schema": "public" }
+     * INFO — 获取函数/存储过程的详细信息（后端自动解析 routineType）
+     * payload: { "name": "函数名", "schema": "public" }
      */
     suspend fun info(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
         val name = payload["name"]?.jsonPrimitive?.content
             ?: throw IllegalArgumentException("缺少参数 'name'")
-        val routineType = payload["routineType"]?.jsonPrimitive?.content
-            ?: throw IllegalArgumentException("缺少参数 'routineType' (FUNCTION 或 PROCEDURE)")
         val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
         val connection = PoolManager.getConnection(config, schema)
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
-            val info = dialect.getRoutineInfo(conn, name, routineType, schema)
+            val info = dialect.getRoutineInfo(conn, name, schema)
             Json.encodeToJsonElement(info)
         }
     }
 
     /**
-     * GET_DDL — 获取函数/存储过程的 DDL 定义
-     * payload: { "name": "函数名", "routineType": "FUNCTION", "schema": "public" }
+     * GET_DDL — 获取函数/存储过程的完整 DDL 定义
+     * payload: { "name": "函数名", "routineType": "FUNCTION" | "PROCEDURE", "schema": "public" }
      */
     suspend fun getDDL(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
         val name = payload["name"]?.jsonPrimitive?.content
@@ -86,50 +66,27 @@ object FunctionHandler {
 
     /**
      * CREATE — 创建函数/存储过程
-     * payload:
-     * {
-     *   "name": "函数名",
-     *   "routineType": "FUNCTION" | "PROCEDURE",
-     *   "schema": "public",
-     *   "args": [{"name": "参数名", "mode": "IN", "dataType": "INTEGER", "defaultValue": null}, ...],
-     *   "returnType": "INTEGER" (仅 FUNCTION),
-     *   "language": "plpgsql",
-     *   "body": "BEGIN ... END",
-     *   "options": {"security_definer": "true", "volatility": "STABLE", "cost": "100"}
-     * }
+     * payload: { "ddl": "CREATE OR REPLACE FUNCTION ..." }
      */
     suspend fun create(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
-        val name = payload["name"]?.jsonPrimitive?.content
-            ?: throw IllegalArgumentException("缺少参数 'name'")
-        val routineType = payload["routineType"]?.jsonPrimitive?.content
-            ?: throw IllegalArgumentException("缺少参数 'routineType' (FUNCTION 或 PROCEDURE)")
-        val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
-        val args = parseArgs(payload["args"]?.jsonArray)
-        val returnType = payload["returnType"]?.jsonPrimitive?.contentOrNull
-        val language = payload["language"]?.jsonPrimitive?.content
-            ?: throw IllegalArgumentException("缺少参数 'language'")
-        val body = payload["body"]?.jsonPrimitive?.content
-            ?: throw IllegalArgumentException("缺少参数 'body'")
-        val options = payload["options"]?.jsonObject?.let { obj ->
-            obj.entries.associate { it.key to it.value.jsonPrimitive.content }
-        } ?: emptyMap()
+        val ddl = payload["ddl"]?.jsonPrimitive?.content
+            ?: throw IllegalArgumentException("缺少参数 'ddl'")
 
-        val connection = PoolManager.getConnection(config, schema)
+        val connection = PoolManager.getConnection(config, "")
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
-            dialect.createRoutine(conn, name, routineType, schema, args, returnType, language, body, options)
+            dialect.createRoutine(conn, ddl)
             buildJsonObject {
-                put("created", name)
-                put("routineType", routineType)
-                put("schema", schema.ifEmpty { "public" })
+                put("success", true)
+                put("message", "函数/存储过程创建成功")
             }
         }
     }
 
     /**
      * DELETE — 删除函数/存储过程
-     * payload: { "name": "函数名", "routineType": "FUNCTION", "schema": "public", "ifExists": true, "cascade": false }
+     * payload: { "name": "函数名", "routineType": "FUNCTION" | "PROCEDURE", "schema": "public" }
      */
     suspend fun delete(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
         val name = payload["name"]?.jsonPrimitive?.content
@@ -146,16 +103,17 @@ object FunctionHandler {
         return@withContext connection.use { conn ->
             dialect.dropRoutine(conn, name, routineType, schema, ifExists, cascade)
             buildJsonObject {
-                put("deleted", name)
+                put("success", true)
+                put("message", "函数/存储过程删除成功")
+                put("name", name)
                 put("routineType", routineType)
-                put("schema", schema.ifEmpty { "public" })
             }
         }
     }
 
     /**
      * CALL — 调用函数/存储过程
-     * payload: { "name": "函数名", "routineType": "FUNCTION", "schema": "public", "args": ["参数1", "参数2"] }
+     * payload: { "name": "函数名", "routineType": "FUNCTION" | "PROCEDURE", "schema": "public", "args": ["参数1", "参数2"] }
      */
     suspend fun call(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
         val name = payload["name"]?.jsonPrimitive?.content
@@ -193,34 +151,21 @@ object FunctionHandler {
     }
 
     /**
-     * UPDATE — 验证函数体语法（不创建，用于编辑时的语法检查）
-     * payload: {
-     *   "routineType": "FUNCTION",
-     *   "args": [{"name": "x", "mode": "IN", "dataType": "INTEGER"}],
-     *   "returnType": "INTEGER",
-     *   "language": "plpgsql",
-     *   "body": "BEGIN RETURN x * 2; END"
-     * }
+     * UPDATE — 验证 DDL 语法（不创建，用于编辑时的语法检查）
+     * payload: { "ddl": "CREATE OR REPLACE FUNCTION ..." }
      */
     suspend fun validate(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
-        val routineType = payload["routineType"]?.jsonPrimitive?.content
-            ?: throw IllegalArgumentException("缺少参数 'routineType'")
-        val args = parseArgs(payload["args"]?.jsonArray)
-        val returnType = payload["returnType"]?.jsonPrimitive?.contentOrNull
-        val language = payload["language"]?.jsonPrimitive?.content
-            ?: throw IllegalArgumentException("缺少参数 'language'")
-        val body = payload["body"]?.jsonPrimitive?.content
-            ?: throw IllegalArgumentException("缺少参数 'body'")
+        val ddl = payload["ddl"]?.jsonPrimitive?.content
+            ?: throw IllegalArgumentException("缺少参数 'ddl'")
 
         val connection = PoolManager.getConnection(config, "")
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
-            dialect.validateRoutineBody(conn, routineType, args, returnType, language, body)
+            dialect.validateRoutineDDL(conn, ddl)
             buildJsonObject {
                 put("valid", true)
-                put("routineType", routineType)
-                put("language", language)
+                put("message", "DDL 语法验证通过")
             }
         }
     }

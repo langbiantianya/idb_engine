@@ -680,26 +680,24 @@ PostgreSQL 函数和存储过程管理模块，支持创建、查询、调用、
 ]
 ```
 
-**INFO** — 获取函数/存储过程详细信息
+**INFO** — 获取函数/存储过程的详细信息（后端自动解析 routineType）
 
 ```json
 // 请求
-{"id":"req-fn-002","category":"FUNCTION","action":"INFO","connection":{"driver":"Postgresql","host":"127.0.0.1","port":5432,"user":"postgres","password":"secret","database":"test_db"},"payload":{"name":"get_user_by_id","routineType":"FUNCTION","schema":"public"}}
+{"id":"req-fn-002","category":"FUNCTION","action":"INFO","connection":{"driver":"Postgresql","host":"127.0.0.1","port":5432,"user":"postgres","password":"secret","database":"test_db"},"payload":{"name":"func_sync_t2_to_t1","schema":"public"}}
 
 // 响应 data
 {
-  "name": "get_user_by_id",
+  "name": "func_sync_t2_to_t1",
   "routine_type": "FUNCTION",
   "schema": "public",
-  "return_type": "SETOF users",
   "language": "plpgsql",
-  "source_code": "BEGIN\n  RETURN QUERY SELECT * FROM users WHERE id = user_id;\nEND",
+  "return_type": "TRIGGER",
+  "volatility": "VOLATILE",
   "security_definer": "SECURITY INVOKER",
-  "volatility": "STABLE",
-  "returns_set": "true",
-  "identity_args": "user_id integer",
-  "description": "根据ID获取用户信息",
-  "args": "IN user_id integer"
+  "arg_count": "0",
+  "arg_names": "",
+  "description": "同步t2到t1"
 }
 ```
 
@@ -713,30 +711,21 @@ PostgreSQL 函数和存储过程管理模块，支持创建、查询、调用、
 "CREATE OR REPLACE FUNCTION public.get_user_by_id(user_id integer)\n RETURNS SETOF users\n LANGUAGE plpgsql\n STABLE\nAS $function$\nBEGIN\n  RETURN QUERY SELECT * FROM users WHERE id = user_id;\nEND\n$function$"
 ```
 
-**CREATE** — 创建函数/存储过程
+**CREATE** — 创建函数/存储过程（直接传递完整 DDL）
 
 ```json
 // 请求 payload
 {
-  "name": "calculate_total",
-  "routineType": "FUNCTION",
-  "schema": "public",
-  "args": [
-    {"name": "price", "mode": "IN", "dataType": "DECIMAL", "defaultValue": null},
-    {"name": "tax_rate", "mode": "IN", "dataType": "DECIMAL", "defaultValue": "0.1"}
-  ],
-  "returnType": "DECIMAL",
-  "language": "plpgsql",
-  "body": "BEGIN\n  RETURN price * (1 + tax_rate);\nEND",
-  "options": {
-    "security_definer": "false",
-    "volatility": "IMMUTABLE",
-    "cost": "100"
-  }
+  "ddl": "CREATE OR REPLACE FUNCTION calculate_total(price DECIMAL, tax_rate DECIMAL DEFAULT 0.1)\nRETURNS DECIMAL\nLANGUAGE plpgsql\nAS $$\nBEGIN\n  RETURN price * (1 + tax_rate);\nEND;\n$$"
+}
+
+// 创建触发器示例
+{
+  "ddl": "CREATE OR REPLACE FUNCTION func_sync_t2_to_t1()\nRETURNS TRIGGER AS $$\nBEGIN\n  INSERT INTO t1 (id, name) VALUES (NEW.id, NEW.name);\n  RETURN NEW;\nEND;\n$$ LANGUAGE plpgsql"
 }
 
 // 响应 data
-{"created": "calculate_total", "routineType": "FUNCTION", "schema": "public"}
+{"success": true, "message": "函数/存储过程创建成功"}
 ```
 
 **DELETE** — 删除函数/存储过程
@@ -746,7 +735,7 @@ PostgreSQL 函数和存储过程管理模块，支持创建、查询、调用、
 {"name": "old_function", "routineType": "FUNCTION", "schema": "public", "ifExists": true, "cascade": false}
 
 // 响应 data
-{"deleted": "old_function", "routineType": "FUNCTION", "schema": "public"}
+{"success": true, "message": "函数/存储过程删除成功", "name": "old_function", "routineType": "FUNCTION"}
 ```
 
 **CALL** — 调用函数/存储过程
@@ -779,20 +768,16 @@ PostgreSQL 函数和存储过程管理模块，支持创建、查询、调用、
 ]
 ```
 
-**UPDATE** — 验证函数体语法（不创建，用于编辑时的语法检查）
+**UPDATE** — 验证 DDL 语法（不创建，用于编辑时的语法检查）
 
 ```json
 // 请求 payload
 {
-  "routineType": "FUNCTION",
-  "args": [{"name": "x", "mode": "IN", "dataType": "INTEGER"}],
-  "returnType": "INTEGER",
-  "language": "plpgsql",
-  "body": "BEGIN RETURN x * 2; END"
+  "ddl": "CREATE OR REPLACE FUNCTION test_func(x INTEGER)\nRETURNS INTEGER AS $$\nBEGIN\n  RETURN x * 2;\nEND;\n$$ LANGUAGE plpgsql"
 }
 
 // 响应 data
-{"valid": true, "routineType": "FUNCTION", "language": "plpgsql"}
+{"valid": true, "message": "DDL 语法验证通过"}
 ```
 
 ## 6. 安全与健壮性保障 (Security & Reliability)

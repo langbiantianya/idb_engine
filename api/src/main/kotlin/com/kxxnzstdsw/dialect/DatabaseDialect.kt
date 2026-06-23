@@ -205,45 +205,19 @@ interface DatabaseDialect {
     suspend fun listRoutines(conn: Connection, schema: String): List<Map<String, String>>
 
     /**
-     * 获取函数/存储过程的详细信息
+     * 获取函数/存储过程的完整 DDL 定义
      * @param routineName 函数/存储过程名称
      * @param routineType 类型：FUNCTION 或 PROCEDURE
      * @param schema Schema 名称
-     * @return 包含参数、返回类型、安全性、稳定性等详细信息
-     */
-    suspend fun getRoutineInfo(conn: Connection, routineName: String, routineType: String, schema: String): Map<String, String?>
-
-    /**
-     * 获取函数/存储过程的 DDL 定义
-     * @param routineName 函数/存储过程名称
-     * @param routineType 类型：FUNCTION 或 PROCEDURE
-     * @param schema Schema 名称
-     * @return DDL 字符串（CREATE OR REPLACE ...）
+     * @return 完整的 DDL 字符串
      */
     suspend fun getRoutineDDL(conn: Connection, routineName: String, routineType: String, schema: String): String
 
     /**
-     * 创建函数或存储过程
-     * @param routineName 函数/存储过程名称
-     * @param routineType 类型：FUNCTION 或 PROCEDURE
-     * @param schema Schema 名称
-     * @param args 参数列表：[{name, mode (IN/OUT/INOUT), dataType, defaultValue}]
-     * @param returnType 返回类型（函数有效）
-     * @param language 语言（plpgsql, sql 等）
-     * @param body 函数体源代码
-     * @param options 可选配置：security_definer, volatility, cost 等
+     * 执行 DDL 创建函数或存储过程
+     * @param ddl 完整的 CREATE OR REPLACE 语句
      */
-    suspend fun createRoutine(
-        conn: Connection,
-        routineName: String,
-        routineType: String,
-        schema: String,
-        args: List<Map<String, String?>>,
-        returnType: String?,
-        language: String,
-        body: String,
-        options: Map<String, String> = emptyMap()
-    ): Boolean
+    suspend fun createRoutine(conn: Connection, ddl: String): Boolean
 
     /**
      * 删除函数或存储过程
@@ -279,6 +253,14 @@ interface DatabaseDialect {
     ): Map<String, Any?>
 
     /**
+     * 获取函数/存储过程的详细信息（后端自动解析 routineType）
+     * @param routineName 函数/存储过程名称
+     * @param schema Schema 名称
+     * @return 详细信息，包含 routine_type 由后端自动确定
+     */
+    suspend fun getRoutineInfo(conn: Connection, routineName: String, schema: String): Map<String, String>
+
+    /**
      * 调试函数（EXPLAIN、执行计划、依赖分析等）
      * @param routineName 函数名称
      * @param schema Schema 名称
@@ -287,22 +269,10 @@ interface DatabaseDialect {
     suspend fun debugRoutine(conn: Connection, routineName: String, schema: String): List<Map<String, String>>
 
     /**
-     * 验证函数/存储过程体的语法（不创建）
-     * @param routineType 类型：FUNCTION 或 PROCEDURE
-     * @param args 参数定义
-     * @param returnType 返回类型
-     * @param language 语言
-     * @param body 函数体
-     * @return 验证是否通过
+     * 验证 DDL 语法（不创建，用于编辑时的语法检查）
+     * @param ddl 完整的 DDL 语句
      */
-    suspend fun validateRoutineBody(
-        conn: Connection,
-        routineType: String,
-        args: List<Map<String, String?>>,
-        returnType: String?,
-        language: String,
-        body: String
-    ): Boolean
+    suspend fun validateRoutineDDL(conn: Connection, ddl: String): Boolean
 
     // endregion
 }
