@@ -2,9 +2,11 @@ package com.kxxnzstdsw.dialect
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.slf4j.LoggerFactory
 import java.sql.Connection
 
 class PostgreSQLDialect : DatabaseDialect {
+    private val logger = LoggerFactory.getLogger(PostgreSQLDialect::class.java)
     override val driverName = "Postgresql"
     override val jdbcDriverClassName = "org.postgresql.Driver"
 
@@ -111,10 +113,12 @@ class PostgreSQLDialect : DatabaseDialect {
     override suspend fun listTables(conn: Connection, database: String, schema: String): List<Map<String, String>> = withContext(Dispatchers.IO) {
         val tables = mutableListOf<Map<String, String>>()
         val query = if (schema.isNotBlank()) {
+            logger.debug("listTables: querying schema '{}' in database '{}'", schema, database)
             // 指定了 schema → 精确过滤
             "SELECT table_name, table_type FROM information_schema.tables " +
             "WHERE table_schema = ? AND table_type IN ('BASE TABLE', 'VIEW') ORDER BY table_name"
         } else {
+            logger.debug("listTables: querying all schemas in search_path for database '{}'", database)
             // 未指定 → 匹配 search_path 中所有 schema
             "SELECT table_name, table_type FROM information_schema.tables " +
             "WHERE table_schema = ANY(current_schemas(true)) AND table_type IN ('BASE TABLE', 'VIEW') ORDER BY table_name"
