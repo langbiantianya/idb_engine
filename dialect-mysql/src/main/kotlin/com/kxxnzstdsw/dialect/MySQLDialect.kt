@@ -316,9 +316,9 @@ class MySQLDialect : DatabaseDialect {
     }
 
     /**
-     * 获取函数/存储过程 DDL（MySQL 暂未实现）
+     * 获取函数/存储过程/触发器 DDL（MySQL 暂未实现）
      */
-    override suspend fun getRoutineDDL(conn: Connection, routineName: String, routineType: String, schema: String): String {
+    override suspend fun getRoutineDDL(conn: Connection, routineName: String, schema: String): String {
         throw UnsupportedOperationException("MySQL 函数/存储过程管理暂未实现")
     }
 

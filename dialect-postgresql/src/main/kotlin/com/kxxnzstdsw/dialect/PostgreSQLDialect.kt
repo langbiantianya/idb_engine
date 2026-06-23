@@ -563,11 +563,13 @@ class PostgreSQLDialect : DatabaseDialect {
     // region 函数/存储过程管理
 
     /**
-     * 列出 schema 下所有函数和存储过程
+     * 列出 schema 下所有函数、存储过程和触发器
      */
     override suspend fun listRoutines(conn: Connection, schema: String): List<Map<String, String>> = withContext(Dispatchers.IO) {
         val routines = mutableListOf<Map<String, String>>()
-        val schemaFilter = if (schema.isNotBlank()) "AND n.nspname = ?" else ""
+        val targetSchema = if (schema.isNotBlank()) schema else "public"
+
+        // 1. 查询函数和存储过程
         val query = """
             SELECT p.proname AS name,
                    CASE p.prokind
@@ -586,18 +588,18 @@ class PostgreSQLDialect : DatabaseDialect {
                    END AS volatility,
                    p.pronargs AS arg_count,
                    p.proargnames AS arg_names,
-                   p.proargtypes AS arg_types,
-                   obj_description(p.oid, 'pg_proc') AS description
+                   obj_description(p.oid, 'pg_proc') AS description,
+                   p.oid AS proc_oid
             FROM pg_catalog.pg_proc p
             JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
             JOIN pg_catalog.pg_language l ON l.oid = p.prolang
-            WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
-            $schemaFilter
+            WHERE n.nspname = ?
+              AND p.prokind IN ('f', 'p', 'w')
             ORDER BY n.nspname, p.proname
         """.trimIndent()
 
         conn.prepareStatement(query).use { stmt ->
-            if (schema.isNotBlank()) stmt.setString(1, schema)
+            stmt.setString(1, targetSchema)
             stmt.executeQuery().use { rs ->
                 while (rs.next()) {
                     @Suppress("UNCHECKED_CAST")
@@ -606,18 +608,79 @@ class PostgreSQLDialect : DatabaseDialect {
                     routines.add(mapOf(
                         "name" to rs.getString("name"),
                         "routine_type" to rs.getString("routine_type"),
-                        "return_type" to rs.getString("return_type"),
+                        "return_type" to (rs.getString("return_type") ?: ""),
                         "language" to rs.getString("language"),
                         "security_definer" to if (rs.getBoolean("security_definer")) "SECURITY DEFINER" else "SECURITY INVOKER",
                         "volatility" to rs.getString("volatility"),
                         "arg_count" to rs.getInt("arg_count").toString(),
                         "arg_names" to argNames.joinToString(", "),
-                        "schema" to (if (schema.isNotBlank()) schema else "public"),
-                        "description" to (rs.getString("description") ?: "")
+                        "schema" to targetSchema,
+                        "description" to (rs.getString("description") ?: ""),
+                        "trigger_table" to ""
                     ))
                 }
             }
         }
+
+        // 2. 查询触发器
+        val triggerQuery = """
+            SELECT t.tgname AS name,
+                   'TRIGGER' AS routine_type,
+                   CASE
+                       WHEN t.tgtype & 1 = 1 THEN 'ROW'
+                       ELSE 'STATEMENT'
+                   END || ' ' ||(
+                       CASE t.tgtype & 3
+                           WHEN 1 THEN 'BEFORE'
+                           WHEN 2 THEN 'AFTER'
+                           WHEN 3 THEN 'INSTEAD OF'
+                       END
+                   ) || ' ' || (
+                       SELECT string_agg(CASE WHEN e.event_manipulation = 'INSERT' THEN 'INSERT'
+                                            WHEN e.event_manipulation = 'UPDATE' THEN 'UPDATE'
+                                            WHEN e.event_manipulation = 'DELETE' THEN 'DELETE'
+                                            ELSE e.event_manipulation END, ', ')
+                       FROM information_schema.triggers e
+                       WHERE e.trigger_name = t.tgname
+                         AND e.event_object_schema = n.nspname
+                   ) AS return_type,
+                   'plpgsql' AS language,
+                   'SECURITY INVOKER' AS security_definer,
+                   'VOLATILE' AS volatility,
+                   '0' AS arg_count,
+                   '' AS arg_names,
+                   obj_description(t.oid, 'pg_trigger') AS description,
+                   c.relname AS trigger_table,
+                   n.nspname AS trigger_schema
+            FROM pg_trigger t
+            JOIN pg_class c ON t.tgrelid = c.oid
+            JOIN pg_namespace n ON c.relnamespace = n.oid
+            WHERE n.nspname = ?
+              AND NOT t.tgisinternal
+            ORDER BY n.nspname, c.relname, t.tgname
+        """.trimIndent()
+
+        conn.prepareStatement(triggerQuery).use { stmt ->
+            stmt.setString(1, targetSchema)
+            stmt.executeQuery().use { rs ->
+                while (rs.next()) {
+                    routines.add(mapOf(
+                        "name" to rs.getString("name"),
+                        "routine_type" to rs.getString("routine_type"),
+                        "return_type" to (rs.getString("return_type") ?: ""),
+                        "language" to rs.getString("language"),
+                        "security_definer" to rs.getString("security_definer"),
+                        "volatility" to rs.getString("volatility"),
+                        "arg_count" to rs.getString("arg_count"),
+                        "arg_names" to rs.getString("arg_names"),
+                        "schema" to targetSchema,
+                        "description" to (rs.getString("description") ?: ""),
+                        "trigger_table" to rs.getString("trigger_table")
+                    ))
+                }
+            }
+        }
+
         routines
     }
 
@@ -635,35 +698,96 @@ class PostgreSQLDialect : DatabaseDialect {
     }
 
     /**
-     * 获取函数/存储过程的 DDL 定义
+     * 获取函数/存储过程/触发器的 DDL 定义（后端自动解析类型）
      */
-    override suspend fun getRoutineDDL(conn: Connection, routineName: String, routineType: String, schema: String): String = withContext(Dispatchers.IO) {
+    override suspend fun getRoutineDDL(conn: Connection, routineName: String, schema: String): String = withContext(Dispatchers.IO) {
         val targetSchema = if (schema.isNotBlank()) schema else "public"
-        conn.prepareStatement("SELECT pg_get_functiondef(?) AS ddl").use { stmt ->
-            // 先获取函数 OID
-            val kindFilter = when (routineType.uppercase()) {
-                "FUNCTION" -> "prokind = 'f'"
-                "PROCEDURE" -> "prokind = 'p'"
-                else -> "(prokind = 'f' OR prokind = 'p')"
-            }
-            conn.prepareStatement(
-                "SELECT oid FROM pg_proc WHERE proname = ? AND pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = ?) AND $kindFilter"
-            ).use { oidStmt ->
-                oidStmt.setString(1, routineName)
-                oidStmt.setString(2, targetSchema)
-                oidStmt.executeQuery().use { oidRs ->
-                    if (oidRs.next()) {
-                        val oid = oidRs.getInt(1)
-                        stmt.setInt(1, oid)
-                        stmt.executeQuery().use { rs ->
-                            if (rs.next()) rs.getString(1) else throw IllegalArgumentException("无法获取 '$routineName' 的 DDL")
-                        }
-                    } else {
-                        throw IllegalArgumentException("未找到函数/存储过程 '$routineName'，schema: '$targetSchema'")
-                    }
+
+        // 1. 先尝试获取函数/存储过程的 DDL
+        conn.prepareStatement("""
+            SELECT pg_get_functiondef(p.oid) AS ddl,
+                   CASE p.prokind
+                       WHEN 'f' THEN 'FUNCTION'
+                       WHEN 'p' THEN 'PROCEDURE'
+                       WHEN 'w' THEN 'AGGREGATE'
+                       ELSE 'FUNCTION'
+                   END AS routine_type
+            FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE p.proname = ? AND n.nspname = ? AND p.prokind IN ('f', 'p', 'w')
+        """.trimIndent()).use { stmt ->
+            stmt.setString(1, routineName)
+            stmt.setString(2, targetSchema)
+            stmt.executeQuery().use { rs ->
+                if (rs.next()) {
+                    return@withContext rs.getString("ddl") ?: throw IllegalArgumentException("无法获取 '$routineName' 的 DDL")
                 }
             }
         }
+
+        // 2. 如果没找到，尝试获取触发器的 DDL
+        conn.prepareStatement("""
+            SELECT pg_get_triggerdef(t.oid) AS def,
+                   c.relname AS table_name,
+                   CASE
+                       WHEN t.tgtype & 1 = 1 THEN 'ROW'
+                       ELSE 'STATEMENT'
+                   END AS level,
+                   CASE t.tgtype & 3
+                       WHEN 1 THEN 'BEFORE'
+                       WHEN 2 THEN 'AFTER'
+                       WHEN 3 THEN 'INSTEAD OF'
+                   END AS action_timing,
+                   CASE
+                       WHEN t.tgtype & 4 = 4 THEN 'INSERT'
+                       ELSE ''
+                   END ||
+                   CASE
+                       WHEN t.tgtype & 8 = 8 THEN ', UPDATE'
+                       ELSE ''
+                   END ||
+                   CASE
+                       WHEN t.tgtype & 16 = 16 THEN ', DELETE'
+                       ELSE ''
+                   END AS event_manipulation,
+                   p.proname AS func_name,
+                   n.nspname AS func_schema,
+                   pg_get_function_arguments(p.oid) AS args,
+                   t.tgenabled AS enabled
+            FROM pg_trigger t
+            JOIN pg_class c ON t.tgrelid = c.oid
+            JOIN pg_namespace n ON c.relnamespace = n.oid
+            JOIN pg_proc p ON t.tgfoid = p.oid
+            WHERE t.tgname = ? AND n.nspname = ? AND NOT t.tgisinternal
+        """.trimIndent()).use { stmt ->
+            stmt.setString(1, routineName)
+            stmt.setString(2, targetSchema)
+            stmt.executeQuery().use { rs ->
+                if (rs.next()) {
+                    val def = rs.getString("def")
+                    val tableName = rs.getString("table_name")
+                    val level = rs.getString("level")
+                    val actionTiming = rs.getString("action_timing")
+                    val events = rs.getString("event_manipulation").trimStart(',', ' ')
+                    val funcName = rs.getString("func_name")
+                    val funcSchema = rs.getString("func_schema")
+                    val args = rs.getString("args") ?: ""
+                    val enabled = rs.getString("enabled")
+
+                    // 构建触发器 DDL
+                    val funcArgs = if (args.isNotEmpty()) "($args)" else "()"
+                    return@withContext buildString {
+                        appendLine("CREATE OR REPLACE TRIGGER ${quoteIdentifier(routineName)}")
+                        appendLine("  $level $actionTiming $events")
+                        appendLine("  ON ${quoteIdentifier(tableName)}")
+                        appendLine("  FOR EACH ROW")
+                        appendLine("  EXECUTE FUNCTION ${quoteIdentifier(funcSchema)}.${quoteIdentifier(funcName)}$funcArgs;")
+                    }.trimEnd()
+                }
+            }
+        }
+
+        throw IllegalArgumentException("未找到函数/存储过程/触发器 '$routineName'，schema: '$targetSchema'")
     }
 
     /**
@@ -775,12 +899,12 @@ class PostgreSQLDialect : DatabaseDialect {
     }
 
     /**
-     * 获取函数/存储过程的详细信息（后端自动解析 routineType）
+     * 获取函数/存储过程/触发器的详细信息（后端自动解析 routineType）
      */
     override suspend fun getRoutineInfo(conn: Connection, routineName: String, schema: String): Map<String, String> = withContext(Dispatchers.IO) {
         val targetSchema = if (schema.isNotBlank()) schema else "public"
 
-        // 同时查询 FUNCTION 和 PROCEDURE，后端自动确定类型
+        // 1. 先尝试获取函数/存储过程的信息
         conn.prepareStatement("""
             SELECT p.oid, p.proname, n.nspname, l.lanname,
                    pg_get_function_result(p.oid) AS return_type,
@@ -802,51 +926,111 @@ class PostgreSQLDialect : DatabaseDialect {
             stmt.setString(1, routineName)
             stmt.setString(2, targetSchema)
             stmt.executeQuery().use { rs ->
-                if (!rs.next()) {
-                    throw IllegalArgumentException("未找到函数/存储过程 '$routineName'，schema: '$targetSchema'")
-                }
+                if (rs.next()) {
+                    @Suppress("UNCHECKED_CAST")
+                    val argModes = (rs.getArray("proargmodes")?.array as? Array<String>) ?: emptyArray()
+                    @Suppress("UNCHECKED_CAST")
+                    val argNames = (rs.getArray("proargnames")?.array as? Array<String>) ?: emptyArray()
 
-                @Suppress("UNCHECKED_CAST")
-                val argModes = (rs.getArray("proargmodes")?.array as? Array<String>) ?: emptyArray()
-                @Suppress("UNCHECKED_CAST")
-                val argNames = (rs.getArray("proargnames")?.array as? Array<String>) ?: emptyArray()
-
-                // 构建参数详情
-                val argsString = buildString {
-                    for (i in argNames.indices) {
-                        if (i > 0) append(", ")
-                        val mode = argModes.getOrNull(i)?.firstOrNull()
-                        if (mode == 'o') append("OUT ")
-                        if (mode == 'i') append("IN ")
-                        if (argNames[i].isNotEmpty()) {
-                            append(argNames[i])
-                            append(" ")
+                    // 构建参数详情
+                    val argsString = buildString {
+                        for (i in argNames.indices) {
+                            if (i > 0) append(", ")
+                            val mode = argModes.getOrNull(i)?.firstOrNull()
+                            if (mode == 'o') append("OUT ")
+                            if (mode == 'i') append("IN ")
+                            if (argNames[i].isNotEmpty()) {
+                                append(argNames[i])
+                                append(" ")
+                            }
                         }
                     }
+
+                    val returnType = rs.getString("return_type")
+                    val volatilityStr = rs.getString("provolatile")
+                    val argsCol = rs.getString("args")
+
+                    return@withContext mapOf(
+                        "name" to rs.getString("proname"),
+                        "routine_type" to rs.getString("routine_type"),
+                        "schema" to rs.getString("nspname"),
+                        "language" to rs.getString("lanname"),
+                        "return_type" to (returnType ?: ""),
+                        "volatility" to when (volatilityStr) {
+                            "i" -> "IMMUTABLE"
+                            "s" -> "STABLE"
+                            else -> "VOLATILE"
+                        },
+                        "security_definer" to if (rs.getBoolean("prosecdef")) "SECURITY DEFINER" else "SECURITY INVOKER",
+                        "arg_count" to rs.getInt("pronargs").toString(),
+                        "arg_names" to (argsString.ifEmpty { argsCol ?: "" }),
+                        "description" to (rs.getString("description") ?: ""),
+                        "trigger_table" to ""
+                    )
                 }
-
-                val returnType = rs.getString("return_type")
-                val volatilityStr = rs.getString("provolatile")
-                val argsCol = rs.getString("args")
-
-                mapOf(
-                    "name" to rs.getString("proname"),
-                    "routine_type" to rs.getString("routine_type"),
-                    "schema" to rs.getString("nspname"),
-                    "language" to rs.getString("lanname"),
-                    "return_type" to (returnType ?: ""),
-                    "volatility" to when (volatilityStr) {
-                        "i" -> "IMMUTABLE"
-                        "s" -> "STABLE"
-                        else -> "VOLATILE"
-                    },
-                    "security_definer" to if (rs.getBoolean("prosecdef")) "SECURITY DEFINER" else "SECURITY INVOKER",
-                    "arg_count" to rs.getInt("pronargs").toString(),
-                    "arg_names" to (argsString.ifEmpty { argsCol ?: "" }),
-                    "description" to (rs.getString("description") ?: "")
-                )
             }
         }
+
+        // 2. 如果没找到，尝试获取触发器的信息
+        conn.prepareStatement("""
+            SELECT t.tgname AS name,
+                   'TRIGGER' AS routine_type,
+                   n.nspname AS schema,
+                   'plpgsql' AS language,
+                   CASE
+                       WHEN t.tgtype & 1 = 1 THEN 'ROW'
+                       ELSE 'STATEMENT'
+                   END || ' ' ||(
+                       CASE t.tgtype & 3
+                           WHEN 1 THEN 'BEFORE'
+                           WHEN 2 THEN 'AFTER'
+                           WHEN 3 THEN 'INSTEAD OF'
+                       END
+                   ) || ' ' || (
+                       SELECT string_agg(
+                           CASE
+                               WHEN e.event_manipulation = 'INSERT' THEN 'INSERT'
+                               WHEN e.event_manipulation = 'UPDATE' THEN 'UPDATE'
+                               WHEN e.event_manipulation = 'DELETE' THEN 'DELETE'
+                               ELSE e.event_manipulation
+                           END, ', ')
+                       FROM information_schema.triggers e
+                       WHERE e.trigger_name = t.tgname
+                         AND e.event_object_schema = n.nspname
+                   ) AS return_type,
+                   'VOLATILE' AS volatility,
+                   'SECURITY INVOKER' AS security_definer,
+                   '0' AS arg_count,
+                   '' AS arg_names,
+                   obj_description(t.oid, 'pg_trigger') AS description,
+                   c.relname AS trigger_table
+            FROM pg_trigger t
+            JOIN pg_class c ON t.tgrelid = c.oid
+            JOIN pg_namespace n ON c.relnamespace = n.oid
+            WHERE t.tgname = ? AND n.nspname = ? AND NOT t.tgisinternal
+        """.trimIndent()).use { stmt ->
+            stmt.setString(1, routineName)
+            stmt.setString(2, targetSchema)
+            stmt.executeQuery().use { rs ->
+                if (rs.next()) {
+                    return@withContext mapOf(
+                        "name" to rs.getString("name"),
+                        "routine_type" to rs.getString("routine_type"),
+                        "schema" to rs.getString("schema"),
+                        "language" to rs.getString("language"),
+                        "return_type" to (rs.getString("return_type") ?: ""),
+                        "volatility" to rs.getString("volatility"),
+                        "security_definer" to rs.getString("security_definer"),
+                        "arg_count" to rs.getString("arg_count"),
+                        "arg_names" to rs.getString("arg_names"),
+                        "description" to (rs.getString("description") ?: ""),
+                        "trigger_table" to rs.getString("trigger_table")
+                    )
+                }
+            }
+        }
+
+        throw IllegalArgumentException("未找到函数/存储过程/触发器 '$routineName'，schema: '$targetSchema'")
     }
 
     /**

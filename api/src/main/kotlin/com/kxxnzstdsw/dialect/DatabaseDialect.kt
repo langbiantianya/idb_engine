@@ -198,20 +198,19 @@ interface DatabaseDialect {
     // region 函数/存储过程管理
 
     /**
-     * 列出 schema 下的所有函数和存储过程
+     * 列出 schema 下的所有函数、存储过程和触发器
      * @param schema Schema 名称（为空使用默认 schema）
-     * @return 函数/存储过程列表，包含 name, type, return type, language 等字段
+     * @return 函数/存储过程/触发器列表，包含 name, routine_type, return_type, language 等字段
      */
     suspend fun listRoutines(conn: Connection, schema: String): List<Map<String, String>>
 
     /**
-     * 获取函数/存储过程的完整 DDL 定义
-     * @param routineName 函数/存储过程名称
-     * @param routineType 类型：FUNCTION 或 PROCEDURE
+     * 获取函数/存储过程/触发器的完整 DDL 定义（后端自动解析类型）
+     * @param routineName 函数/存储过程/触发器名称
      * @param schema Schema 名称
      * @return 完整的 DDL 字符串
      */
-    suspend fun getRoutineDDL(conn: Connection, routineName: String, routineType: String, schema: String): String
+    suspend fun getRoutineDDL(conn: Connection, routineName: String, schema: String): String
 
     /**
      * 执行 DDL 创建函数或存储过程

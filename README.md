@@ -804,9 +804,9 @@ end
 
 > ⚠️ **注意**：MySQL 当前为占位实现，调用时会抛出 `UnsupportedOperationException`。
 
-PostgreSQL 函数和存储过程管理模块，支持创建、查询、调用、调试等功能。
+PostgreSQL 函数、存储过程和触发器管理模块，支持创建、查询、调用、调试等功能。
 
-**列出所有函数/存储过程**
+**列出所有函数/存储过程/触发器**
 
 ```json
 {"id":"fn1","category":"FUNCTION","action":"LIST","connection":{"driver":"Postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"test_db"},"payload":{"schema":"public"}}
@@ -814,29 +814,51 @@ PostgreSQL 函数和存储过程管理模块，支持创建、查询、调用、
 
 响应：
 ```json
-{"id":"fn1","success":true,"error":null,"data":[{"name":"get_user_by_id","routine_type":"FUNCTION","return_type":"SETOF users","language":"plpgsql","security_definer":"SECURITY INVOKER","volatility":"STABLE","arg_count":"1","arg_names":"user_id","schema":"public","description":"根据ID获取用户信息"},{"name":"create_order","routine_type":"PROCEDURE","return_type":"","language":"plpgsql","security_definer":"SECURITY INVOKER","volatility":"VOLATILE","arg_count":"3","arg_names":"user_id, product_id, quantity","schema":"public","description":""}]}
+{"id":"fn1","success":true,"error":null,"data":[{"name":"get_user_by_id","routine_type":"FUNCTION","return_type":"SETOF users","language":"plpgsql","security_definer":"SECURITY INVOKER","volatility":"STABLE","arg_count":"1","arg_names":"user_id","schema":"public","description":"根据ID获取用户信息","trigger_table":""},{"name":"sync_users_trigger","routine_type":"TRIGGER","return_type":"STATEMENT AFTER DELETE","language":"plpgsql","security_definer":"SECURITY INVOKER","volatility":"VOLATILE","arg_count":"0","arg_names":"","schema":"public","description":"同步删除用户","trigger_table":"users"}]}
 ```
 
-**获取函数/存储过程详细信息（后端自动解析 routineType）**
+**获取函数/存储过程/触发器详细信息（后端自动解析 routineType）**
 
 ```json
+// 函数/存储过程
 {"id":"fn1b","category":"FUNCTION","action":"INFO","connection":{"driver":"Postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"test_db"},"payload":{"name":"func_sync_t2_to_t1","schema":"public"}}
 ```
 
-响应：
+响应（函数）：
 ```json
-{"id":"fn1b","success":true,"error":null,"data":{"name":"func_sync_t2_to_t1","routine_type":"FUNCTION","schema":"public","language":"plpgsql","return_type":"TRIGGER","volatility":"VOLATILE","security_definer":"SECURITY INVOKER","arg_count":"0","arg_names":"","description":"同步t2到t1"}}
+{"id":"fn1b","success":true,"error":null,"data":{"name":"func_sync_t2_to_t1","routine_type":"FUNCTION","schema":"public","language":"plpgsql","return_type":"TRIGGER","volatility":"VOLATILE","security_definer":"SECURITY INVOKER","arg_count":"0","arg_names":"","description":"同步t2到t1","trigger_table":""}}
 ```
 
-**获取函数 DDL**
+```json
+// 触发器
+{"id":"fn1c","category":"FUNCTION","action":"INFO","connection":{"driver":"Postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"test_db"},"payload":{"name":"trg_t2_after_insert","schema":"public"}}
+```
+
+响应（触发器）：
+```json
+{"id":"fn1c","success":true,"error":null,"data":{"name":"trg_t2_after_insert","routine_type":"TRIGGER","schema":"public","language":"plpgsql","return_type":"ROW BEFORE INSERT","volatility":"VOLATILE","security_definer":"SECURITY INVOKER","arg_count":"0","arg_names":"","description":"","trigger_table":"t2"}}
+```
+
+**获取函数/存储过程/触发器 DDL（后端自动解析类型）**
 
 ```json
-{"id":"fn2","category":"FUNCTION","action":"GET_DDL","connection":{"driver":"Postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"test_db"},"payload":{"name":"get_user_by_id","routineType":"FUNCTION","schema":"public"}}
+// 函数/存储过程
+{"id":"fn2","category":"FUNCTION","action":"GET_DDL","connection":{"driver":"Postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"test_db"},"payload":{"name":"get_user_by_id","schema":"public"}}
 ```
 
 响应：
 ```json
 {"id":"fn2","success":true,"error":null,"data":"CREATE OR REPLACE FUNCTION public.get_user_by_id(user_id integer)\n RETURNS SETOF users\n LANGUAGE plpgsql\n STABLE\nAS $function$\nBEGIN\n  RETURN QUERY SELECT * FROM users WHERE id = user_id;\nEND\n$function$"}
+```
+
+```json
+// 触发器
+{"id":"fn2b","category":"FUNCTION","action":"GET_DDL","connection":{"driver":"Postgresql","host":"localhost","port":5432,"user":"postgres","password":"pass","database":"test_db"},"payload":{"name":"sync_users_trigger","schema":"public"}}
+```
+
+响应：
+```json
+{"id":"fn2b","success":true,"error":null,"data":"CREATE OR REPLACE TRIGGER sync_users_trigger\n  STATEMENT AFTER DELETE\n  ON users\n  FOR EACH ROW\n  EXECUTE FUNCTION public.func_sync_users();"}
 ```
 
 **创建函数/存储过程**
@@ -953,7 +975,7 @@ PostgreSQL 函数和存储过程管理模块，支持创建、查询、调用、
 - **JDBC 游标流式**：大结果集通过服务端游标逐行拉取，避免客户端内存溢出
 - **日志隔离**：所有日志输出到滚动文件 (`~/.config/idb/logs/idb-engine.log`)，不污染 stdout JSON 流
 - **嵌入式造数引擎**：LuaJIT 脚本驱动，支持多表按序造数、外键引用、沙箱隔离、流式进度回报
-- **函数与存储过程管理**：PostgreSQL 完整实现（创建/查询/调用/调试/删除/详情自动解析类型），MySQL 占位
+- **函数与存储过程管理**：PostgreSQL 完整实现（创建/查询/调用/调试/删除/详情自动解析类型，含触发器支持），MySQL 占位
 
 ## 技术栈
 

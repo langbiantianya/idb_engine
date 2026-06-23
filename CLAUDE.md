@@ -645,7 +645,7 @@ PostgreSQL 函数和存储过程管理模块，支持创建、查询、调用、
 
 > ⚠️ **注意**：MySQL 当前为占位实现，调用时会抛出 `UnsupportedOperationException`。
 
-**LIST** — 获取函数/存储过程列表
+**LIST** — 获取函数/存储过程/触发器列表
 
 ```json
 // 请求
@@ -663,7 +663,8 @@ PostgreSQL 函数和存储过程管理模块，支持创建、查询、调用、
     "arg_count": "1",
     "arg_names": "user_id",
     "schema": "public",
-    "description": "根据ID获取用户信息"
+    "description": "根据ID获取用户信息",
+    "trigger_table": ""
   },
   {
     "name": "create_order",
@@ -675,18 +676,32 @@ PostgreSQL 函数和存储过程管理模块，支持创建、查询、调用、
     "arg_count": "3",
     "arg_names": "user_id, product_id, quantity",
     "schema": "public",
-    "description": ""
+    "description": "",
+    "trigger_table": ""
+  },
+  {
+    "name": "sync_users_trigger",
+    "routine_type": "TRIGGER",
+    "return_type": "STATEMENT AFTER DELETE",
+    "language": "plpgsql",
+    "security_definer": "SECURITY INVOKER",
+    "volatility": "VOLATILE",
+    "arg_count": "0",
+    "arg_names": "",
+    "schema": "public",
+    "description": "同步删除用户",
+    "trigger_table": "users"
   }
 ]
 ```
 
-**INFO** — 获取函数/存储过程的详细信息（后端自动解析 routineType）
+**INFO** — 获取函数/存储过程/触发器的详细信息（后端自动解析 routineType）
 
 ```json
-// 请求
+// 请求（函数/存储过程）
 {"id":"req-fn-002","category":"FUNCTION","action":"INFO","connection":{"driver":"Postgresql","host":"127.0.0.1","port":5432,"user":"postgres","password":"secret","database":"test_db"},"payload":{"name":"func_sync_t2_to_t1","schema":"public"}}
 
-// 响应 data
+// 响应 data（函数）
 {
   "name": "func_sync_t2_to_t1",
   "routine_type": "FUNCTION",
@@ -697,18 +712,43 @@ PostgreSQL 函数和存储过程管理模块，支持创建、查询、调用、
   "security_definer": "SECURITY INVOKER",
   "arg_count": "0",
   "arg_names": "",
-  "description": "同步t2到t1"
+  "description": "同步t2到t1",
+  "trigger_table": ""
+}
+
+// 请求（触发器）
+{"id":"req-fn-002b","category":"FUNCTION","action":"INFO","connection":{"driver":"Postgresql","host":"127.0.0.1","port":5432,"user":"postgres","password":"secret","database":"test_db"},"payload":{"name":"trg_t2_after_insert","schema":"public"}}
+
+// 响应 data（触发器）
+{
+  "name": "trg_t2_after_insert",
+  "routine_type": "TRIGGER",
+  "schema": "public",
+  "language": "plpgsql",
+  "return_type": "ROW BEFORE INSERT",
+  "volatility": "VOLATILE",
+  "security_definer": "SECURITY INVOKER",
+  "arg_count": "0",
+  "arg_names": "",
+  "description": "",
+  "trigger_table": "t2"
 }
 ```
 
-**GET_DDL** — 获取函数/存储过程的 DDL 定义
+**GET_DDL** — 获取函数/存储过程/触发器的 DDL 定义（后端自动解析类型）
 
 ```json
-// 请求
-{"id":"req-fn-003","category":"FUNCTION","action":"GET_DDL","connection":{"driver":"Postgresql","host":"127.0.0.1","port":5432,"user":"postgres","password":"secret","database":"test_db"},"payload":{"name":"get_user_by_id","routineType":"FUNCTION","schema":"public"}}
+// 请求（函数/存储过程）
+{"id":"req-fn-003","category":"FUNCTION","action":"GET_DDL","connection":{"driver":"Postgresql","host":"127.0.0.1","port":5432,"user":"postgres","password":"secret","database":"test_db"},"payload":{"name":"get_user_by_id","schema":"public"}}
 
 // 响应 data
 "CREATE OR REPLACE FUNCTION public.get_user_by_id(user_id integer)\n RETURNS SETOF users\n LANGUAGE plpgsql\n STABLE\nAS $function$\nBEGIN\n  RETURN QUERY SELECT * FROM users WHERE id = user_id;\nEND\n$function$"
+
+// 请求（触发器）
+{"id":"req-fn-003b","category":"FUNCTION","action":"GET_DDL","connection":{"driver":"Postgresql","host":"127.0.0.1","port":5432,"user":"postgres","password":"secret","database":"test_db"},"payload":{"name":"sync_users_trigger","schema":"public"}}
+
+// 响应 data
+"CREATE OR REPLACE TRIGGER sync_users_trigger\n  STATEMENT AFTER DELETE\n  ON users\n  FOR EACH ROW\n  EXECUTE FUNCTION public.func_sync_users();"
 ```
 
 **CREATE** — 创建函数/存储过程（直接传递完整 DDL）
@@ -938,7 +978,7 @@ response := scanner.Text()
 - PostgreSQL 方言全面优化（listSchemas 支持两级查询：database 列表 + schema 列表、listTables 用 current_schemas(true)、所有 TABLE/DATA/SQL 操作支持 payload.schema 指定 search_path、listUsers 用 pg_roles、MODIFY_COLUMN 补齐 nullable/default、GET_DDL 含约束与索引、正则预编译）
 - 用户管理完整 CRUD（CREATE/DELETE 用户、修改密码、查询指定用户权限，MySQL 与 PostgreSQL 均已实现）
 - 造数引擎（LuaJIT 嵌入式脚本 + 多表按序造数 + 外键引用 `lastId()` + 批量插入 + 单事务 + Lua 沙箱 + 流式进度回报）
-- 函数与存储过程管理模块（PostgreSQL: LIST/INFO/GET_DDL/CREATE/DELETE/CALL/DEBUG/VALIDATE，MySQL: 占位实现）
+- 函数与存储过程管理模块（PostgreSQL: LIST（含触发器）/INFO/GET_DDL/CREATE/DELETE/CALL/DEBUG/VALIDATE，MySQL: 占位实现）
 
 ⏳ 待扩展：
 - MySQL 函数/存储过程管理完整实现

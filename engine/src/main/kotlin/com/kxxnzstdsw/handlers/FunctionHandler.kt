@@ -46,20 +46,18 @@ object FunctionHandler {
     }
 
     /**
-     * GET_DDL — 获取函数/存储过程的完整 DDL 定义
-     * payload: { "name": "函数名", "routineType": "FUNCTION" | "PROCEDURE", "schema": "public" }
+     * GET_DDL — 获取函数/存储过程/触发器的完整 DDL 定义（后端自动解析类型）
+     * payload: { "name": "函数名", "schema": "public" }
      */
     suspend fun getDDL(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
         val name = payload["name"]?.jsonPrimitive?.content
             ?: throw IllegalArgumentException("缺少参数 'name'")
-        val routineType = payload["routineType"]?.jsonPrimitive?.content
-            ?: throw IllegalArgumentException("缺少参数 'routineType' (FUNCTION 或 PROCEDURE)")
         val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
         val connection = PoolManager.getConnection(config, schema)
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
-            val ddl = dialect.getRoutineDDL(conn, name, routineType, schema)
+            val ddl = dialect.getRoutineDDL(conn, name, schema)
             JsonPrimitive(ddl)
         }
     }
