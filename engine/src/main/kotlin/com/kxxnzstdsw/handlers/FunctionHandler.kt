@@ -126,8 +126,52 @@ object FunctionHandler {
 
         return@withContext connection.use { conn ->
             val result = dialect.callRoutine(conn, name, routineType, schema, args)
-            Json.encodeToJsonElement(result)
+
+            // 构建可序列化的 JsonObject
+            buildJsonObject {
+                result.forEach { (key, value) ->
+                    when (value) {
+                        is Map<*, *> -> {
+                            val nested = buildJsonObject {
+                                @Suppress("UNCHECKED_CAST")
+                                (value as Map<String, Any?>).forEach { (k, v) ->
+                                    put(k, v.toJsonElement())
+                                }
+                            }
+                            put(key, nested)
+                        }
+                        is List<*> -> {
+                            val list = buildJsonArray {
+                                value.forEach { item ->
+                                    when (item) {
+                                        is Map<*, *> -> {
+                                            val nested = buildJsonObject {
+                                                @Suppress("UNCHECKED_CAST")
+                                                (item as Map<String, Any?>).forEach { (k, v) ->
+                                                    put(k, v.toJsonElement())
+                                                }
+                                            }
+                                            add(nested)
+                                        }
+                                        else -> add(item.toJsonElement())
+                                    }
+                                }
+                            }
+                            put(key, list)
+                        }
+                        else -> put(key, value.toJsonElement())
+                    }
+                }
+            }
         }
+    }
+
+    private fun Any?.toJsonElement(): JsonElement = when (this) {
+        null -> JsonNull
+        is String -> JsonPrimitive(this)
+        is Number -> JsonPrimitive(this)
+        is Boolean -> JsonPrimitive(this)
+        else -> JsonPrimitive(this.toString())
     }
 
     /**

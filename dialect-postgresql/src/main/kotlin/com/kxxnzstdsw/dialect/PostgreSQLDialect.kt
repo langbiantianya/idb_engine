@@ -905,32 +905,58 @@ class PostgreSQLDialect : DatabaseDialect {
         val isFunction = routineType.uppercase() != "PROCEDURE"
 
         val result = mutableMapOf<String, Any?>()
+        val actualArgs = args.filterNotNull()
 
+        // 对于函数，直接构造 SQL 并用 Statement 执行（避免 PreparedStatement 参数绑定问题）
         if (isFunction) {
-            // 函数调用: SELECT func(args...)
-            val placeholders = args.mapIndexed { i, _ -> "$${i + 1}" }.joinToString(", ")
-            val sql = "SELECT ${quoteIdentifier(safeSchema)}.${quoteIdentifier(safeRoutineName)}($placeholders)"
+            // 转义参数中的单引号
+            val escapedArgs = actualArgs.map { it.replace("'", "''") }
+            val argsStr = if (escapedArgs.isNotEmpty()) {
+                escapedArgs.joinToString(", ") { "'$it'" }
+            } else {
+                ""
+            }
 
-            conn.prepareStatement(sql).use { stmt ->
-                args.forEachIndexed { i, arg ->
-                    stmt.setString(i + 1, arg)
-                }
-                stmt.executeQuery().use { rs ->
+            val sql = if (argsStr.isNotEmpty()) {
+                "SELECT * FROM ${quoteIdentifier(safeSchema)}.${quoteIdentifier(safeRoutineName)}($argsStr)"
+            } else {
+                "SELECT * FROM ${quoteIdentifier(safeSchema)}.${quoteIdentifier(safeRoutineName)}()"
+            }
+
+            conn.createStatement().use { stmt ->
+                stmt.executeQuery(sql).use { rs ->
+                    val metaData = rs.metaData
+                    val columnCount = metaData.columnCount
                     if (rs.next()) {
-                        result["result"] = rs.getObject(1)
+                        if (columnCount == 1) {
+                            result["result"] = rs.getObject(1)
+                        } else {
+                            val row = mutableMapOf<String, Any?>()
+                            for (col in 1..columnCount) {
+                                row[metaData.getColumnLabel(col)] = rs.getObject(col)
+                            }
+                            result["result"] = row
+                        }
                         result["row_count"] = 1
                     }
                 }
             }
         } else {
-            // 存储过程调用: CALL proc(args...)
-            val placeholders = args.mapIndexed { i, _ -> "$${i + 1}" }.joinToString(", ")
-            val sql = "{ CALL ${quoteIdentifier(safeSchema)}.${quoteIdentifier(safeRoutineName)}($placeholders) }"
+            // 存储过程调用
+            val escapedArgs = actualArgs.map { it.replace("'", "''") }
+            val argsStr = if (escapedArgs.isNotEmpty()) {
+                escapedArgs.joinToString(", ") { "'$it'" }
+            } else {
+                ""
+            }
+
+            val sql = if (argsStr.isNotEmpty()) {
+                "{ CALL ${quoteIdentifier(safeSchema)}.${quoteIdentifier(safeRoutineName)}($argsStr) }"
+            } else {
+                "{ CALL ${quoteIdentifier(safeSchema)}.${quoteIdentifier(safeRoutineName)}() }"
+            }
 
             conn.prepareCall(sql).use { callableStmt ->
-                args.forEachIndexed { i, arg ->
-                    callableStmt.setString(i + 1, arg)
-                }
                 val hasResultSet = callableStmt.execute()
                 if (hasResultSet) {
                     val rs = callableStmt.resultSet
