@@ -37,9 +37,18 @@ interface DatabaseDialect {
     }
 
     /**
-     * List all schemas/databases
+     * 设置当前连接的 schema/search_path 上下文（PostgreSQL 用，MySQL 空实现）。
+     * 自定义 SQL 执行前调用，确保无前缀表名能正确解析。
      */
-    suspend fun listSchemas(conn: Connection): List<String>
+    fun setSearchPath(conn: Connection, schema: String) {
+        // 默认空实现，MySQL 不需要
+    }
+
+    /**
+     * List all schemas/databases.
+     * @param database 可选的数据库名。为空时返回数据库列表；有值时返回该库下的 schema 列表（PG）。
+     */
+    suspend fun listSchemas(conn: Connection, database: String = ""): List<String>
 
     /**
      * Create a new schema/database
@@ -55,8 +64,9 @@ interface DatabaseDialect {
 
     /**
      * List all tables in a specific database/schema
+     * @param schema 可选的 schema 名。为空时使用默认行为（MySQL: database, PG: search_path）。
      */
-    suspend fun listTables(conn: Connection, database: String): List<Map<String, String>>
+    suspend fun listTables(conn: Connection, database: String, schema: String = ""): List<Map<String, String>>
 
     /**
      * List all users
@@ -184,4 +194,84 @@ interface DatabaseDialect {
         defaultValue: String?,
         newName: String? = null
     ): String
+
+    // region 函数/存储过程管理
+
+    /**
+     * 列出 schema 下的所有函数、存储过程和触发器
+     * @param schema Schema 名称（为空使用默认 schema）
+     * @return 函数/存储过程/触发器列表，包含 name, routine_type, return_type, language 等字段
+     */
+    suspend fun listRoutines(conn: Connection, schema: String): List<Map<String, String>>
+
+    /**
+     * 获取函数/存储过程/触发器的完整 DDL 定义（后端自动解析类型）
+     * @param routineName 函数/存储过程/触发器名称
+     * @param schema Schema 名称
+     * @return 完整的 DDL 字符串
+     */
+    suspend fun getRoutineDDL(conn: Connection, routineName: String, schema: String): String
+
+    /**
+     * 执行 DDL 创建函数或存储过程
+     * @param ddl 完整的 CREATE OR REPLACE 语句
+     */
+    suspend fun createRoutine(conn: Connection, ddl: String): Boolean
+
+    /**
+     * 删除函数或存储过程
+     * @param routineName 函数/存储过程名称
+     * @param routineType 类型：FUNCTION 或 PROCEDURE
+     * @param schema Schema 名称
+     * @param ifExists 是否添加 IF EXISTS
+     * @param cascade 是否级联删除依赖
+     */
+    suspend fun dropRoutine(
+        conn: Connection,
+        routineName: String,
+        routineType: String,
+        schema: String,
+        ifExists: Boolean = false,
+        cascade: Boolean = false
+    ): Boolean
+
+    /**
+     * 调用函数或存储过程
+     * @param routineName 函数/存储过程名称
+     * @param routineType 类型：FUNCTION 或 PROCEDURE
+     * @param schema Schema 名称
+     * @param args 参数值列表
+     * @return 执行结果（函数返回 result，存储过程返回 result_set）
+     */
+    suspend fun callRoutine(
+        conn: Connection,
+        routineName: String,
+        routineType: String,
+        schema: String,
+        args: List<String?>
+    ): Map<String, Any?>
+
+    /**
+     * 获取函数/存储过程的详细信息（后端自动解析 routineType）
+     * @param routineName 函数/存储过程名称
+     * @param schema Schema 名称
+     * @return 详细信息，包含 routine_type 由后端自动确定
+     */
+    suspend fun getRoutineInfo(conn: Connection, routineName: String, schema: String): Map<String, String>
+
+    /**
+     * 调试函数（EXPLAIN、执行计划、依赖分析等）
+     * @param routineName 函数名称
+     * @param schema Schema 名称
+     * @return 调试信息列表（EXPLAIN、INFO、DEPENDENCIES）
+     */
+    suspend fun debugRoutine(conn: Connection, routineName: String, schema: String): List<Map<String, String>>
+
+    /**
+     * 验证 DDL 语法（不创建，用于编辑时的语法检查）
+     * @param ddl 完整的 DDL 语句
+     */
+    suspend fun validateRoutineDDL(conn: Connection, ddl: String): Boolean
+
+    // endregion
 }

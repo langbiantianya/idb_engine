@@ -49,6 +49,7 @@ object GenerateHandler {
         var currentColumns: List<String>? = null,
         var currentSql: String = "",
         var totalInserted: Long = 0,
+        var scriptInserted: Long = 0,
         var lastGeneratedId: Long? = null
     ) {
         fun closeStmt() {
@@ -62,12 +63,13 @@ object GenerateHandler {
         payload: JsonObject,
         onProgress: (suspend (JsonElement) -> Unit)? = null
     ): JsonElement = withContext(Dispatchers.IO) {
+        val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
         val generatePayload = json.decodeFromJsonElement<GeneratePayload>(payload)
         if (generatePayload.tables.isEmpty()) {
             throw IllegalArgumentException("'tables' must not be empty")
         }
 
-        val connection = PoolManager.getConnection(config)
+        val connection = PoolManager.getConnection(config, schema)
         val dialect = DialectLoader.getDialect(config.driver)
 
         connection.use { conn ->
@@ -83,8 +85,6 @@ object GenerateHandler {
                         L.openLibraries()
                         applySandbox(L)
                         registerHelpers(L, state)
-                        L.push(tableConfig.count.toLong())
-                        L.setGlobal("count")
                         L.run(tableConfig.script)
                     }
 
@@ -166,9 +166,9 @@ object GenerateHandler {
 
             val tableName = lua.toString(1) ?: return@JFunction 0
             val row = readLuaTable(lua, 2)
-            val columns = state.currentColumns
 
             // 表名或列结构变化时重建 PreparedStatement
+            val columns = state.currentColumns
             if (tableName != state.currentTable || columns == null || row.keys.toList() != columns) {
                 state.closeStmt()
                 val cols = row.keys.toList()
@@ -194,16 +194,29 @@ object GenerateHandler {
             }
 
             state.totalInserted++
+            state.scriptInserted++
 
-            // 实时流式回报
+            // 实时流式回报（包含 SQL 和实际插入的数据）
             state.onProgress?.let { cb ->
                 runBlocking {
                     cb(buildJsonObject {
                         put("table", state.currentTable)
                         put("inserted", state.totalInserted)
-                        put("total", state.totalScripts)
-                        put("index", state.scriptIndex + 1)
+                        put("scriptInserted", state.scriptInserted)
+                        put("scriptIndex", state.scriptIndex + 1)
+                        put("totalScripts", state.totalScripts)
                         put("sql", state.currentSql)
+                        put("data", buildJsonObject {
+                            row.forEach { (k, v) ->
+                                when (v) {
+                                    is Long -> put(k, v)
+                                    is Double -> put(k, v)
+                                    is Boolean -> put(k, v)
+                                    null -> put(k, JsonNull)
+                                    else -> put(k, v.toString())
+                                }
+                            }
+                        })
                     })
                 }
             }

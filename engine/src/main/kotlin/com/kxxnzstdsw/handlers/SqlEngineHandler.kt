@@ -19,14 +19,15 @@ object SqlEngineHandler {
         onRow: (suspend (JsonElement) -> Unit)? = null
     ): Any = withContext(Dispatchers.IO) {
         val sql = payload["sql"]?.jsonPrimitive?.content ?: throw IllegalArgumentException("Missing 'sql' in payload")
-        val connection = PoolManager.getConnection(config)
+        val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
+        val connection = PoolManager.getConnection(config, schema)
 
         return@withContext connection.use { conn ->
+            val dialect = DialectLoader.getDialect(config.driver)
             conn.createStatement(
                 ResultSet.TYPE_FORWARD_ONLY,
                 ResultSet.CONCUR_READ_ONLY
             ).use { stmt ->
-                val dialect = DialectLoader.getDialect(config.driver)
                 val originalAutoCommit = dialect.configureConnectionForStreaming(conn)
                 try {
                     val hasResultSet = stmt.execute(sql)

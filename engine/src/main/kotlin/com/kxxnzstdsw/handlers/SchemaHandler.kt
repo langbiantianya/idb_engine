@@ -8,12 +8,13 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 
 object SchemaHandler {
-    suspend fun list(config: ConnectionConfig): JsonElement = withContext(Dispatchers.IO) {
+    suspend fun list(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
+        val database = payload["database"]?.jsonPrimitive?.contentOrNull ?: ""
         val connection = PoolManager.getConnection(config)
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
-            val schemas = dialect.listSchemas(conn)
+            val schemas = dialect.listSchemas(conn, database)
             Json.encodeToJsonElement(schemas)
         }
     }

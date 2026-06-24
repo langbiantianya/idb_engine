@@ -18,7 +18,7 @@ class MySQLDialect : DatabaseDialect {
         return original
     }
 
-    override suspend fun listSchemas(conn: Connection): List<String> = withContext(Dispatchers.IO) {
+    override suspend fun listSchemas(conn: Connection, database: String): List<String> = withContext(Dispatchers.IO) {
         val schemas = mutableListOf<String>()
         conn.createStatement().use { stmt ->
             stmt.executeQuery("SHOW DATABASES").use { rs ->
@@ -49,7 +49,7 @@ class MySQLDialect : DatabaseDialect {
         true
     }
 
-    override suspend fun listTables(conn: Connection, database: String): List<Map<String, String>> = withContext(Dispatchers.IO) {
+    override suspend fun listTables(conn: Connection, database: String, schema: String): List<Map<String, String>> = withContext(Dispatchers.IO) {
         val safeDb = sanitizeIdentifier(database, "database name")
         val tables = mutableListOf<Map<String, String>>()
         conn.createStatement().use { stmt ->
@@ -305,4 +305,77 @@ class MySQLDialect : DatabaseDialect {
             type
         }
     }
+
+    // region 函数/存储过程管理（MySQL 占位实现）
+
+    /**
+     * 列出函数/存储过程（MySQL 暂未实现）
+     */
+    override suspend fun listRoutines(conn: Connection, schema: String): List<Map<String, String>> {
+        throw UnsupportedOperationException("MySQL 函数/存储过程管理暂未实现")
+    }
+
+    /**
+     * 获取函数/存储过程/触发器 DDL（MySQL 暂未实现）
+     */
+    override suspend fun getRoutineDDL(conn: Connection, routineName: String, schema: String): String {
+        throw UnsupportedOperationException("MySQL 函数/存储过程管理暂未实现")
+    }
+
+    /**
+     * 执行 DDL 创建函数/存储过程（MySQL 暂未实现）
+     */
+    override suspend fun createRoutine(conn: Connection, ddl: String): Boolean {
+        throw UnsupportedOperationException("MySQL 函数/存储过程管理暂未实现")
+    }
+
+    /**
+     * 删除函数/存储过程（MySQL 暂未实现）
+     */
+    override suspend fun dropRoutine(
+        conn: Connection,
+        routineName: String,
+        routineType: String,
+        schema: String,
+        ifExists: Boolean,
+        cascade: Boolean
+    ): Boolean {
+        throw UnsupportedOperationException("MySQL 函数/存储过程管理暂未实现")
+    }
+
+    /**
+     * 调用函数/存储过程（MySQL 暂未实现）
+     */
+    override suspend fun callRoutine(
+        conn: Connection,
+        routineName: String,
+        routineType: String,
+        schema: String,
+        args: List<String?>
+    ): Map<String, Any?> {
+        throw UnsupportedOperationException("MySQL 函数/存储过程管理暂未实现")
+    }
+
+    /**
+     * 获取函数/存储过程详细信息（MySQL 暂未实现）
+     */
+    override suspend fun getRoutineInfo(conn: Connection, routineName: String, schema: String): Map<String, String> {
+        throw UnsupportedOperationException("MySQL 函数/存储过程管理暂未实现")
+    }
+
+    /**
+     * 调试函数（MySQL 暂未实现）
+     */
+    override suspend fun debugRoutine(conn: Connection, routineName: String, schema: String): List<Map<String, String>> {
+        throw UnsupportedOperationException("MySQL 函数/存储过程管理暂未实现")
+    }
+
+    /**
+     * 验证 DDL 语法（MySQL 暂未实现）
+     */
+    override suspend fun validateRoutineDDL(conn: Connection, ddl: String): Boolean {
+        throw UnsupportedOperationException("MySQL 函数/存储过程管理暂未实现")
+    }
+
+    // endregion
 }

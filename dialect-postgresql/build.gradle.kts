@@ -8,6 +8,7 @@ version = "0.1.1"
 dependencies {
     implementation(project(":api"))
     implementation(libs.kotlinx.coroutines.core)
+    implementation(libs.slf4j.api)
 }
 
 tasks.jar {

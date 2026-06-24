@@ -52,8 +52,8 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 ```json
 {
   "id": "req-uuid-1234",
-  "category": "SCHEMA | USER | TABLE | DATA | SQL | SYSTEM",
-  "action": "LIST | CREATE | UPDATE | DELETE | EXECUTE | GET_DDL | INFO | GRANTS | GENERATE",
+  "category": "SCHEMA | USER | TABLE | DATA | SQL | SYSTEM | FUNCTION",
+  "action": "LIST | CREATE | UPDATE | DELETE | EXECUTE | GET_DDL | INFO | GRANTS | GENERATE | CALL | DEBUG",
   "connection": {
     "driver": "mysql | postgresql",
     "host": "127.0.0.1",
@@ -110,17 +110,31 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 处理不同库的物理层级差异。MySQL 将其视为 `Database`，PG 将其视为 `Database -> Schema`。
 
-**LIST** — 获取可用架构列表
+**LIST** — 获取可用架构列表（支持两级查询）
 
-- MySQL 走 `SHOW DATABASES`；PG 走 `pg_catalog.pg_namespace`（过滤 `pg_%` 系统 schema 和 `information_schema`）
-- payload 为空对象
+- **MySQL**：`SHOW DATABASES`，忽略 `database` 参数
+- **PostgreSQL 两级模式**：
+  - payload 不含 `database`（或为空）→ 查 `pg_database`，返回**数据库列表**
+  - payload 含 `database`（如 `"myapp_db"`）→ 查 `pg_namespace`，返回该数据库下的 **schema 列表**（过滤 `pg_%` 和 `information_schema`）
 
 ```json
-// 请求
-{"id":"req-001","category":"SCHEMA","action":"LIST","connection":{"driver":"mysql","host":"127.0.0.1","port":3306,"user":"root","password":"secret","database":"mysql"},"payload":{}}
+// MySQL 请求（与之前一致，payload 可为空）
+{"id":"req-001","category":"SCHEMA","action":"LIST","connection":{"driver":"Mysql","host":"127.0.0.1","port":3306,"user":"root","password":"secret","database":"mysql"},"payload":{}}
 
-// 响应 data
+// MySQL 响应 data
 ["information_schema", "mysql", "my_app_db"]
+
+// PostgreSQL 请求 — 获取数据库列表（payload 不含 database）
+{"id":"req-001","category":"SCHEMA","action":"LIST","connection":{"driver":"Postgresql","host":"127.0.0.1","port":5432,"user":"postgres","password":"secret","database":"postgres"},"payload":{}}
+
+// PostgreSQL 响应 data（数据库列表）
+["postgres", "my_app_db"]
+
+// PostgreSQL 请求 — 获取指定数据库下的 schema 列表（payload 含 database）
+{"id":"req-002","category":"SCHEMA","action":"LIST","connection":{"driver":"Postgresql","host":"127.0.0.1","port":5432,"user":"postgres","password":"secret","database":"postgres"},"payload":{"database":"my_app_db"}}
+
+// PostgreSQL 响应 data（schema 列表）
+["public", "myschema"]
 ```
 
 **CREATE** — 创建 Database / Schema
@@ -256,9 +270,16 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 **LIST（表列表）** — 通过 `connection.metaData.getTables` 获取，payload 不含 `tableName`
 
+所有 TABLE / DATA / SQL 操作均支持可选 `schema` 参数（PostgreSQL 有效，MySQL 忽略）：
+- 传入 `schema` 时，引擎自动 `SET search_path TO <schema>`，确保 SQL 在该 schema 上下文中执行
+- 不传时使用 PostgreSQL 默认 search_path（通常含 `public`）
+
 ```json
-// 请求 payload
+// 请求 payload（基础，使用默认 schema）
 {}
+
+// 请求 payload（PostgreSQL 指定 schema）
+{"schema": "public"}
 
 // 响应 data
 [{"name": "users", "type": "TABLE"}, {"name": "orders", "type": "TABLE"}]
@@ -486,9 +507,13 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
 
 - 若返回结果集（SELECT）：走流式输出，data 结构与 DATA LIST 一致（`total: -1` 表示无法预知总行数），通过 JDBC 游标（`TYPE_FORWARD_ONLY` + `CONCUR_READ_ONLY` + `fetchSize=100`）防止 OOM，PostgreSQL 端临时关闭 `autoCommit` 启用服务端游标
 - 若为更新操作（INSERT/UPDATE/DELETE/DDL）：返回单次响应 `{ "affectedRows": N }`
+- **PostgreSQL schema 上下文**：payload 可选 `schema` 字段，引擎在执行 SQL 前自动 `SET search_path TO <schema>`，确保无前缀表名（如 `SELECT * FROM users`）能正确解析到目标 schema
 
 ```json
-// 请求 payload（查询）
+// 请求 payload（查询，PostgreSQL 带 schema 上下文）
+{"sql": "SELECT id, name FROM users WHERE id > 10 LIMIT 5", "schema": "public"}
+
+// 请求 payload（查询，MySQL 或不需要指定 schema 时）
 {"sql": "SELECT id, name FROM users WHERE id > 10 LIMIT 5"}
 
 // 响应（流式，每行一条 JSON）
@@ -537,21 +562,21 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
 
 ### 5.7 造数引擎 (Data Generation) — `category: "DATA"`, `action: "GENERATE"`
 
-基于嵌入式 LuaJIT 脚本引擎的造数功能，支持单表或多表按序造数（自动处理外键依赖）。Lua 脚本由调用方（Go/Wails 前端）提供，每张表独立执行一个脚本。
+基于嵌入式 LuaJIT 脚本引擎的造数功能，支持单表或多表按序造数（自动处理外键依赖）。Lua 脚本由调用方（Go/Wails 前端）提供，脚本内部自行控制循环次数。
 
 **核心机制**：
 - 每张表创建独立的 Lua 虚拟机，`insert()` 调用时**逐条写库**（`executeUpdate` 单条 INSERT），不在内存中积累数据
-- 每条插入后实时流式回报进度（`stream: true`，`data` 含 `table`/`inserted`/`sql`）
+- 每条插入后实时流式回报进度（`stream: true`，`data` 含 `table`/`inserted`/`scriptInserted`/`scriptIndex`/`totalScripts`）
 - 表按 `tables` 数组顺序执行，先创建的表数据先入库（满足外键约束）
 - 通过 `RETURN_GENERATED_KEYS` 获取自增主键，`lastId()` 返回当前表最近一条插入的自增 ID，供后续表或行引用
 
-**Lua 沙箱**：禁用 `os`、`io`、`debug`、`package`、`require`、`loadfile`、`dofile`、`loadstring`、`rawget`、`rawset`、`rawequal`、`setfenv`、`getfenv`、`newproxy` 等危险模块。保留 `math`、`string`、`table`、`tostring`、`tonumber`、`type`、`pairs`、`ipairs`、`pcall`、`error`、`assert` 等安全模块。
+**Lua 沙箱**：禁用 `os`、`io`、`debug`、`package`、`require`、`loadfile`、`dofile`、`loadstring`、`load`、`rawget`、`rawset`、`rawequal`、`setfenv`、`getfenv`、`newproxy` 等危险模块。保留 `math`、`string`、`table`、`tostring`、`tonumber`、`type`、`pairs`、`ipairs`、`pcall`、`error`、`assert` 等安全模块。
 
 **Lua 内置辅助函数**：
 
 | 函数 | 说明 |
 |---|---|
-| `insert(tableName, rowTable)` | 收集一行待插入数据（Lua table → JDBC 行） |
+| `insert(tableName, rowTable)` | 收集一行待插入数据（Lua table → JDBC 行），每调用一次立即执行 INSERT |
 | `lastId()` | 获取上一张表最后插入的自增 ID（用于外键引用，无自增 ID 时返回 nil） |
 | `random_int(min, max)` | 随机整数 [min, max] |
 | `random_float(min, max)` | 随机浮点数 [min, max) |
@@ -568,32 +593,31 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
 - `luaVersion` — Lua 引擎版本（可选，默认 `"luajit"`，支持 `"5.1"` / `"5.2"` / `"5.3"` / `"5.4"` / `"5.5"`）
 
 ```json
-// 请求（使用 Lua 5.4 引擎）
+// 请求（脚本内部控制循环次数，不再传 count）
 {
   "id": "req-gen-001",
   "category": "DATA",
   "action": "GENERATE",
   "connection": {"driver": "mysql", "host": "127.0.0.1", "port": 3306, "user": "root", "password": "secret", "database": "test_db"},
   "payload": {
-    "luaVersion": "5.4",
+    "luaVersion": "luajit",
+    "schema": "public",
     "tables": [
       {
-        "count": 100,
-        "script": "for i = 1, count do\n  insert('users', {\n    name = 'user_' .. i,\n    email = random_email(),\n    age = random_int(18, 65),\n    phone = random_phone(),\n    created_at = random_date('2024-01-01', '2024-12-31')\n  })\nend"
+        "script": "for i = 1, 100 do\n  insert('users', {\n    name = 'user_' .. i,\n    email = random_email(),\n    age = random_int(18, 65),\n    phone = random_phone(),\n    created_at = random_date('2024-01-01', '2024-12-31')\n  })\nend"
       },
       {
-        "count": 500,
-        "script": "for i = 1, count do\n  insert('orders', {\n    user_id = random_int(1, 100),\n    amount = random_int(100, 99999) / 100.0,\n    status = random_enum('pending', 'paid', 'shipped', 'completed'),\n    created_at = random_date('2024-06-01', '2025-06-01')\n  })\nend"
+        "script": "for i = 1, 500 do\n  insert('orders', {\n    user_id = random_int(1, 100),\n    amount = random_int(100, 99999) / 100.0,\n    status = random_enum('pending', 'paid', 'shipped', 'completed'),\n    created_at = random_date('2024-06-01', '2025-06-01')\n  })\nend"
       }
     ]
   }
 }
 
-// 响应序列（流式，每插入一行回报一次进度，sql 为该表使用的 INSERT 语句模板）
-{"id":"req-gen-001","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":1,"total":2,"index":1,"sql":"INSERT INTO `users` (`name`, `email`, `age`, `phone`, `created_at`) VALUES (?, ?, ?, ?, ?)"}}
-{"id":"req-gen-001","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":2,"total":2,"index":1,"sql":"INSERT INTO `users` (`name`, `email`, `age`, `phone`, `created_at`) VALUES (?, ?, ?, ?, ?)"}}
+// 响应序列（流式，每插入一行回报一次进度）
+{"id":"req-gen-001","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":1,"scriptInserted":1,"scriptIndex":1,"totalScripts":2,"sql":"INSERT INTO `users` (`name`, `email`, `age`, `phone`, `created_at`) VALUES (?, ?, ?, ?, ?)","data":{"name":"user_1","email":"user_123456@example.com","age":42,"phone":"13812345678","created_at":"2024-06-15"}}}
+{"id":"req-gen-001","success":true,"stream":true,"end":false,"data":{"table":"users","inserted":2,"scriptInserted":2,"scriptIndex":1,"totalScripts":2,"sql":"INSERT INTO `users` (`name`, `email`, `age`, `phone`, `created_at`) VALUES (?, ?, ?, ?, ?)","data":{"name":"user_2","email":"user_234567@example.com","age":35,"phone":"13998765432","created_at":"2024-03-22"}}}
 ...
-{"id":"req-gen-001","success":true,"stream":true,"end":false,"data":{"table":"orders","inserted":1,"total":2,"index":2,"sql":"INSERT INTO `orders` (`user_id`, `amount`, `status`, `created_at`) VALUES (?, ?, ?, ?)"}}
+{"id":"req-gen-001","success":true,"stream":true,"end":false,"data":{"table":"orders","inserted":101,"scriptInserted":1,"scriptIndex":2,"totalScripts":2,"sql":"INSERT INTO `orders` (`user_id`, `amount`, `status`, `created_at`) VALUES (?, ?, ?, ?)","data":{"user_id":50,"amount":299.99,"status":"paid","created_at":"2024-12-01"}}}
 ...
 {"id":"req-gen-001","success":true,"stream":true,"end":true,"data":null}
 ```
@@ -605,16 +629,195 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
   "payload": {
     "tables": [
       {
-        "count": 10,
-        "script": "for i = 1, count do\n  insert('categories', {\n    name = '分类_' .. i,\n    description = random_string(20)\n  })\nend"
+        "script": "for i = 1, 10 do\n  insert('categories', {\n    name = '分类_' .. i,\n    description = random_string(20)\n  })\nend"
       },
       {
-        "count": 100,
-        "script": "local catId = lastId()\nfor i = 1, count do\n  insert('products', {\n    category_id = random_int(catId - 9, catId),\n    name = '商品_' .. random_string(6),\n    price = random_int(100, 99999) / 100.0\n  })\nend"
+        "script": "local catId = lastId()\nfor i = 1, 100 do\n  insert('products', {\n    category_id = random_int(catId - 9, catId),\n    name = '商品_' .. random_string(6),\n    price = random_int(100, 99999) / 100.0\n  })\nend"
       }
     ]
   }
 }
+```
+
+### 5.8 函数与存储过程管理 (Routine Management) — `category: "FUNCTION"`
+
+PostgreSQL 函数和存储过程管理模块，支持创建、查询、调用、调试等功能。
+
+> ⚠️ **注意**：MySQL 当前为占位实现，调用时会抛出 `UnsupportedOperationException`。
+
+**LIST** — 获取函数/存储过程/触发器列表
+
+```json
+// 请求
+{"id":"req-fn-001","category":"FUNCTION","action":"LIST","connection":{"driver":"Postgresql","host":"127.0.0.1","port":5432,"user":"postgres","password":"secret","database":"test_db"},"payload":{"schema":"public"}}
+
+// 响应 data
+[
+  {
+    "name": "get_user_by_id",
+    "routine_type": "FUNCTION",
+    "return_type": "SETOF users",
+    "language": "plpgsql",
+    "security_definer": "SECURITY INVOKER",
+    "volatility": "STABLE",
+    "arg_count": "1",
+    "arg_names": "user_id",
+    "schema": "public",
+    "description": "根据ID获取用户信息",
+    "trigger_table": ""
+  },
+  {
+    "name": "create_order",
+    "routine_type": "PROCEDURE",
+    "return_type": "",
+    "language": "plpgsql",
+    "security_definer": "SECURITY INVOKER",
+    "volatility": "VOLATILE",
+    "arg_count": "3",
+    "arg_names": "user_id, product_id, quantity",
+    "schema": "public",
+    "description": "",
+    "trigger_table": ""
+  },
+  {
+    "name": "sync_users_trigger",
+    "routine_type": "TRIGGER",
+    "return_type": "STATEMENT AFTER DELETE",
+    "language": "plpgsql",
+    "security_definer": "SECURITY INVOKER",
+    "volatility": "VOLATILE",
+    "arg_count": "0",
+    "arg_names": "",
+    "schema": "public",
+    "description": "同步删除用户",
+    "trigger_table": "users"
+  }
+]
+```
+
+**INFO** — 获取函数/存储过程/触发器的详细信息（后端自动解析 routineType）
+
+```json
+// 请求（函数/存储过程）
+{"id":"req-fn-002","category":"FUNCTION","action":"INFO","connection":{"driver":"Postgresql","host":"127.0.0.1","port":5432,"user":"postgres","password":"secret","database":"test_db"},"payload":{"name":"func_sync_t2_to_t1","schema":"public"}}
+
+// 响应 data（函数）
+{
+  "name": "func_sync_t2_to_t1",
+  "routine_type": "FUNCTION",
+  "schema": "public",
+  "language": "plpgsql",
+  "return_type": "TRIGGER",
+  "volatility": "VOLATILE",
+  "security_definer": "SECURITY INVOKER",
+  "arg_count": "0",
+  "arg_names": "",
+  "description": "同步t2到t1",
+  "trigger_table": ""
+}
+
+// 请求（触发器）
+{"id":"req-fn-002b","category":"FUNCTION","action":"INFO","connection":{"driver":"Postgresql","host":"127.0.0.1","port":5432,"user":"postgres","password":"secret","database":"test_db"},"payload":{"name":"trg_t2_after_insert","schema":"public"}}
+
+// 响应 data（触发器）
+{
+  "name": "trg_t2_after_insert",
+  "routine_type": "TRIGGER",
+  "schema": "public",
+  "language": "plpgsql",
+  "return_type": "ROW BEFORE INSERT",
+  "volatility": "VOLATILE",
+  "security_definer": "SECURITY INVOKER",
+  "arg_count": "0",
+  "arg_names": "",
+  "description": "",
+  "trigger_table": "t2"
+}
+```
+
+**GET_DDL** — 获取函数/存储过程/触发器的 DDL 定义（后端自动解析类型）
+
+```json
+// 请求（函数/存储过程）
+{"id":"req-fn-003","category":"FUNCTION","action":"GET_DDL","connection":{"driver":"Postgresql","host":"127.0.0.1","port":5432,"user":"postgres","password":"secret","database":"test_db"},"payload":{"name":"get_user_by_id","schema":"public"}}
+
+// 响应 data
+"CREATE OR REPLACE FUNCTION public.get_user_by_id(user_id integer)\n RETURNS SETOF users\n LANGUAGE plpgsql\n STABLE\nAS $function$\nBEGIN\n  RETURN QUERY SELECT * FROM users WHERE id = user_id;\nEND\n$function$"
+
+// 请求（触发器）
+{"id":"req-fn-003b","category":"FUNCTION","action":"GET_DDL","connection":{"driver":"Postgresql","host":"127.0.0.1","port":5432,"user":"postgres","password":"secret","database":"test_db"},"payload":{"name":"sync_users_trigger","schema":"public"}}
+
+// 响应 data
+"CREATE OR REPLACE TRIGGER sync_users_trigger\n  STATEMENT AFTER DELETE\n  ON users\n  FOR EACH ROW\n  EXECUTE FUNCTION public.func_sync_users();"
+```
+
+**CREATE** — 创建函数/存储过程（直接传递完整 DDL）
+
+```json
+// 请求 payload
+{
+  "ddl": "CREATE OR REPLACE FUNCTION calculate_total(price DECIMAL, tax_rate DECIMAL DEFAULT 0.1)\nRETURNS DECIMAL\nLANGUAGE plpgsql\nAS $$\nBEGIN\n  RETURN price * (1 + tax_rate);\nEND;\n$$"
+}
+
+// 创建触发器示例
+{
+  "ddl": "CREATE OR REPLACE FUNCTION func_sync_t2_to_t1()\nRETURNS TRIGGER AS $$\nBEGIN\n  INSERT INTO t1 (id, name) VALUES (NEW.id, NEW.name);\n  RETURN NEW;\nEND;\n$$ LANGUAGE plpgsql"
+}
+
+// 响应 data
+{"success": true, "message": "函数/存储过程创建成功"}
+```
+
+**DELETE** — 删除函数/存储过程
+
+```json
+// 请求 payload
+{"name": "old_function", "routineType": "FUNCTION", "schema": "public", "ifExists": true, "cascade": false}
+
+// 响应 data
+{"success": true, "message": "函数/存储过程删除成功", "name": "old_function", "routineType": "FUNCTION"}
+```
+
+**CALL** — 调用函数/存储过程
+
+```json
+// 调用函数
+{"id":"req-fn-004","category":"FUNCTION","action":"CALL","connection":{"driver":"Postgresql","host":"127.0.0.1","port":5432,"user":"postgres","password":"secret","database":"test_db"},"payload":{"name":"calculate_total","routineType":"FUNCTION","schema":"public","args":["100.00","0.15"]}}
+
+// 调用存储过程
+{"id":"req-fn-005","category":"FUNCTION","action":"CALL","connection":{"driver":"Postgresql","host":"127.0.0.1","port":5432,"user":"postgres","password":"secret","database":"test_db"},"payload":{"name":"create_order","routineType":"PROCEDURE","schema":"public","args":["1","100","5"]}}
+
+// 函数响应 data
+{"result": 115.0, "row_count": 1}
+
+// 存储过程响应 data
+{"update_count": 1}
+```
+
+**DEBUG** — 调试函数（EXPLAIN、执行计划、依赖分析）
+
+```json
+// 请求
+{"id":"req-fn-006","category":"FUNCTION","action":"DEBUG","connection":{"driver":"Postgresql","host":"127.0.0.1","port":5432,"user":"postgres","password":"secret","database":"test_db"},"payload":{"name":"get_user_by_id","schema":"public"}}
+
+// 响应 data
+[
+  {"type": "EXPLAIN", "output": "[{\"Plan\":{\"Node Type\":\"Seq Scan\",\"Relation Name\":\"users\",\"Filter\":\"(id = $1)\"}}]"},
+  {"type": "INFO", "output": "Function: get_user_by_id\nSchema: public\nLanguage: plpgsql\nReturn Type: SETOF users\nVolatility: STABLE\nSecurity: SECURITY INVOKER\nArguments: user_id integer"},
+  {"type": "DEPENDENCIES", "output": "TABLE: users\nVIEW: user_summary"}
+]
+```
+
+**UPDATE** — 验证 DDL 语法（不创建，用于编辑时的语法检查）
+
+```json
+// 请求 payload
+{
+  "ddl": "CREATE OR REPLACE FUNCTION test_func(x INTEGER)\nRETURNS INTEGER AS $$\nBEGIN\n  RETURN x * 2;\nEND;\n$$ LANGUAGE plpgsql"
+}
+
+// 响应 data
+{"valid": true, "message": "DDL 语法验证通过"}
 ```
 
 ## 6. 安全与健壮性保障 (Security & Reliability)
@@ -668,6 +871,7 @@ idb_engine/                          Gradle 多模块项目
         │   ├── TableHandler.kt
         │   ├── DataHandler.kt
         │   ├── GenerateHandler.kt     造数引擎（LuaJIT 脚本 + 批量插入 + 事务）
+        │   ├── FunctionHandler.kt      函数/存储过程管理（PostgreSQL 完整实现）
         │   ├── UserHandler.kt
         │   ├── SqlEngineHandler.kt
         │   └── SystemHandler.kt       JVM 系统信息采集
@@ -771,11 +975,13 @@ response := scanner.Text()
 - GET_DDL 返回建表语句（MySQL: SHOW CREATE TABLE / PG: information_schema 重建）
 - DATA LIST 支持 `where`/`orderBy` 原始 SQL 片段过滤与排序，方言级注入校验
 - SYSTEM INFO 返回 JVM 运行时信息（版本、内存、CPU、PID、运行时长等）
-- PostgreSQL 方言全面优化（listSchemas 用 pg_namespace、listTables 含视图、listUsers 用 pg_roles、MODIFY_COLUMN 补齐 nullable/default、GET_DDL 含约束与索引、正则预编译）
+- PostgreSQL 方言全面优化（listSchemas 支持两级查询：database 列表 + schema 列表、listTables 用 current_schemas(true)、所有 TABLE/DATA/SQL 操作支持 payload.schema 指定 search_path、listUsers 用 pg_roles、MODIFY_COLUMN 补齐 nullable/default、GET_DDL 含约束与索引、正则预编译）
 - 用户管理完整 CRUD（CREATE/DELETE 用户、修改密码、查询指定用户权限，MySQL 与 PostgreSQL 均已实现）
 - 造数引擎（LuaJIT 嵌入式脚本 + 多表按序造数 + 外键引用 `lastId()` + 批量插入 + 单事务 + Lua 沙箱 + 流式进度回报）
+- 函数与存储过程管理模块（PostgreSQL: LIST（含触发器）/INFO/GET_DDL/CREATE/DELETE/CALL/DEBUG/VALIDATE，MySQL: 占位实现）
 
 ⏳ 待扩展：
+- MySQL 函数/存储过程管理完整实现
 - GraalVM Native Image 编译
 - 更多数据库方言插件（Oracle, SQL Server, SQLite — 只需实现 SPI 接口，放入 dialects/ 即可）
 - 性能监控与指标上报
