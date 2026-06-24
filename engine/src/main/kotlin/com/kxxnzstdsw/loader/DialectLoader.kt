@@ -4,7 +4,7 @@ import com.kxxnzstdsw.dialect.DatabaseDialect
 import org.slf4j.LoggerFactory
 import java.io.File
 import java.net.URLClassLoader
-import java.util.ServiceLoader
+import java.util.*
 
 /**
  * 方言插件动态加载器。
