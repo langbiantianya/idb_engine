@@ -1,6 +1,7 @@
 package com.kxxnzstdsw
 
 import com.kxxnzstdsw.dispatcher.RequestDispatcher
+import com.kxxnzstdsw.export.ExportProcessManager
 import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.loader.DriverLoader
 import com.kxxnzstdsw.pool.PoolManager
@@ -30,6 +31,7 @@ fun main() = runBlocking {
     // Add shutdown hook for graceful cleanup
     Runtime.getRuntime().addShutdownHook(Thread {
         logger.info("Shutdown hook triggered")
+        ExportProcessManager.stop()
         PoolManager.closeAll()
         DriverLoader.closeAll()
         DialectLoader.closeAll()

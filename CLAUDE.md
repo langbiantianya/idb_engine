@@ -8,6 +8,8 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 **系统拓扑流：**
 `[前端 Webview]` ↔ `[Wails Go 主进程]` ↔ `(StdIn/StdOut JSON 管道)` ↔ `[Kotlin 独立子进程]` ↔ `[MySQL / PostgreSQL]`
 
+> **性能隔离**：数据导出模块运行在独立的子进程中，通过 `ExportProcessManager` 管理，防止大数据量导出时 OOM 影响主进程稳定性。
+
 ## 2. 技术栈选型 (Technology Stack)
 
 - **核心语言**：Kotlin 2.4.0 / JDK 25
@@ -18,6 +20,8 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 - **日志框架**：SLF4J 2.0.18 + Logback 1.5.13 (日志输出到本地滚动文件，不污染 stdout)
 - **构建与分发**：Gradle + ShadowJar 9.3.0+ (构建为瘦包 + 外部依赖，后续可通过 GraalVM Native Image 编译为无 JRE 依赖的二进制文件)
 - **脚本引擎**：LuaJIT 4.1.0 + Lua 5.1~5.5 via luajava (嵌入式 Lua 脚本引擎，用于造数功能中的数据生成规则定义，支持多版本切换)
+- **Excel 导出**：Apache POI 5.5.1 (poi-ooxml SXSSF 流式 API)
+- **Parquet 导出**：Apache Parquet 1.17.1 + Hadoop 3.5.0 (列式存储，文件系统抽象)
 
 ## 3. 核心机制设计 (Core Mechanisms)
 
@@ -45,6 +49,53 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 4. **连接超时**：`connectionTimeout` 设为 5 秒，快速失败避免界面卡死。
 5. **最大生命周期**：`maxLifetime` 为 30 分钟，防止数据库服务端主动断开连接导致的失效连接复用。
 
+### 3.4 导出子进程隔离机制 (Export Subprocess Isolation)
+
+数据导出模块独立运行在子进程中，通过 `ExportProcessManager` 管理，实现与主进程的**进程级隔离**。
+
+**设计目标**：
+- 防止大数据量导出时 OOM 影响主进程稳定性
+- 支持导出任务的手动停止（取消）
+- 主进程关闭时自动停止导出子进程
+
+**架构组件**：
+
+| 组件 | 文件 | 职责 |
+|---|---|---|
+| `ExportProcessManager` | `engine/.../export/ExportProcessManager.kt` | 主进程管理器：启动/停止子进程、转发命令和响应 |
+| `ExportSubProcess` | `engine/.../export/ExportSubProcess.kt` | 子进程入口：独立 JVM 运行，监听 stdin 执行导出任务 |
+| `ExportEngine` | `engine/.../export/ExportEngine.kt` | 导出引擎：实际的数据导出逻辑（复用原有实现） |
+
+**通信协议**：
+
+```
+[主引擎] --stdin/stdout--> [导出子进程]
+```
+
+子进程接收的命令格式：
+```json
+{"CMD": "START_EXPORT", "id": "req-xxx", "connection": {...}, "payload": {...}}
+{"CMD": "STOP_EXPORT", "exportId": "req-xxx"}
+{"CMD": "CMD_EXIT"}
+```
+
+子进程发送的响应格式（与主协议一致）：
+```json
+{"id": "req-xxx", "success": true, "stream": true, "end": false, "data": {...}}
+```
+
+**生命周期管理**：
+1. 首次收到 EXPORT 请求时，`ExportProcessManager` 启动子进程
+2. 子进程启动后加载 drivers/ 和 dialects/ 目录
+3. 子进程内存限制 `-Xmx512m`，防止导出任务耗尽系统内存
+4. 主进程关闭时，`ExportProcessManager.stop()` 发送 `CMD_EXIT`，子进程优雅退出
+5. 支持单独停止某个导出任务（`STOP_EXPORT` 命令）
+
+**停止导出**：
+- 主进程收到新 EXPORT 请求且 `payload.stopExportId` 不为空时，向子进程发送 `STOP_EXPORT` 命令
+- 子进程设置 `ExportEngine.isCancelled = true`，导出协程在下一次循环检查时抛出 `ExportCancelledException`
+- 被取消的导出任务返回 `{"success": false, "error": "Export cancelled by user"}`
+
 ## 4. 数据交互契约 (JSON Protocol Spec)
 
 ### 4.1 统一请求体 (Request Envelope)
@@ -52,8 +103,8 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 ```json
 {
   "id": "req-uuid-1234",
-  "category": "SCHEMA | USER | TABLE | DATA | SQL | SYSTEM | FUNCTION",
-  "action": "LIST | CREATE | UPDATE | DELETE | EXECUTE | GET_DDL | INFO | GRANTS | GENERATE | CALL | DEBUG",
+  "category": "SCHEMA | USER | TABLE | DATA | SQL | SYSTEM | FUNCTION | EXPORT",
+  "action": "LIST | CREATE | UPDATE | DELETE | EXECUTE | GET_DDL | INFO | GRANTS | GENERATE | CALL | DEBUG | EXPORT",
   "connection": {
     "driver": "mysql | postgresql",
     "host": "127.0.0.1",
@@ -822,7 +873,9 @@ PostgreSQL 函数和存储过程管理模块，支持创建、查询、调用、
 
 ### 5.9 数据导出 (Data Export) — `category: "EXPORT"`, `action: "EXPORT"`
 
-基于自定义 SQL 的 5 种格式数据导出，全链路流式处理，内存占用与数据总量无关，支持超大数据量稳定导出。
+基于自定义 SQL 的 5 种格式数据导出，**独立子进程运行**，全链路流式处理，内存占用与数据总量无关，支持超大数据量稳定导出。
+
+> **子进程隔离**：导出任务运行在独立的 JVM 子进程中（通过 `ExportProcessManager` 管理），即使导出千万级数据也不会导致主进程 OOM。主进程关闭时子进程自动停止。
 
 > 📦 **依赖**：
 > - POI：`org.apache.poi:poi-ooxml:5.2.5`（Excel 导出）
@@ -887,6 +940,7 @@ PostgreSQL 函数和存储过程管理模块，支持创建、查询、调用、
    - 当读到 `null` (EOF/输入流关闭) 或特定指令 `"CMD_EXIT"` 时，调用 `PoolManager.closeAll()` 清理所有连接池，并调用 `exitProcess(0)` 正常退出。
    - 添加 JVM Shutdown Hook，确保即使进程被强制终止也能清理资源。
    - Wails 的 Go 进程在关闭时负责切断管道。
+   - 导出子进程由 `ExportProcessManager` 管理，主进程关闭时自动发送 `CMD_EXIT`，子进程优雅退出。
 
 2. **连接超时管控 (Timeout Protection)**：
    在 HikariCP 中配置 `connectionTimeout = 5000` (5秒)。当用户输入了错误的 IP 或密码时，能在 5 秒内快速失败并把错误 JSON 返回给前端，避免界面长时间卡死。
@@ -926,12 +980,16 @@ idb_engine/                          Gradle 多模块项目
         │   └── RequestDispatcher.kt   解析 JSON，分发请求路由
         ├── pool/
         │   └── PoolManager.kt         HikariCP 动态管理与 SHA-256 缓存
+        ├── export/                    导出模块
+        │   ├── ExportEngine.kt         导出引擎（核心逻辑）
+        │   ├── ExportProcessManager.kt 导出子进程管理器（主进程端）
+        │   └── ExportSubProcess.kt    导出子进程入口（子进程端）
         ├── handlers/                  业务处理层（通过 DialectLoader 获取方言）
         │   ├── SchemaHandler.kt
         │   ├── TableHandler.kt
         │   ├── DataHandler.kt
         │   ├── GenerateHandler.kt     造数引擎（LuaJIT 脚本 + 批量插入 + 事务）
-        │   ├── FunctionHandler.kt      函数/存储过程管理（PostgreSQL 完整实现）
+        │   ├── FunctionHandler.kt     函数/存储过程管理（PostgreSQL 完整实现）
         │   ├── UserHandler.kt
         │   ├── SqlEngineHandler.kt
         │   └── SystemHandler.kt       JVM 系统信息采集
@@ -940,8 +998,8 @@ idb_engine/                          Gradle 多模块项目
         │   └── DialectLoader.kt       扫描 dialects/ 目录，ServiceLoader 加载方言插件
         └── models/                    数据契约
             ├── Request.kt             Request / Category / Action / ConnectionConfig
-            ├── Response.kt            Response
-            └── GenerateModels.kt      GeneratePayload / TableGenerateConfig
+            ├── Response.kt             Response
+            └── GenerateModels.kt       GeneratePayload / TableGenerateConfig
 
 构建产物结构：
 engine/build/libs/
@@ -964,7 +1022,7 @@ engine/build/libs/
 产物结构（位于 `engine/build/libs/`）：
 ```
 engine/build/libs/
-├── idb-engine.jar       主引擎瘦包
+├── idb-engine.jar       主引擎瘦包（Main-Class: com.kxxnzstdsw.MainKt）
 ├── libs/                运行时依赖
 │   ├── luajava-4.1.0.jar
 │   ├── luajit-4.1.0.jar
@@ -989,7 +1047,7 @@ engine/build/libs/
     └── idb-dialect-postgresql.jar
 ```
 
-Main-Class 为 `com.kxxnzstdsw.MainKt`，Manifest 中 Class-Path 指向同级 `libs/` 目录。
+> **注意**：`idb-engine.jar` 既是主引擎入口（`com.kxxnzstdsw.MainKt`），也是导出子进程的 classpath 入口。导出子进程通过相同的 JAR 运行 `com.kxxnzstdsw.export.ExportSubProcess`。
 
 ### 8.2 运行
 
@@ -1039,7 +1097,7 @@ response := scanner.Text()
 - 用户管理完整 CRUD（CREATE/DELETE 用户、修改密码、查询指定用户权限，MySQL 与 PostgreSQL 均已实现）
 - 造数引擎（LuaJIT 嵌入式脚本 + 多表按序造数 + 外键引用 `lastId()` + 批量插入 + 单事务 + Lua 沙箱 + 流式进度回报）
 - 函数与存储过程管理模块（PostgreSQL: LIST（含触发器）/INFO/GET_DDL/CREATE/DELETE/CALL/DEBUG/VALIDATE，MySQL: 占位实现）
-- 数据导出引擎（5 种格式：CSV/JSON Lines/SQL INSERT/Excel/Parquet，全链路 JDBC 游标流式逐行处理，POI SXSSF 支持百万行分 Sheet）
+- **数据导出引擎（5 种格式：CSV/JSON Lines/SQL INSERT/Excel/Parquet，全链路 JDBC 游标流式逐行处理，POI SXSSF 支持百万行分 Sheet，导出子进程隔离防 OOM）**
 
 ⏳ 待扩展：
 - MySQL 函数/存储过程管理完整实现

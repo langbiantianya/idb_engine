@@ -18,6 +18,10 @@ object ExportEngine {
 
     private val logger = LoggerFactory.getLogger(ExportEngine::class.java)
 
+    // 取消标志（用于跨协程取消）
+    @Volatile
+    var isCancelled = false
+
     /**
      * 执行导出（流式处理，进度通过回调实时回报）
      *
@@ -31,6 +35,9 @@ object ExportEngine {
         request: ExportRequest,
         onProgress: (ExportProgress) -> Unit
     ): ExportResult = withContext(Dispatchers.IO) {
+        // 重置取消标志
+        isCancelled = false
+
         val outputDir = File(request.outputDir)
         if (!outputDir.exists()) {
             outputDir.mkdirs()
@@ -105,8 +112,14 @@ object ExportEngine {
             // 8. 写入表头
             writer.writeHeader(columns)
 
-            // 9. 流式逐行读取并写入
+            // 9. 流式逐行读取并写入（支持取消检查）
             while (resultSet.next()) {
+                // 检查是否被取消
+                if (isCancelled) {
+                    logger.info("导出被用户取消，已导出 $exportedRows 行")
+                    throw ExportCancelledException("Export cancelled by user")
+                }
+
                 val row = (1..columnCount).map { resultSet.getObject(it) }
                 writer.writeRow(row)
                 exportedRows++
@@ -136,6 +149,8 @@ object ExportEngine {
                 columnCount = columnCount
             )
 
+        } catch (e: ExportCancelledException) {
+            throw e
         } catch (e: Exception) {
             logger.error("导出失败", e)
             ExportResult(
@@ -150,6 +165,11 @@ object ExportEngine {
             try { connection.close() } catch (e: Exception) { /* ignore */ }
         }
     }
+
+    /**
+     * 导出取消异常
+     */
+    class ExportCancelledException(message: String) : Exception(message)
 
     /**
      * 导出结果

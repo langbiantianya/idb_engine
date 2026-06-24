@@ -56,8 +56,8 @@ cd engine/build/libs && java -jar idb-engine.jar
 ```json
 {
   "id": "req-uuid-1234",
-  "category": "SCHEMA|USER|TABLE|DATA|SQL|SYSTEM|FUNCTION",
-  "action": "LIST|CREATE|UPDATE|DELETE|EXECUTE|GET_DDL|INFO|GRANTS|GENERATE|CALL|DEBUG",
+  "category": "SCHEMA|USER|TABLE|DATA|SQL|SYSTEM|FUNCTION|EXPORT",
+  "action": "LIST|CREATE|UPDATE|DELETE|EXECUTE|GET_DDL|INFO|GRANTS|GENERATE|CALL|DEBUG|EXPORT",
   "connection": {
     "driver": "mysql|postgresql",
     "host": "127.0.0.1",
@@ -951,7 +951,9 @@ PostgreSQL 函数、存储过程和触发器管理模块，支持创建、查询
 
 ### EXPORT — 数据导出
 
-基于自定义 SQL 的 5 种格式数据导出，全链路 JDBC 游标流式逐行处理，内存占用与数据总量无关，支持超大数据量稳定导出。
+基于自定义 SQL 的 5 种格式数据导出，**独立子进程运行**，全链路 JDBC 游标流式逐行处理，内存占用与数据总量无关，支持超大数据量稳定导出。
+
+> **子进程隔离**：导出任务运行在独立的 JVM 子进程中（通过 `ExportProcessManager` 管理），即使导出千万级数据也不会导致主进程 OOM。主进程关闭时子进程自动停止。
 
 **支持格式**：CSV、JSON Lines（.jsonl）、SQL INSERT、Excel（.xlsx）、Parquet
 
@@ -987,6 +989,19 @@ PostgreSQL 函数、存储过程和触发器管理模块，支持创建、查询
 - **MySQL**：自动设置 `fetchSize = Integer.MIN_VALUE` 启用流式游标
 - **PostgreSQL**：自动关闭 `autoCommit` 启用服务端游标，导出完成后自动恢复
 
+**停止导出**：
+
+导出任务运行在独立子进程中，支持手动停止。在新的 EXPORT 请求中指定 `stopExportId` 即可取消对应的导出任务：
+
+```json
+{"id":"exp-stop","category":"EXPORT","action":"EXPORT","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"stopExportId":"exp1"}}
+```
+
+停止成功后，子进程返回错误响应：
+```json
+{"id":"exp1","success":false,"error":"Export cancelled by user","data":null}
+```
+
 ---
 
 ### 错误响应示例
@@ -1016,19 +1031,19 @@ PostgreSQL 函数、存储过程和触发器管理模块，支持创建、查询
 - **日志隔离**：所有日志输出到滚动文件 (`~/.config/idb/logs/idb-engine.log`)，不污染 stdout JSON 流
 - **嵌入式造数引擎**：LuaJIT 脚本驱动，支持多表按序造数、外键引用、沙箱隔离、流式进度回报
 - **函数与存储过程管理**：PostgreSQL 完整实现（创建/查询/调用/调试/删除/详情自动解析类型，含触发器支持），MySQL 占位
-- **数据导出**：5 种格式（CSV / JSON Lines / SQL INSERT / Excel / Parquet），JDBC 游标流式逐行处理，支持超大数据量
+- **数据导出**：5 种格式（CSV / JSON Lines / SQL INSERT / Excel / Parquet），**独立子进程运行**，JDBC 游标流式逐行处理，支持超大数据量防 OOM
 
 ## 技术栈
 
 - Kotlin 2.4.0
 - JDK 25
 - kotlinx-coroutines 1.11.0
+- kotlinx-serialization 1.11.0
 - HikariCP 7.0.2
 - MySQL Connector/J 9.7.0
 - PostgreSQL JDBC 42.7.11
-- kotlinx.serialization 1.11.0
-- LuaJIT 4.1.0 (luajava — 嵌入式脚本引擎，造数功能)
 - SLF4J 2.0.18 + Logback 1.5.13
-- Apache POI 5.2.5（poi-ooxml — Excel 流式导出）
-- Apache Parquet 1.14.2（parquet-hadoop — 列式存储导出）
-- Apache Hadoop 3.3.6（hadoop-common — Parquet 文件系统抽象）
+- LuaJIT 4.1.0 (luajava — 嵌入式脚本引擎，造数功能)
+- Apache POI 5.5.1（poi-ooxml — Excel 流式导出）
+- Apache Parquet 1.17.1（parquet-hadoop — 列式存储导出）
+- Apache Hadoop 3.5.0（hadoop-common — Parquet 文件系统抽象）

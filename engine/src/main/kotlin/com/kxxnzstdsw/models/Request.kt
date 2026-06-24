@@ -2,6 +2,8 @@ package com.kxxnzstdsw.models
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 @Serializable
 data class Request(
@@ -33,5 +35,14 @@ data class ConnectionConfig(
 ) {
     fun toHashKey(): String {
         return "$driver://$user@$host:$port/$database"
+    }
+
+    fun toJson(): JsonObject = buildJsonObject {
+        put("driver", driver)
+        put("host", host)
+        put("port", port)
+        put("user", user)
+        put("password", password)
+        put("database", database)
     }
 }
