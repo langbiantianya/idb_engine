@@ -1,6 +1,7 @@
 package com.kxxnzstdsw.dispatcher
 
 import com.kxxnzstdsw.handlers.DataHandler
+import com.kxxnzstdsw.handlers.ExportHandler
 import com.kxxnzstdsw.handlers.FunctionHandler
 import com.kxxnzstdsw.handlers.GenerateHandler
 import com.kxxnzstdsw.handlers.SchemaHandler
@@ -31,6 +32,12 @@ object RequestDispatcher {
                 val data = SystemHandler.info()
                 val response = Response(id = request.id, success = true, data = data)
                 outputChannel.send(json.encodeToString(Response.serializer(), response))
+                return
+            }
+
+            // EXPORT 走流式路径（导出进度回报）
+            if (request.category == Category.EXPORT && request.action == Action.EXPORT) {
+                handleExport(request, outputChannel)
                 return
             }
 
@@ -74,6 +81,21 @@ object RequestDispatcher {
                 error = e.message ?: "Unknown error"
             )
             outputChannel.send(json.encodeToString(Response.serializer(), errorResponse))
+        }
+    }
+
+    private suspend fun handleExport(request: Request, outputChannel: Channel<String>) {
+        val id = request.id
+
+        try {
+            ExportHandler.execute(request.connection, request.payload, outputChannel)
+        } catch (e: Exception) {
+            logger.error("Error in export", e)
+            outputChannel.send(json.encodeToString(
+                Response.serializer(), Response(
+                    id = id, success = false, error = e.message ?: "Unknown error"
+                )
+            ))
         }
     }
 

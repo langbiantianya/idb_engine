@@ -820,6 +820,66 @@ PostgreSQL 函数和存储过程管理模块，支持创建、查询、调用、
 {"valid": true, "message": "DDL 语法验证通过"}
 ```
 
+### 5.9 数据导出 (Data Export) — `category: "EXPORT"`, `action: "EXPORT"`
+
+基于自定义 SQL 的 5 种格式数据导出，全链路流式处理，内存占用与数据总量无关，支持超大数据量稳定导出。
+
+> 📦 **依赖**：
+> - POI：`org.apache.poi:poi-ooxml:5.2.5`（Excel 导出）
+> - Parquet：`org.apache.parquet:parquet-hadoop:1.14.2`（Parquet 导出）
+> - Hadoop：`org.apache.hadoop:hadoop-common:3.3.6`（Parquet 文件系统抽象）
+
+**支持格式**：
+
+| 格式 | 文件扩展名 | 依赖 | 说明 |
+|---|---|---|---|
+| CSV | .csv | 零依赖 | UTF-8 BOM 头，自动处理字段转义 |
+| JSON Lines | .jsonl | 复用 kotlinx-serialization | 每行一个独立 JSON 对象 |
+| SQL INSERT | .sql | 零依赖 | 逐行生成 INSERT 语句，自动转义 |
+| Excel | .xlsx | POI SXSSF 流式 | 100 万行/Sheet 自动分页，1000 行内存窗口 |
+| Parquet | .parquet | parquet-hadoop | 动态 Schema，字符串统一类型 |
+
+**请求 payload 顶层字段**：
+
+```json
+{
+  "id": "req-export-001",
+  "category": "EXPORT",
+  "action": "EXPORT",
+  "connection": {"driver": "mysql", "host": "127.0.0.1", "port": 3306, "user": "root", "password": "secret", "database": "test_db"},
+  "payload": {
+    "sql": "SELECT * FROM users",
+    "outputDir": "D:/exports",
+    "fileName": "users_2024",
+    "format": "CSV",
+    "tableName": "users",
+    "fetchSize": 1000
+  }
+}
+```
+
+- `sql`（必填）— 自定义 SELECT SQL
+- `outputDir`（必填）— 输出目录路径（不存在会自动创建）
+- `fileName`（必填）— 文件名前缀（不含扩展名）
+- `format`（必填）— 导出格式：`CSV` / `JSON_LINES` / `SQL_INSERT` / `EXCEL` / `PARQUET`
+- `tableName`— SQL_INSERT 格式必填，用于生成 INSERT 语句前缀
+- `fetchSize`— JDBC 游标拉取批次大小，默认 1000
+
+**流式进度响应**：
+
+```json
+// 进度回报
+{"id":"req-export-001","success":true,"stream":true,"end":false,"data":{"exportedRows":1000,"columnCount":5,"completed":false,"filePath":null,"error":null}}
+{"id":"req-export-001","success":true,"stream":true,"end":false,"data":{"exportedRows":2000,"columnCount":5,"completed":false,"filePath":null,"error":null}}
+...
+// 结束标记
+{"id":"req-export-001","success":true,"stream":true,"end":true,"data":null}
+```
+
+**MySQL 特殊配置**：MySQL 流式读取需要在 JDBC URL 追加 `useCursorFetch=true`，本引擎自动处理（`fetchSize = Integer.MIN_VALUE` 启用流式）。
+
+**PostgreSQL 特殊配置**：自动关闭 `autoCommit` 以启用服务端游标，导出完成后自动恢复。
+
 ## 6. 安全与健壮性保障 (Security & Reliability)
 
 1. **防进程孤儿 (Graceful Shutdown)**：
@@ -979,6 +1039,7 @@ response := scanner.Text()
 - 用户管理完整 CRUD（CREATE/DELETE 用户、修改密码、查询指定用户权限，MySQL 与 PostgreSQL 均已实现）
 - 造数引擎（LuaJIT 嵌入式脚本 + 多表按序造数 + 外键引用 `lastId()` + 批量插入 + 单事务 + Lua 沙箱 + 流式进度回报）
 - 函数与存储过程管理模块（PostgreSQL: LIST（含触发器）/INFO/GET_DDL/CREATE/DELETE/CALL/DEBUG/VALIDATE，MySQL: 占位实现）
+- 数据导出引擎（5 种格式：CSV/JSON Lines/SQL INSERT/Excel/Parquet，全链路 JDBC 游标流式逐行处理，POI SXSSF 支持百万行分 Sheet）
 
 ⏳ 待扩展：
 - MySQL 函数/存储过程管理完整实现

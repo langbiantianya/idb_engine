@@ -949,6 +949,46 @@ PostgreSQL 函数、存储过程和触发器管理模块，支持创建、查询
 
 ---
 
+### EXPORT — 数据导出
+
+基于自定义 SQL 的 5 种格式数据导出，全链路 JDBC 游标流式逐行处理，内存占用与数据总量无关，支持超大数据量稳定导出。
+
+**支持格式**：CSV、JSON Lines（.jsonl）、SQL INSERT、Excel（.xlsx）、Parquet
+
+**请求**：
+```json
+{"id":"exp1","category":"EXPORT","action":"EXPORT","connection":{"driver":"mysql","host":"localhost","port":3306,"user":"root","password":"pass","database":"test_db"},"payload":{"sql":"SELECT * FROM users","outputDir":"D:/exports","fileName":"users_2024","format":"CSV","tableName":"users","fetchSize":1000}}
+```
+
+字段说明：
+- `sql`（必填）— 自定义 SELECT SQL
+- `outputDir`（必填）— 输出目录（不存在自动创建）
+- `fileName`（必填）— 文件名前缀（不含扩展名）
+- `format`（必填）— `CSV` / `JSON_LINES` / `SQL_INSERT` / `EXCEL` / `PARQUET`
+- `tableName` — SQL_INSERT 必填，用于生成 INSERT 语句前缀
+- `fetchSize` — JDBC 游标拉取批次大小，默认 1000
+
+**流式进度响应**（每行一条 JSON）：
+```
+{"id":"exp1","success":true,"stream":true,"end":false,"data":{"exportedRows":1000,"columnCount":5,"completed":false}}
+{"id":"exp1","success":true,"stream":true,"end":false,"data":{"exportedRows":2000,"columnCount":5,"completed":false}}
+...
+{"id":"exp1","success":true,"stream":true,"end":true,"data":null}
+```
+
+**格式特性**：
+- **CSV**：UTF-8 BOM 头保证 Excel 打开中文不乱码，自动处理字段转义
+- **JSON Lines**：每行一个独立 JSON 对象，零新增依赖
+- **SQL INSERT**：逐行生成 INSERT 语句，自动处理单引号转义
+- **Excel**：POI SXSSF 流式 API，100 万行/Sheet 自动分页，1000 行内存窗口
+- **Parquet**：动态 Schema，列式存储压缩
+
+**数据库适配**：
+- **MySQL**：自动设置 `fetchSize = Integer.MIN_VALUE` 启用流式游标
+- **PostgreSQL**：自动关闭 `autoCommit` 启用服务端游标，导出完成后自动恢复
+
+---
+
 ### 错误响应示例
 
 连接失败、SQL 语法错误等异常均返回统一错误格式：
@@ -976,6 +1016,7 @@ PostgreSQL 函数、存储过程和触发器管理模块，支持创建、查询
 - **日志隔离**：所有日志输出到滚动文件 (`~/.config/idb/logs/idb-engine.log`)，不污染 stdout JSON 流
 - **嵌入式造数引擎**：LuaJIT 脚本驱动，支持多表按序造数、外键引用、沙箱隔离、流式进度回报
 - **函数与存储过程管理**：PostgreSQL 完整实现（创建/查询/调用/调试/删除/详情自动解析类型，含触发器支持），MySQL 占位
+- **数据导出**：5 种格式（CSV / JSON Lines / SQL INSERT / Excel / Parquet），JDBC 游标流式逐行处理，支持超大数据量
 
 ## 技术栈
 
@@ -988,3 +1029,6 @@ PostgreSQL 函数、存储过程和触发器管理模块，支持创建、查询
 - kotlinx.serialization 1.11.0
 - LuaJIT 4.1.0 (luajava — 嵌入式脚本引擎，造数功能)
 - SLF4J 2.0.18 + Logback 1.5.13
+- Apache POI 5.2.5（poi-ooxml — Excel 流式导出）
+- Apache Parquet 1.14.2（parquet-hadoop — 列式存储导出）
+- Apache Hadoop 3.3.6（hadoop-common — Parquet 文件系统抽象）

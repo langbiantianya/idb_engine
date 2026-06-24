@@ -8,6 +8,9 @@ logback = "1.5.13"
 mysql-connector = "9.7.0"
 postgresql = "42.7.11"
 luajava = "4.1.0"
+poi = "5.5.1"
+parquet = "1.17.1"
+hadoop = "3.5.0"
 
 [libraries]
 kotlin-gradle-plugin = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin", version.ref = "kotlin" }
@@ -25,6 +28,14 @@ lua52 = { module = "party.iroiro.luajava:lua52", version.ref = "luajava" }
 lua53 = { module = "party.iroiro.luajava:lua53", version.ref = "luajava" }
 lua54 = { module = "party.iroiro.luajava:lua54", version.ref = "luajava" }
 lua55 = { module = "party.iroiro.luajava:lua55", version.ref = "luajava" }
+
+# Excel/Word导出
+poi = { module = "org.apache.poi:poi", version.ref = "poi" }
+poi-ooxml = { module = "org.apache.poi:poi-ooxml", version.ref = "poi" }
+
+# Parquet 列式存储
+parquet-hadoop = { module = "org.apache.parquet:parquet-hadoop", version.ref = "parquet" }
+hadoop-common = { module = "org.apache.hadoop:hadoop-common", version.ref = "hadoop" }
 
 [bundles]
 
