@@ -801,7 +801,7 @@ class PostgreSQLDialect : DatabaseDialect {
     }
 
     /**
-     * 删除函数或存储过程
+     * 删除函数、存储过程或触发器
      */
     override suspend fun dropRoutine(
         conn: Connection,
@@ -814,17 +814,77 @@ class PostgreSQLDialect : DatabaseDialect {
         val targetSchema = if (schema.isNotBlank()) schema else "public"
         val safeRoutineName = sanitizeIdentifier(routineName, "routine name")
         val safeSchema = sanitizeIdentifier(targetSchema, "schema name")
-        val kind = if (routineType.uppercase() == "PROCEDURE") "PROCEDURE" else "FUNCTION"
+        val upperType = routineType.uppercase()
 
-        val sql = buildString {
-            append("DROP $kind ")
-            if (ifExists) append("IF EXISTS ")
-            append("${quoteIdentifier(safeSchema)}.${quoteIdentifier(safeRoutineName)}")
-            if (cascade) append(" CASCADE")
-        }
+        when (upperType) {
+            "TRIGGER" -> {
+                // 删除触发器需要先获取关联的表名
+                conn.prepareStatement("""
+                    SELECT c.relname AS table_name
+                    FROM pg_trigger t
+                    JOIN pg_class c ON t.tgrelid = c.oid
+                    JOIN pg_namespace n ON c.relnamespace = n.oid
+                    WHERE t.tgname = ? AND n.nspname = ? AND NOT t.tgisinternal
+                """.trimIndent()).use { stmt ->
+                    stmt.setString(1, routineName)
+                    stmt.setString(2, targetSchema)
+                    stmt.executeQuery().use { rs ->
+                        if (rs.next()) {
+                            val tableName = rs.getString("table_name")
+                            val sql = buildString {
+                                append("DROP TRIGGER ")
+                                if (ifExists) append("IF EXISTS ")
+                                append("${quoteIdentifier(safeRoutineName)} ON ${quoteIdentifier(tableName)}")
+                                if (cascade) append(" CASCADE")
+                            }
+                            conn.createStatement().use { execStmt ->
+                                execStmt.execute(sql)
+                            }
+                        } else if (ifExists) {
+                            // 触发器不存在但使用了 IF EXISTS，不报错
+                            return@withContext true
+                        } else {
+                            throw IllegalArgumentException("未找到触发器 '$routineName'，schema: '$targetSchema'")
+                        }
+                    }
+                }
+            }
+            "PROCEDURE" -> {
+                val sql = buildString {
+                    append("DROP PROCEDURE ")
+                    if (ifExists) append("IF EXISTS ")
+                    append("${quoteIdentifier(safeSchema)}.${quoteIdentifier(safeRoutineName)}")
+                    if (cascade) append(" CASCADE")
+                }
+                conn.createStatement().use { stmt ->
+                    stmt.execute(sql)
+                }
+            }
+            else -> {
+                // FUNCTION 或其他类型，尝试删除函数
+                val sql = buildString {
+                    append("DROP FUNCTION ")
+                    if (ifExists) append("IF EXISTS ")
+                    append("${quoteIdentifier(safeSchema)}.${quoteIdentifier(safeRoutineName)}")
+                    if (cascade) append(" CASCADE")
+                }
 
-        conn.createStatement().use { stmt ->
-            stmt.execute(sql)
+                try {
+                    conn.createStatement().use { stmt ->
+                        stmt.execute(sql)
+                    }
+                } catch (e: Exception) {
+                    // 如果遇到触发器依赖问题，自动尝试 CASCADE
+                    if (!cascade && e.message?.contains("other objects depend on it") == true) {
+                        val cascadeSql = "DROP FUNCTION ${if (ifExists) "IF EXISTS " else ""}${quoteIdentifier(safeSchema)}.${quoteIdentifier(safeRoutineName)} CASCADE"
+                        conn.createStatement().use { stmt ->
+                            stmt.execute(cascadeSql)
+                        }
+                    } else {
+                        throw e
+                    }
+                }
+            }
         }
         true
     }
