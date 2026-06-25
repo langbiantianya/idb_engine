@@ -14,14 +14,15 @@ import java.time.LocalDateTime
 
 /**
  * Excel 导出写入器（POI SXSSF 流式 API）
- * - 单 Sheet 数据行上限 100 万，达到阈值后自动新建 Sheet
+ * - 单 Sheet 数据行上限 100 万，达到阈值后自动新建 Sheet（不含表头）
  * - 内存窗口 1000 行，超出自动刷入磁盘
+ * - close() 时自动清理临时文件（POI close() 已内置 dispose）
  */
 class ExcelWriter(private val outputFile: File) : ExportWriter {
 
     companion object {
-        /** 单 Sheet 最大行数（含表头） */
-        const val MAX_ROWS_PER_SHEET = 1_000_000
+        /** 单 Sheet 最大数据行数（不含表头） */
+        const val MAX_DATA_ROWS_PER_SHEET = 1_000_000
         /** 内存中保留的行数 */
         const val FLUSH_WINDOW_SIZE = 1000
         /** Sheet 名称前缀 */
@@ -32,29 +33,25 @@ class ExcelWriter(private val outputFile: File) : ExportWriter {
     private var currentSheet: SXSSFSheet? = null
     private var columns: List<String> = emptyList()
     private var exportedRows = 0L
-    private var currentSheetRowIndex = 0
+    /** 当前 Sheet 的数据行数（不含表头），达到上限时创建新 Sheet */
+    private var currentSheetDataRowIndex = 0
     private var sheetNumber = 0
 
     override fun writeHeader(columns: List<String>) {
         this.columns = columns
         ensureSheet()
-        // 写入表头
-        val headerRow = currentSheet!!.createRow(currentSheetRowIndex++)
-        columns.forEachIndexed { index, column ->
-            headerRow.createCell(index).apply {
-                cellType = CellType.STRING
-                setCellValue(column)
-            }
-        }
+        // 写入第一张 Sheet 的表头
+        writeHeaderRow(currentSheet!!)
+        currentSheetDataRowIndex = 0
     }
 
     override fun writeRow(row: List<Any?>) {
-        // 检查是否需要新建 Sheet
-        if (currentSheetRowIndex >= MAX_ROWS_PER_SHEET) {
+        // 检查是否需要新建 Sheet（MAX_DATA_ROWS_PER_SHEET 是数据行上限，不含表头）
+        if (currentSheetDataRowIndex >= MAX_DATA_ROWS_PER_SHEET) {
             nextSheet()
         }
 
-        val dataRow = currentSheet!!.createRow(currentSheetRowIndex++)
+        val dataRow = currentSheet!!.createRow(currentSheetDataRowIndex++)
         row.forEachIndexed { index, value ->
             setCellValue(dataRow.createCell(index), value)
         }
@@ -62,13 +59,19 @@ class ExcelWriter(private val outputFile: File) : ExportWriter {
     }
 
     override fun flush() {
+        // 刷新当前 Sheet 的行数据到临时文件
         currentSheet?.flushRows()
     }
 
     override fun close() {
-        workbook.use { workbook ->
-            workbook?.write(FileOutputStream(outputFile))
+        workbook?.use { wb ->
+            // 写入最终文件，close() 会自动调用 dispose() 清理临时文件
+            FileOutputStream(outputFile).use { fos ->
+                wb.write(fos)
+            }
         }
+        workbook = null
+        currentSheet = null
     }
 
     override fun getExportedRows(): Long = exportedRows
@@ -84,14 +87,19 @@ class ExcelWriter(private val outputFile: File) : ExportWriter {
     }
 
     /**
-     * 创建新 Sheet 并写入表头
+     * 创建新 Sheet（不写入表头，数据连续）
      */
     private fun nextSheet() {
         sheetNumber++
         currentSheet = workbook?.createSheet("$SHEET_NAME_PREFIX$sheetNumber")
-        currentSheetRowIndex = 0
-        // 新 Sheet 写入表头
-        val headerRow = currentSheet!!.createRow(currentSheetRowIndex++)
+        currentSheetDataRowIndex = 0
+    }
+
+    /**
+     * 写入表头行
+     */
+    private fun writeHeaderRow(sheet: SXSSFSheet) {
+        val headerRow = sheet.createRow(0)
         columns.forEachIndexed { index, column ->
             headerRow.createCell(index).apply {
                 cellType = CellType.STRING

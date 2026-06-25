@@ -909,7 +909,7 @@ PostgreSQL 函数和存储过程管理模块，支持创建、查询、调用、
 | CSV | .csv | 零依赖 | UTF-8 BOM 头，自动处理字段转义 |
 | JSON Lines | .jsonl | 复用 kotlinx-serialization | 每行一个独立 JSON 对象 |
 | SQL INSERT | .sql | 零依赖 | 逐行生成 INSERT 语句，自动转义 |
-| Excel | .xlsx | POI SXSSF 流式 | 100 万行/Sheet 自动分页，1000 行内存窗口 |
+| Excel | .xlsx | POI SXSSF 流式 | 100 万数据行/Sheet 自动分页，1000 行内存窗口，表头仅首 Sheet 写入 |
 | Parquet | .parquet | parquet-hadoop | 动态 Schema，字符串统一类型 |
 
 **请求 payload 顶层字段**：
