@@ -14,7 +14,7 @@ import java.time.LocalDateTime
 
 /**
  * Excel 导出写入器（POI SXSSF 流式 API）
- * - 单 Sheet 数据行上限 100 万，达到阈值后自动新建 Sheet（不含表头）
+ * - 单 Sheet 数据行上限 100 万，达到阈值后自动新建 Sheet
  * - 内存窗口 1000 行，超出自动刷入磁盘
  * - close() 时自动清理临时文件（POI close() 已内置 dispose）
  */
@@ -42,7 +42,8 @@ class ExcelWriter(private val outputFile: File) : ExportWriter {
         ensureSheet()
         // 写入第一张 Sheet 的表头
         writeHeaderRow(currentSheet!!)
-        currentSheetDataRowIndex = 0
+        // 表头占 row 0，数据从 row 1 开始
+        currentSheetDataRowIndex = 1
     }
 
     override fun writeRow(row: List<Any?>) {
@@ -87,12 +88,16 @@ class ExcelWriter(private val outputFile: File) : ExportWriter {
     }
 
     /**
-     * 创建新 Sheet（不写入表头，数据连续）
+     * 创建新 Sheet 并写入表头
      */
     private fun nextSheet() {
         sheetNumber++
         currentSheet = workbook?.createSheet("$SHEET_NAME_PREFIX$sheetNumber")
         currentSheetDataRowIndex = 0
+        // 写入表头
+        writeHeaderRow(currentSheet!!)
+        // 表头占 row 0，数据从 row 1 开始
+        currentSheetDataRowIndex = 1
     }
 
     /**
