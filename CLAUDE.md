@@ -57,14 +57,34 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 - 防止大数据量导出时 OOM 影响主进程稳定性
 - 支持导出任务的手动停止（取消）
 - 主进程关闭时自动停止导出子进程
+- 子进程响应走主进程统一串行化管线，保证输出不丢失、不交错
 
 **架构组件**：
 
 | 组件 | 文件 | 职责 |
 |---|---|---|
-| `ExportProcessManager` | `engine/.../export/ExportProcessManager.kt` | 主进程管理器：启动/停止子进程、转发命令和响应 |
+| `ExportProcessManager` | `engine/.../export/ExportProcessManager.kt` | 主进程管理器：启动/停止子进程、内部缓冲 Channel 转发响应 |
 | `ExportSubProcess` | `engine/.../export/ExportSubProcess.kt` | 子进程入口：独立 JVM 运行，监听 stdin 执行导出任务 |
 | `ExportEngine` | `engine/.../export/ExportEngine.kt` | 导出引擎：实际的数据导出逻辑（复用原有实现） |
+| `GlobalOutputChannel` | `engine/.../export/GlobalOutputChannel.kt` | 全局输出 Channel：桥接子进程响应到主进程统一 stdout 管线 |
+
+**响应数据流管线**：
+
+```
+[导出子进程 stdout]
+    → readOutputLoop()
+    → responseBuffer Channel (UNLIMITED)
+    → forwardResponses()
+    → GlobalOutputChannel.channel
+    → Main.kt outputJob (for (response in outputChannel))
+    → println(response)
+    → [Go 进程 stdin]
+```
+
+- `readOutputLoop`：运行在 `Dispatchers.IO` 协程，读取子进程 stdout 每行写入 `responseBuffer`
+- `forwardResponses`：运行在独立协程，从 `responseBuffer` 读取后发送到 `GlobalOutputChannel`
+- `GlobalOutputChannel`：主进程注入的共享 Channel，确保子进程响应与主请求响应共享同一个串行化管线
+- `Main.kt outputJob`：统一协程，`for (response in outputChannel)` 逐个 `println`，保证**所有 stdout 写入严格串行化**，不会有任何交错
 
 **通信协议**：
 
@@ -980,7 +1000,7 @@ idb_engine/                          Gradle 多模块项目
 │
 └── engine/                          主引擎模块
     └── src/main/kotlin/
-        ├── Main.kt                    入口点，协程主循环与 Channel 输出串行化
+        ├── Main.kt                    入口点，协程主循环、outputChannel 串行化输出、GlobalOutputChannel 注入
         ├── dispatcher/
         │   └── RequestDispatcher.kt   解析 JSON，分发请求路由
         ├── pool/
@@ -988,7 +1008,8 @@ idb_engine/                          Gradle 多模块项目
         ├── export/                    导出模块
         │   ├── ExportEngine.kt         导出引擎（核心逻辑）
         │   ├── ExportProcessManager.kt 导出子进程管理器（主进程端）
-        │   └── ExportSubProcess.kt    导出子进程入口（子进程端）
+        │   ├── ExportSubProcess.kt     导出子进程入口（子进程端）
+        │   └── GlobalOutputChannel.kt  全局输出 Channel（桥接子进程响应到主进程管线）
         ├── handlers/                  业务处理层（通过 DialectLoader 获取方言）
         │   ├── SchemaHandler.kt
         │   ├── TableHandler.kt

@@ -51,7 +51,7 @@ object ExportSubProcess {
 
         val outputJob = launch(Dispatchers.IO) {
             for (response in outputChannel) {
-                logger.info("SUBPROCESS_OUT (len=${response.length}): {}", response.take(200))
+                logger.info("SUBPROCESS_OUT (len=${response.length}): {}", response)
                 out.println(response)
                 logger.info("SUBPROCESS_FLUSHED (len=${response.length})")
             }
