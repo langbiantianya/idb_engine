@@ -878,9 +878,9 @@ PostgreSQL 函数和存储过程管理模块，支持创建、查询、调用、
 > **子进程隔离**：导出任务运行在独立的 JVM 子进程中（通过 `ExportProcessManager` 管理），即使导出千万级数据也不会导致主进程 OOM。主进程关闭时子进程自动停止。
 
 > 📦 **依赖**：
-> - POI：`org.apache.poi:poi-ooxml:5.2.5`（Excel 导出）
-> - Parquet：`org.apache.parquet:parquet-hadoop:1.14.2`（Parquet 导出）
-> - Hadoop：`org.apache.hadoop:hadoop-common:3.3.6`（Parquet 文件系统抽象）
+> - POI：`org.apache.poi:poi-ooxml:5.5.1`（Excel 导出）
+> - Parquet：`org.apache.parquet:parquet-hadoop:1.17.1`（Parquet 导出）
+> - Hadoop：`org.apache.hadoop:hadoop-common:3.5.0`（Parquet 文件系统抽象）
 
 **支持格式**：
 
@@ -921,13 +921,18 @@ PostgreSQL 函数和存储过程管理模块，支持创建、查询、调用、
 **流式进度响应**：
 
 ```json
-// 进度回报
+// 初始进度
+{"id":"req-export-001","success":true,"stream":true,"end":false,"data":{"exportedRows":0,"columnCount":5,"completed":false,"filePath":null,"error":null}}
+// 每 1000 行进度
 {"id":"req-export-001","success":true,"stream":true,"end":false,"data":{"exportedRows":1000,"columnCount":5,"completed":false,"filePath":null,"error":null}}
 {"id":"req-export-001","success":true,"stream":true,"end":false,"data":{"exportedRows":2000,"columnCount":5,"completed":false,"filePath":null,"error":null}}
 ...
-// 结束标记
-{"id":"req-export-001","success":true,"stream":true,"end":true,"data":null}
+// 结束标记（包含 filePath）
+{"id":"req-export-001","success":true,"stream":true,"end":true,"data":{"exportedRows":13308,"columnCount":5,"completed":true,"filePath":"C:\\Users\\langb\\Desktop\\users_2024.csv","error":null}}
 ```
+
+- 进度每 1000 行发送一次
+- 收到 `end: true` 时表示导出完成，`filePath` 为导出文件完整路径
 
 **MySQL 特殊配置**：MySQL 流式读取需要在 JDBC URL 追加 `useCursorFetch=true`，本引擎自动处理（`fetchSize = Integer.MIN_VALUE` 启用流式）。
 

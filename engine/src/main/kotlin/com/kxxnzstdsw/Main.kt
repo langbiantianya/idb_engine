@@ -2,6 +2,7 @@ package com.kxxnzstdsw
 
 import com.kxxnzstdsw.dispatcher.RequestDispatcher
 import com.kxxnzstdsw.export.ExportProcessManager
+import com.kxxnzstdsw.export.GlobalOutputChannel
 import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.loader.DriverLoader
 import com.kxxnzstdsw.pool.PoolManager
@@ -30,6 +31,10 @@ fun main() = runBlocking {
 
     // Channel for serializing stdout output (only one output at a time)
     val outputChannel = Channel<String>(Channel.UNLIMITED)
+
+    // Set global output channel for subprocess managers (export, etc.)
+    // They send responses here to be serialized through the same stdout pipeline
+    GlobalOutputChannel.channel = outputChannel
 
     // Add shutdown hook for graceful cleanup
     Runtime.getRuntime().addShutdownHook(Thread {

@@ -22,7 +22,6 @@ class SqlInsertWriter(
 
     private var writer: BufferedWriter? = null
     private var columns: List<String> = emptyList()
-    private var progressCallback: ((Long) -> Unit)? = null
     private var exportedRows = 0L
 
     override fun writeHeader(columns: List<String>) {
@@ -36,7 +35,6 @@ class SqlInsertWriter(
         writer?.write(sql)
         writer?.newLine()
         exportedRows++
-        progressCallback?.invoke(exportedRows)
     }
 
     override fun flush() {
@@ -49,9 +47,7 @@ class SqlInsertWriter(
         writer = null
     }
 
-    override fun setProgressCallback(callback: ((Long) -> Unit)?) {
-        this.progressCallback = callback
-    }
+    override fun getExportedRows(): Long = exportedRows
 
     /**
      * 格式化 SQL 值

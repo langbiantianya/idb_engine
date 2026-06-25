@@ -24,7 +24,6 @@ class ParquetWriter(private val outputFile: File) : ExportWriter {
     private var factory: SimpleGroupFactory? = null
     private var schema: MessageType? = null
     private var columns: List<String> = emptyList()
-    private var progressCallback: ((Long) -> Unit)? = null
     private var exportedRows = 0L
     private var firstRowProcessed = false
 
@@ -51,10 +50,6 @@ class ParquetWriter(private val outputFile: File) : ExportWriter {
         schema = null
     }
 
-    override fun setProgressCallback(callback: ((Long) -> Unit)?) {
-        this.progressCallback = callback
-    }
-
     private fun initWriterAndFactory(firstRow: List<Any?>) {
         // 构建 Schema - 全部使用 BINARY 类型以便通用
         val fields = columns.map { column ->
@@ -78,8 +73,9 @@ class ParquetWriter(private val outputFile: File) : ExportWriter {
         }
         writer!!.write(group)
         exportedRows++
-        progressCallback?.invoke(exportedRows)
     }
+
+    override fun getExportedRows(): Long = exportedRows
 
     private fun writeValue(group: Group, columnName: String, value: Any?) {
         val strValue = when (value) {

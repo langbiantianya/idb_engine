@@ -16,7 +16,6 @@ class JsonLinesWriter(private val outputFile: File) : ExportWriter {
 
     private var writer: OutputStreamWriter? = null
     private var columns: List<String> = emptyList()
-    private var progressCallback: ((Long) -> Unit)? = null
     private var exportedRows = 0L
 
     override fun writeHeader(columns: List<String>) {
@@ -34,7 +33,6 @@ class JsonLinesWriter(private val outputFile: File) : ExportWriter {
         writer?.write(jsonObject.toString())
         writer?.write("\n")
         exportedRows++
-        progressCallback?.invoke(exportedRows)
     }
 
     override fun flush() {
@@ -47,9 +45,7 @@ class JsonLinesWriter(private val outputFile: File) : ExportWriter {
         writer = null
     }
 
-    override fun setProgressCallback(callback: ((Long) -> Unit)?) {
-        this.progressCallback = callback
-    }
+    override fun getExportedRows(): Long = exportedRows
 
     /**
      * 将任意值转换为 JsonElement

@@ -31,7 +31,6 @@ class ExcelWriter(private val outputFile: File) : ExportWriter {
     private var workbook: SXSSFWorkbook? = null
     private var currentSheet: SXSSFSheet? = null
     private var columns: List<String> = emptyList()
-    private var progressCallback: ((Long) -> Unit)? = null
     private var exportedRows = 0L
     private var currentSheetRowIndex = 0
     private var sheetNumber = 0
@@ -60,7 +59,6 @@ class ExcelWriter(private val outputFile: File) : ExportWriter {
             setCellValue(dataRow.createCell(index), value)
         }
         exportedRows++
-        progressCallback?.invoke(exportedRows)
     }
 
     override fun flush() {
@@ -73,9 +71,7 @@ class ExcelWriter(private val outputFile: File) : ExportWriter {
         }
     }
 
-    override fun setProgressCallback(callback: ((Long) -> Unit)?) {
-        this.progressCallback = callback
-    }
+    override fun getExportedRows(): Long = exportedRows
 
     /**
      * 确保当前有可用的 Sheet

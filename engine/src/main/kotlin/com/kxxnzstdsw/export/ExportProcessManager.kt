@@ -4,6 +4,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.serialization.json.*
 import org.slf4j.LoggerFactory
 import java.io.BufferedReader
@@ -17,8 +18,9 @@ import java.io.OutputStreamWriter
  * 负责：
  * 1. 启动独立的导出子进程
  * 2. 通过 stdin/stdout 发送命令和接收响应
- * 3. 支持停止指定导出任务
- * 4. 主进程关闭时自动停止子进程
+ * 3. 子进程 stdout 输出通过 responseBuffer Channel 转发到主进程的 GlobalOutputChannel
+ * 4. 支持停止指定导出任务
+ * 5. 主进程关闭时自动停止子进程
  */
 object ExportProcessManager {
 
@@ -41,25 +43,19 @@ object ExportProcessManager {
     private val _isRunning = MutableStateFlow(false)
     val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
 
-    // 协程作用域
-    private var processScope: CoroutineScope? = null
-
-    // 回调：接收子进程的响应
-    private var responseCallback: ((String) -> Unit)? = null
+    // 内部缓冲 Channel：readOutputLoop 写入，forwardResponses 读取后发送到 GlobalOutputChannel
+    private val responseBuffer = Channel<String>(Channel.UNLIMITED)
 
     /**
      * 启动导出子进程
      *
      * @param jarPath idb-engine.jar 的路径
-     * @param onResponse 接收子进程响应的回调
      */
-    fun start(jarPath: String, onResponse: (String) -> Unit) {
+    fun start(jarPath: String) {
         if (isRunning.value) {
             logger.warn("Export subprocess already running")
             return
         }
-
-        this.responseCallback = onResponse
 
         val libsDir = File(jarPath).parentFile?.absoluteFile
         val classPath = if (libsDir != null) {
@@ -93,15 +89,18 @@ object ExportProcessManager {
             stdinWriter = OutputStreamWriter(process!!.outputStream, Charsets.UTF_8)
             stdoutReader = BufferedReader(InputStreamReader(process!!.inputStream, Charsets.UTF_8))
 
-            processScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-
-            // 启动读取协程
-            processScope?.launch {
+            // 启动读取协程，读取子进程 stdout 写入 responseBuffer Channel
+            CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
                 readOutputLoop()
             }
 
+            // 启动转发协程，从 responseBuffer Channel 转发到 GlobalOutputChannel
+            CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+                forwardResponses()
+            }
+
             // 监控进程退出
-            processScope?.launch {
+            CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
                 process?.waitFor()
                 logger.info("Export subprocess exited with code: ${process?.exitValue()}")
                 stop()
@@ -117,23 +116,46 @@ object ExportProcessManager {
     }
 
     /**
-     * 读取子进程输出循环
+     * 读取子进程 stdout，每行写入 responseBuffer Channel
      */
     private suspend fun readOutputLoop() {
         val reader = stdoutReader ?: return
-        val ctx = currentCoroutineContext()
         try {
             var line: String?
-            while (ctx.isActive) {
-                line = reader.readLine()
-                if (line == null) break
-                logger.debug("Subprocess stdout >>> {}", line.take(200))
-                responseCallback?.invoke(line)
+            while (withContext(Dispatchers.IO) {
+                    reader.readLine()
+                }.also { line = it } != null) {
+                line?.let {
+                    val len = it.length
+                    logger.debug("Subprocess stdout (len=$len): {}", it)
+                    responseBuffer.send(it)
+                }
             }
         } catch (e: Exception) {
-            if (ctx.isActive) {
-                logger.error("Error reading subprocess output", e)
+            logger.error("Error reading subprocess output", e)
+        } finally {
+            // 子进程 stdout 关闭时，关闭 responseBuffer，通知 forwardResponses 结束
+            responseBuffer.close()
+        }
+    }
+
+    /**
+     * 从 responseBuffer Channel 读取，转发到主进程的 GlobalOutputChannel
+     * 保证子进程响应走主进程统一的 stdout 串行化输出管线
+     */
+    private suspend fun forwardResponses() {
+        try {
+            for (response: String in responseBuffer) {
+                val ch = GlobalOutputChannel.channel
+                if (ch != null) {
+                    ch.send(response)
+                    logger.debug("Forwarded subprocess response to GlobalOutputChannel (len=${response.length})")
+                } else {
+                    logger.warn("GlobalOutputChannel is null, dropping subprocess response (len=${response.length})")
+                }
             }
+        } catch (e: Exception) {
+            logger.error("Error forwarding responses to GlobalOutputChannel", e)
         }
     }
 
@@ -206,7 +228,9 @@ object ExportProcessManager {
         logger.info("Stopping export subprocess...")
 
         _isRunning.value = false
-        responseCallback = null
+
+        // 关闭缓冲 Channel（如果 readOutputLoop 还未关闭）
+        responseBuffer.close()
 
         try {
             // 发送退出命令
@@ -223,10 +247,6 @@ object ExportProcessManager {
         } catch (e: Exception) {
             logger.warn("Error sending exit command", e)
         }
-
-        // 取消协程作用域
-        processScope?.cancel()
-        processScope = null
 
         // 关闭流
         try { stdinWriter?.close() } catch (e: Exception) { /* ignore */ }

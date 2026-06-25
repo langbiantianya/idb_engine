@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
+import java.io.PrintStream
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.system.exitProcess
 
@@ -16,6 +17,11 @@ object ExportSubProcess {
 
     private val logger = LoggerFactory.getLogger(ExportSubProcess::class.java)
     private val json = Json { ignoreUnknownKeys = true }
+
+    // Force stdout to autoflush - critical for pipe-based communication with parent process
+    // When stdout is redirected to a pipe (via ProcessBuilder), Java may buffer it.
+    // This ensures each println() is immediately flushed to the pipe.
+    private val out = PrintStream(System.out, true, Charsets.UTF_8)
 
     private val activeExports = ConcurrentHashMap<String, kotlinx.coroutines.Job>()
 
@@ -45,8 +51,9 @@ object ExportSubProcess {
 
         val outputJob = launch(Dispatchers.IO) {
             for (response in outputChannel) {
-                println(response)
-                System.out.flush()
+                logger.info("SUBPROCESS_OUT (len=${response.length}): {}", response.take(200))
+                out.println(response)
+                logger.info("SUBPROCESS_FLUSHED (len=${response.length})")
             }
         }
 
@@ -157,6 +164,7 @@ object ExportSubProcess {
         val job = CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
             try {
                 ExportEngine.export(config, parseRequest(payload)) { progress ->
+                    logger.info("PROGRESS_CALLBACK: completed=${progress.completed}, exportedRows=${progress.exportedRows}, filePath=${progress.filePath}")
                     val progressJson = buildJsonObject {
                         put("exportedRows", progress.exportedRows)
                         put("columnCount", progress.columnCount)
@@ -171,8 +179,13 @@ object ExportSubProcess {
                         end = progress.completed,
                         data = progressJson
                     )
-                    outputChannel.trySend(json.encodeToString(Response.serializer(), response))
+                    val encoded = json.encodeToString(Response.serializer(), response)
+                    logger.info("PROGRESS_ENCODED (len=${encoded.length}): $encoded")
+                    // 使用 send (阻塞) 而非 trySend，确保消息不丢失
+                    outputChannel.send(encoded)
+                    logger.info("PROGRESS_SENT (len=${encoded.length}, end=${progress.completed})")
                 }
+                logger.info("EXPORT_FINISHED: $exportId")
             } catch (e: ExportEngine.ExportCancelledException) {
                 logger.info("Export cancelled: $exportId")
                 val errorResponse = Response(
@@ -180,7 +193,7 @@ object ExportSubProcess {
                     success = false,
                     error = e.message ?: "Export cancelled by user"
                 )
-                outputChannel.trySend(json.encodeToString(Response.serializer(), errorResponse))
+                outputChannel.send(json.encodeToString(Response.serializer(), errorResponse))
             } catch (e: Exception) {
                 logger.error("Export failed: $exportId", e)
                 val errorResponse = Response(
@@ -188,7 +201,7 @@ object ExportSubProcess {
                     success = false,
                     error = e.message ?: "Export failed"
                 )
-                outputChannel.trySend(json.encodeToString(Response.serializer(), errorResponse))
+                outputChannel.send(json.encodeToString(Response.serializer(), errorResponse))
             } finally {
                 activeExports.remove(exportId)
             }

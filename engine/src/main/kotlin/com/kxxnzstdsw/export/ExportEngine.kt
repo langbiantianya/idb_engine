@@ -33,7 +33,7 @@ object ExportEngine {
     suspend fun export(
         config: ConnectionConfig,
         request: ExportRequest,
-        onProgress: (ExportProgress) -> Unit
+        onProgress: suspend (ExportProgress) -> Unit
     ): ExportResult = withContext(Dispatchers.IO) {
         // 重置取消标志
         isCancelled = false
@@ -100,35 +100,48 @@ object ExportEngine {
                 ExportFormat.PARQUET -> ParquetWriter(outputFile)
             }
 
-            // 7. 设置进度回调
-            writer.setProgressCallback { rows ->
-                onProgress(ExportProgress(
-                    exportedRows = rows,
-                    columnCount = columnCount,
-                    completed = false
-                ))
-            }
-
-            // 8. 写入表头
+            // 7. 写入表头
             writer.writeHeader(columns)
 
-            // 9. 流式逐行读取并写入（支持取消检查）
+            // 7.1 发送初始进度（确保前端收到开始通知）
+            onProgress(ExportProgress(
+                exportedRows = 0,
+                columnCount = columnCount,
+                completed = false
+            ))
+
+            // 8. 流式逐行读取并写入（支持取消检查）
             while (resultSet.next()) {
                 // 检查是否被取消
                 if (isCancelled) {
-                    logger.info("导出被用户取消，已导出 $exportedRows 行")
+                    logger.info("导出被用户取消，已导出 ${writer.getExportedRows()} 行")
                     throw ExportCancelledException("Export cancelled by user")
                 }
 
                 val row = (1..columnCount).map { resultSet.getObject(it) }
                 writer.writeRow(row)
-                exportedRows++
+                exportedRows = writer.getExportedRows()
 
                 // 每 1000 行报告一次进度
                 if (exportedRows % 1000 == 0L) {
                     logger.debug("已导出 $exportedRows 行")
+                    onProgress(ExportProgress(
+                        exportedRows = exportedRows,
+                        columnCount = columnCount,
+                        completed = false
+                    ))
                 }
             }
+
+            // 8.1 发送最终进度
+            exportedRows = writer.getExportedRows()
+            logger.info("Sending final progress: exportedRows=$exportedRows, filePath=${outputFile.absolutePath}")
+            onProgress(ExportProgress(
+                exportedRows = exportedRows,
+                columnCount = columnCount,
+                completed = true,
+                filePath = outputFile.absolutePath
+            ))
 
             // 10. 刷新并关闭
             writer.flush()

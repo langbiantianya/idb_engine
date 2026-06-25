@@ -26,10 +26,8 @@ interface ExportWriter : Closeable {
     fun flush() {}
 
     /**
-     * 获取导出进度回调
-     * @param callback 每导出一行调用一次，参数为当前已导出行数
+     * 获取当前已导出的行数
+     * @return 已导出的行数
      */
-    fun setProgressCallback(callback: ((Long) -> Unit)?) {
-        // 默认空实现，子类可覆盖
-    }
+    fun getExportedRows(): Long = 0
 }

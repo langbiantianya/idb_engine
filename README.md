@@ -972,11 +972,15 @@ PostgreSQL 函数、存储过程和触发器管理模块，支持创建、查询
 
 **流式进度响应**（每行一条 JSON）：
 ```
+{"id":"exp1","success":true,"stream":true,"end":false,"data":{"exportedRows":0,"columnCount":5,"completed":false}}
 {"id":"exp1","success":true,"stream":true,"end":false,"data":{"exportedRows":1000,"columnCount":5,"completed":false}}
 {"id":"exp1","success":true,"stream":true,"end":false,"data":{"exportedRows":2000,"columnCount":5,"completed":false}}
 ...
-{"id":"exp1","success":true,"stream":true,"end":true,"data":null}
+{"id":"exp1","success":true,"stream":true,"end":true,"data":{"exportedRows":13308,"columnCount":5,"completed":true,"filePath":"C:\\Users\\langb\\Desktop\\users_2024.csv"}}
 ```
+
+- 进度每 1000 行发送一次
+- 收到 `end: true` 时表示导出完成，`filePath` 为导出文件路径
 
 **格式特性**：
 - **CSV**：UTF-8 BOM 头保证 Excel 打开中文不乱码，自动处理字段转义

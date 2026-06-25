@@ -14,7 +14,6 @@ import java.nio.charset.StandardCharsets
 class CsvWriter(private val outputFile: File) : ExportWriter {
 
     private var writer: BufferedWriter? = null
-    private var progressCallback: ((Long) -> Unit)? = null
     private var exportedRows = 0L
 
     override fun writeHeader(columns: List<String>) {
@@ -32,7 +31,6 @@ class CsvWriter(private val outputFile: File) : ExportWriter {
         writer?.write(line)
         writer?.newLine()
         exportedRows++
-        progressCallback?.invoke(exportedRows)
     }
 
     override fun flush() {
@@ -44,6 +42,8 @@ class CsvWriter(private val outputFile: File) : ExportWriter {
         writer?.close()
         writer = null
     }
+
+    override fun getExportedRows(): Long = exportedRows
 
     /**
      * 转义 CSV 字段
