@@ -38,7 +38,6 @@ dependencies {
     // parquet-hadoop 本身已包含 Parquet 核心库，这里仅补文件系统抽象层
     implementation(libs.hadoop.common) {
         // 排除 HDFS / MapReduce / YARN 等分布式模块
-        exclude(group = "org.apache.hadoop", module = "hadoop-auth")
         exclude(group = "org.apache.hadoop", module = "hadoop-hdfs")
         exclude(group = "org.apache.hadoop", module = "hadoop-hdfs-client")
         exclude(group = "org.apache.hadoop", module = "hadoop-hdfs-native-client")
@@ -52,8 +51,6 @@ dependencies {
         exclude(group = "org.apache.hadoop", module = "hadoop-amazon")
         exclude(group = "org.apache.hadoop", module = "hadoop-google")
         // 排除 WebHDFS / HTTP 相关（仅本地写入）
-        exclude(group = "jakarta.servlet.jsp", module = "jakarta.servlet.jsp-api")
-        exclude(group = "jakarta.ws.rs", module = "jakarta.ws.rs-api")
         exclude(group = "org.apache.httpcomponents", module = "httpclient")
         exclude(group = "org.apache.httpcomponents", module = "httpcore")
         exclude(group = "commons-net", module = "commons-net")
@@ -70,15 +67,9 @@ dependencies {
         exclude(group = "org.glassfish.hk2", module = "osgi-resource-locator")
         // 排除 hadoop-common 中不需要的 transitive dependencies
         exclude(group = "org.apache.htrace", module = "htrace-core4")
-        exclude(group = "com.fasterxml.woodstox", module = "woodstox-core")
-        exclude(group = "org.codehaus.woodstox", module = "stax2-api")
-        exclude(group = "org.fusesource.leveldbjni", module = "leveldbjni-all")
+        // 保留 hadoop-auth（提供 PlatformName 等内部类，被 UserGroupInformation 静态引用）
+        // 排除 hadoop-annotations（仅有接口注解，hadoop-common 运行时不需要）
         exclude(group = "org.apache.hadoop", module = "hadoop-annotations")
-        // 排除 hadoop-common 的 transitive dependencies（仅本地文件写入）
-        // 排除 hadoop-common 的 transitive dependencies（仅本地文件写入）
-        exclude(group = "org.apache.hadoop.thirdparty", module = "hadoop-shaded-protobuf_3_25")
-        exclude(group = "org.apache.hadoop.thirdparty", module = "hadoop-shaded-guava")
-        exclude(group = "org.apache.yetus", module = "audience-annotations")
         // 排除 ZK/Curator/Netty（仅本地文件写入，不需要分布式协调）
         exclude(group = "org.apache.zookeeper", module = "zookeeper")
         exclude(group = "org.apache.curator", module = "curator-client")
@@ -87,46 +78,30 @@ dependencies {
         exclude(group = "io.netty")
         // 排除 Jetty（仅本地文件写入，不需要 WebHDFS）
         exclude(group = "org.eclipse.jetty")
-        // 排除 Avro（仅本地文件写入，不需要序列化框架）
-        exclude(group = "org.apache.avro", module = "avro")
-        // 排除 Jetty 的 transitive
         exclude(group = "jakarta.servlet", module = "jakarta.servlet-api")
-        exclude(group = "org.slf4j", module = "slf4j-reload4j") // reload4j 是 jetty/zookeeper 的日志桥接
+        exclude(group = "org.slf4j", module = "slf4j-reload4j")
         exclude(group = "ch.qos.reload4j", module = "reload4j")
         exclude(group = "com.google.re2j", module = "re2j")
         exclude(group = "com.google.code.gson", module = "gson")
-        exclude(group = "com.jcraft", module = "jsch") // SSH/SFTP，用于 HDFS 高可用
-        exclude(group = "commons-cli", module = "commons-cli") // 仅命令行工具需要，代码中未使用
-        exclude(group = "org.apache.commons", module = "commons-configuration2") // 仅 HDFS 配置读取需要，代码中未使用
-        // 排除 hadoop-common 的直接依赖（仅本地文件写入，不需要分布式功能）
-        exclude(group = "org.apache.commons", module = "commons-math3") // Hadoop 内部数值计算
+        exclude(group = "com.jcraft", module = "jsch")
+        exclude(group = "commons-cli", module = "commons-cli")
+        // 保留 commons-configuration2、commons-lang3、commons-text、commons-collections4 等 Hadoop 实际运行依赖
         exclude(group = "org.apache.kerby", module = "kerb-core")
         exclude(group = "org.apache.kerby", module = "kerby-asn1")
         exclude(group = "org.apache.kerby", module = "kerby-pkix")
         exclude(group = "org.apache.kerby", module = "kerby-util")
-        exclude(group = "org.locationtech.jts", module = "jts-core") // 空间几何库，用于 GeoTools
-        exclude(group = "io.dropwizard.metrics", module = "metrics-core") // JVM 监控指标
-        exclude(group = "dnsjava", module = "dnsjava") // DNS 解析，用于 HDFS 高可用
-        exclude(group = "org.bouncycastle", module = "bcprov-jdk18on") // Bouncy Castle 加密
+        exclude(group = "io.dropwizard.metrics", module = "metrics-core")
+        exclude(group = "dnsjava", module = "dnsjava")
+        exclude(group = "org.bouncycastle", module = "bcprov-jdk18on")
     }
     implementation(libs.parquet.hadoop) {
         // 排除 parquet-hadoop 中不需要的 transitive dependencies
         exclude(group = "org.apache.htrace", module = "htrace-core4")
-        exclude(group = "com.fasterxml.woodstox", module = "woodstox-core")
-        exclude(group = "org.codehaus.woodstox", module = "stax2-api")
         exclude(group = "org.fusesource.leveldbjni", module = "leveldbjni-all")
-        exclude(group = "com.twitter", module = "parquet-hadoop-bundle") // 内部 bundle，统一使用 parquet-*-bundle
+        exclude(group = "com.twitter", module = "parquet-hadoop-bundle")
         // 排除不需要的压缩 codec
-        exclude(group = "org.xerial.snappy", module = "snappy-java") // Snappy 压缩，本地写入不需要
-        exclude(group = "io.airlift", module = "aircompressor") // LZ4 压缩，本地写入不需要
-    }
-    implementation(libs.parquet.hadoop) {
-        // 排除 parquet-hadoop 中不需要的 transitive dependencies
-        exclude(group = "org.apache.htrace", module = "htrace-core4")
-        exclude(group = "com.fasterxml.woodstox", module = "woodstox-core")
-        exclude(group = "org.codehaus.woodstox", module = "stax2-api")
-        exclude(group = "org.fusesource.leveldbjni", module = "leveldbjni-all")
-        exclude(group = "com.twitter", module = "parquet-hadoop-bundle") // 内部 bundle，统一使用 parquet-*-bundle
+        exclude(group = "org.xerial.snappy", module = "snappy-java")
+        exclude(group = "io.airlift", module = "aircompressor")
     }
 
     // JDBC Drivers — 不编译依赖，构建时复制到 drivers/
@@ -182,5 +157,30 @@ val copyDialects by tasks.registering(Copy::class) {
 
 // 打包完成后自动复制依赖、驱动和方言
 tasks.jar {
-    finalizedBy(copyDeps, copyDrivers, copyDialects)
+    finalizedBy(copyDeps, copyDrivers, copyDialects, copyWinutils)
+}
+
+// 下载 winutils.exe 到 build/libs/bin/winutils.exe（仅 Windows 需要，Parquet 写本地文件依赖）
+// Hadoop 3.3.5 的 winutils 与 3.5.0 二进制兼容
+val copyWinutils by tasks.registering {
+    description = "下载windows上的hadoop winutils 依赖"
+    val winutilsUrl = "https://github.com/cdarlint/winutils/raw/master/hadoop-3.3.5/bin/winutils.exe"
+    val outDir = layout.buildDirectory.dir("libs/bin")
+    outputs.dir(outDir)
+    doLast {
+        val target = outDir.get().file("winutils.exe").asFile
+        if (target.exists() && target.length() > 0) {
+            return@doLast
+        }
+        outDir.get().asFile.mkdirs()
+        logger.lifecycle("Downloading winutils.exe to ${target.absolutePath}")
+        // 通过 ant.get 走 Gradle 内置 HttpClient（与 Gradle 自身下载依赖相同的网络栈，最稳）
+        ant.invokeMethod("get", mapOf(
+            "src" to winutilsUrl,
+            "dest" to target.absolutePath,
+            "verbose" to true,
+            "retries" to 3
+        ))
+        logger.lifecycle("winutils.exe downloaded (${target.length()} bytes)")
+    }
 }

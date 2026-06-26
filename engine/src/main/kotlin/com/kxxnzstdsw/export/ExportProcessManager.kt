@@ -77,13 +77,19 @@ object ExportProcessManager {
         try {
             val builder = ProcessBuilder(
                 "java",
-                "-Xmx512m",                      // 限制内存，防止导出任务耗尽主进程内存
-                "-Xms64m",
+                "-Xmx1024m",                      // 限制内存，防止导出任务耗尽主进程内存
+                "-Xms256m",
                 "-cp", classPath,
                 "com.kxxnzstdsw.export.ExportSubProcess"
             )
             builder.directory(libsDir ?: File("."))
             builder.redirectErrorStream(false)
+
+            // Windows + Parquet: 设置 HADOOP_HOME 指向 libs/ 目录（其下 bin/winutils.exe 由 Gradle 构建下载）
+            if (System.getProperty("os.name").lowercase().contains("win") && libsDir != null) {
+                builder.environment()["HADOOP_HOME"] = libsDir.absolutePath
+                builder.environment()["hadoop.home.dir"] = libsDir.absolutePath
+            }
 
             process = builder.start()
             stdinWriter = OutputStreamWriter(process!!.outputStream, Charsets.UTF_8)

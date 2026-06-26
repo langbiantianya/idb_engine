@@ -125,7 +125,15 @@ object RequestDispatcher {
         // 通过类路径找到 idb-engine.jar 的位置
         val classPath = System.getProperty("java.class.path", "")
         val paths = classPath.split(File.pathSeparator)
-        return paths.find { it.contains("idb-engine.jar") && File(it).exists() }
+        val cwd = File(".").absoluteFile
+        for (raw in paths) {
+            val candidate = if (File(raw).isAbsolute) File(raw) else File(cwd, raw)
+            if (candidate.exists() && candidate.name.contains("idb-engine.jar")) {
+                return candidate.absolutePath
+            }
+        }
+        // 回退：扫描当前工作目录
+        return File(".", "idb-engine.jar").takeIf { it.exists() }?.absolutePath
     }
 
     private suspend fun handleStreamDataList(request: Request, outputChannel: Channel<String>) {
