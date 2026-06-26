@@ -1,10 +1,10 @@
 package com.kxxnzstdsw.export
 
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.channels.Channel
 import kotlinx.serialization.json.*
 import org.slf4j.LoggerFactory
 import java.io.BufferedReader
@@ -62,8 +62,8 @@ object ExportProcessManager {
             val libs = File(libsDir, "libs")
             if (libs.exists()) {
                 val jars = libs.listFiles { f -> f.extension == "jar" }
-                jars?.joinToString(java.io.File.pathSeparator) { it.absolutePath }
-                    ?.let { "$jarPath${java.io.File.pathSeparator}$it" }
+                jars?.joinToString(File.pathSeparator) { it.absolutePath }
+                    ?.let { "$jarPath${File.pathSeparator}$it" }
                     ?: jarPath
             } else {
                 jarPath
@@ -75,10 +75,19 @@ object ExportProcessManager {
         logger.info("Starting export subprocess with classpath from: ${libsDir ?: "."}")
 
         try {
+            // 子进程复用父进程的 JRE，最大堆与父进程一致（最低 256m）
+            val javaHome = System.getProperty("java.home")
+            val javaExe: String = File(File(javaHome), "bin/java").takeIf { it.exists() }?.absolutePath
+                ?: File(File(javaHome), "bin/java.exe").takeIf { it.exists() }?.absolutePath
+                ?: "java"
+            val parentMaxMem = Runtime.getRuntime().maxMemory()
+            val childMaxMem = maxOf(parentMaxMem, 256L * 1024 * 1024)
+
             val builder = ProcessBuilder(
-                "java",
-                "-Xmx1024m",                      // 限制内存，防止导出任务耗尽主进程内存
-                "-Xms256m",
+                javaExe,
+                "-Xmx${formatMem(childMaxMem)}",
+                "-Xms${formatMem(childMaxMem)}",
+                "-XX:+UseSerialGC",
                 "-cp", classPath,
                 "com.kxxnzstdsw.export.ExportSubProcess"
             )
@@ -246,7 +255,7 @@ object ExportProcessManager {
                         writer.write("{\"CMD\":\"CMD_EXIT\"}\n")
                         writer.flush()
                     }
-                } catch (e: Exception) {
+                } catch (_: Exception) {
                     // ignore
                 }
             }
@@ -255,8 +264,8 @@ object ExportProcessManager {
         }
 
         // 关闭流
-        try { stdinWriter?.close() } catch (e: Exception) { /* ignore */ }
-        try { stdoutReader?.close() } catch (e: Exception) { /* ignore */ }
+        try { stdinWriter?.close() } catch (_: Exception) { /* ignore */ }
+        try { stdoutReader?.close() } catch (_: Exception) { /* ignore */ }
         stdinWriter = null
         stdoutReader = null
 
@@ -272,11 +281,12 @@ object ExportProcessManager {
     }
 
     /**
-     * 确保进程已停止
+     * 将字节数格式化为 -Xmx/-Xms 的参数格式，如 536870912 -> "512m"
      */
-    fun ensureStopped() {
-        if (isRunning.value || process?.isAlive == true) {
-            stop()
+    private fun formatMem(bytes: Long): String {
+        return when {
+            bytes >= 1024 * 1024 * 1024 -> "${bytes / (1024 * 1024 * 1024)}g"
+            else -> "${bytes / (1024 * 1024)}m"
         }
     }
 }

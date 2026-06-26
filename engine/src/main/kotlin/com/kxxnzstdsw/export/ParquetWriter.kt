@@ -15,9 +15,9 @@ import java.io.File
 import java.math.BigDecimal
 import java.sql.Date
 import java.sql.Timestamp
+import java.sql.Types
 import java.time.LocalDate
 import java.time.LocalDateTime
-import java.sql.Types
 
 /**
  * Parquet 导出写入器
@@ -81,7 +81,7 @@ class ParquetWriter(private val outputFile: File) : ExportWriter {
             GroupWriteSupport.setSchema(schema!!, conf)
 
             @Suppress("DEPRECATION")
-            writer = ParquetWriter<Group>(Path(outputFile.absolutePath), conf, GroupWriteSupport())
+            writer = ParquetWriter(Path(outputFile.absolutePath), conf, GroupWriteSupport())
             factory = SimpleGroupFactory(schema!!)
             logger.info("Parquet writer initialized: columns=${columns.size}, types=${columns.map { it.typeName }}")
         } catch (e: Exception) {
@@ -178,9 +178,9 @@ class ParquetWriter(private val outputFile: File) : ExportWriter {
                 }
                 PrimitiveType.PrimitiveTypeName.DOUBLE -> {
                     val doubleValue = when (value) {
+                        is BigDecimal -> value.toDouble()
                         is Double -> value
                         is Number -> value.toDouble()
-                        is BigDecimal -> value.toDouble()
                         else -> value.toString().toDoubleOrNull() ?: 0.0
                     }
                     group.append(columnName, doubleValue)
