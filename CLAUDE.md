@@ -647,12 +647,14 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
 
 | 函数 | 说明 |
 |---|---|
-| `insert(tableName, rowTable)` | 收集一行待插入数据（Lua table → JDBC 行），每调用一次立即执行 INSERT |
+| `insert(tableName, rowTable)` | 收集一行待插入数据（Lua table → JDBC 行），每调用一次立即执行 INSERT。列值支持 `string`/`number`/`boolean`/`nil`/`LocalDate`/`LocalDateTime`/`LocalTime`，日期/时间对象按 JDBC `DATE`/`TIMESTAMP`/`TIME` 类型绑定（避免 PG `date is of type date but expression is of type character varying`） |
 | `lastId()` | 获取上一张表最后插入的自增 ID（用于外键引用，无自增 ID 时返回 nil） |
 | `random_int(min, max)` | 随机整数 [min, max] |
 | `random_float(min, max)` | 随机浮点数 [min, max) |
 | `random_string(length)` | 指定长度的随机字母数字字符串 |
-| `random_date(start, end)` | 两个日期之间的随机日期（参数格式 `YYYY-MM-DD`，返回同格式字符串） |
+| `random_date(start, end)` | 两个日期之间的随机日期（参数格式 `YYYY-MM-DD`，返回 `LocalDate` 对象；插入时按 `setDate` 绑定） |
+| `random_datetime(start, end)` | 两个日期之间的随机时间戳（参数格式 `YYYY-MM-DD`，返回 `LocalDateTime` 对象；插入时按 `setTimestamp` 绑定） |
+| `random_time()` | 随机 `LocalTime` 对象（`HH:mm:ss`；插入时按 `setTime` 绑定） |
 | `random_email()` | 随机邮箱地址（`user_<random>@example.com`） |
 | `random_phone()` | 随机 11 位手机号 |
 | `random_name()` | 随机姓名（内置中文 + 英文姓名池） |
@@ -709,6 +711,25 @@ Go 端读取逻辑：持续读取 stdout 行，检查 `stream` 和 `end` 字段�
   }
 }
 ```
+
+**日期/时间列示例（PG `date` / `timestamp` / `time` 列）**
+
+`random_date` / `random_datetime` / `random_time` 返回 Java 时间对象，引擎在 `bindRow` 中按 JDBC `DATE` / `TIMESTAMP` / `TIME` 类型绑定到 `?` 占位符，**避免 PostgreSQL 报 `column "..." is of type date but expression is of type character varying`**：
+
+```lua
+for i = 1, 1000 do
+  insert("biz_user", {
+    username      = "user_" .. i,
+    phone         = random_phone(),
+    email         = random_email(),
+    birthday      = random_date("1970-01-01", "2005-12-31"),      -- -> setDate (PG date 列)
+    last_login_at = random_datetime("2024-01-01", "2026-06-30"), -- -> setTimestamp
+    wake_up_at    = random_time(),                                 -- -> setTime
+  })
+end
+```
+
+> 旧的 `random_date(...) .. " " .. HH:MM:SS` 字符串拼接写法仍然兼容（`..` 走 `LocalDate.toString()` 得到 ISO 字符串），但推荐改用 `random_datetime` 直接传 `LocalDateTime`，类型更精准。
 
 ### 5.8 函数与存储过程管理 (Routine Management) — `category: "FUNCTION"`
 
@@ -1121,7 +1142,7 @@ response := scanner.Text()
 - SYSTEM INFO 返回 JVM 运行时信息（版本、内存、CPU、PID、运行时长等）
 - PostgreSQL 方言全面优化（listSchemas 支持两级查询：database 列表 + schema 列表、listTables 用 current_schemas(true)、所有 TABLE/DATA/SQL 操作支持 payload.schema 指定 search_path、listUsers 用 pg_roles、MODIFY_COLUMN 补齐 nullable/default、GET_DDL 含约束与索引、正则预编译）
 - 用户管理完整 CRUD（CREATE/DELETE 用户、修改密码、查询指定用户权限，MySQL 与 PostgreSQL 均已实现）
-- 造数引擎（LuaJIT 嵌入式脚本 + 多表按序造数 + 外键引用 `lastId()` + 批量插入 + 单事务 + Lua 沙箱 + 流式进度回报）
+- 造数引擎（LuaJIT 嵌入式脚本 + 多表按序造数 + 外键引用 `lastId()` + 批量插入 + 单事务 + Lua 沙箱 + 流式进度回报，`random_date`/`random_datetime`/`random_time` 返回 `LocalDate`/`LocalDateTime`/`LocalTime` 对象并按 JDBC 日期/时间类型绑定，避免 PG `varchar -> date/timestamp` 隐式转换报错）
 - 函数与存储过程管理模块（PostgreSQL: LIST（含触发器）/INFO/GET_DDL/CREATE/DELETE/CALL/DEBUG/VALIDATE，MySQL: 占位实现）
 - **数据导出引擎（5 种格式：CSV/JSON Lines/SQL INSERT/Excel/Parquet，全链路 JDBC 游标流式逐行处理，POI SXSSF 支持百万行分 Sheet，导出子进程隔离防 OOM）**
 

@@ -22,6 +22,8 @@ import java.sql.Connection
 import java.sql.PreparedStatement
 import java.sql.Statement
 import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 import java.util.*
 import kotlin.random.Random
@@ -139,6 +141,7 @@ object GenerateHandler {
                     if (d == d.toLong().toDouble()) d.toLong() else d
                 }
                 L.isBoolean(index + 2) -> L.toBoolean(index + 2)
+                L.isJavaObject(index + 2) -> L.toJavaObject(index + 2)
                 else -> L.toString(index + 2)
             }
             result[key] = value
@@ -154,6 +157,9 @@ object GenerateHandler {
                 is Double  -> stmt.setDouble(i + 1, v)
                 is Boolean -> stmt.setBoolean(i + 1, v)
                 null       -> stmt.setNull(i + 1, java.sql.Types.NULL)
+                is LocalDate     -> stmt.setDate(i + 1, java.sql.Date.valueOf(v))
+                is LocalDateTime -> stmt.setTimestamp(i + 1, java.sql.Timestamp.valueOf(v))
+                is LocalTime     -> stmt.setTime(i + 1, java.sql.Time.valueOf(v))
                 else       -> stmt.setString(i + 1, v.toString())
             }
         }
@@ -259,11 +265,42 @@ object GenerateHandler {
             val start = LocalDate.parse(lua.toString(1) ?: "2020-01-01", DateTimeFormatter.ISO_LOCAL_DATE)
             val end   = LocalDate.parse(lua.toString(2) ?: "2025-12-31", DateTimeFormatter.ISO_LOCAL_DATE)
             val days  = java.time.temporal.ChronoUnit.DAYS.between(start, end).toInt()
-            lua.push(start.plusDays((if (days > 0) Random.nextInt(0, days + 1) else 0).toLong())
-                .format(DateTimeFormatter.ISO_LOCAL_DATE))
+            val date = start.plusDays((if (days > 0) Random.nextInt(0, days + 1) else 0).toLong())
+            // 以 Java 对象形式入栈；Lua 侧 tostring()/.. 拼接时走 Lua 默认 tostring 返回类名，
+            // 但因为我们在 insert 前会通过 readLuaTable 用 isJavaObject 还原为 LocalDate，
+            // 拼字符串的场景请使用 random_date_str / random_datetime_str。
+            lua.pushJavaObject(date)
             1
         })
         L.setGlobal("random_date")
+
+        L.push(JFunction { lua ->
+            val start = LocalDateTime.parse(
+                (lua.toString(1) ?: "2020-01-01") + "T00:00:00",
+                DateTimeFormatter.ISO_LOCAL_DATE_TIME
+            )
+            val end = LocalDateTime.parse(
+                (lua.toString(2) ?: "2025-12-31") + "T23:59:59",
+                DateTimeFormatter.ISO_LOCAL_DATE_TIME
+            )
+            val seconds = java.time.temporal.ChronoUnit.SECONDS.between(start, end).toInt()
+            val dt = start.plusSeconds(
+                if (seconds > 0) Random.nextLong(0L, seconds.toLong() + 1L) else 0L
+            )
+            lua.pushJavaObject(dt)
+            1
+        })
+        L.setGlobal("random_datetime")
+
+        L.push(JFunction { lua ->
+            val hour = Random.nextInt(0, 24)
+            val minute = Random.nextInt(0, 60)
+            val second = Random.nextInt(0, 60)
+            val t = LocalTime.of(hour, minute, second)
+            lua.pushJavaObject(t)
+            1
+        })
+        L.setGlobal("random_time")
 
         L.push(JFunction { lua ->
             lua.push("user_${Random.nextLong(100000, 999999999)}@example.com")

@@ -565,7 +565,7 @@ MySQL 无需指定 `schema`，忽略该字段。
 
 | 函数 | 说明 |
 |---|---|
-| `insert(tableName, rowTable)` | 向指定表插入一行。`tableName` 为表名字符串，`rowTable` 为 Lua table（键=列名，值=列值）。每次调用立即执行 INSERT 并返回自增 ID。列值支持 `string`/`number`/`boolean`/`nil`，`number` 自动区分整数（Long）和浮点数（Double） |
+| `insert(tableName, rowTable)` | 向指定表插入一行。`tableName` 为表名字符串，`rowTable` 为 Lua table（键=列名，值=列值）。每次调用立即执行 INSERT 并返回自增 ID。列值支持 `string`/`number`/`boolean`/`nil`/`LocalDate`/`LocalDateTime`/`LocalTime`，`number` 自动区分整数（Long）和浮点数（Double）；日期/时间对象按 JDBC `DATE`/`TIMESTAMP`/`TIME` 类型绑定 |
 | `lastId()` | 获取当前表最近一次 `insert()` 生成的自增主键值（BIGINT）。无自增列时返回 `nil`。常用于子表引用父表 ID |
 
 **随机数据生成**
@@ -575,7 +575,9 @@ MySQL 无需指定 `schema`，忽略该字段。
 | `random_int(min, max)` | 两个整数 | 整数 | 闭区间 `[min, max]` 随机整数 |
 | `random_float(min, max)` | 两个浮点数 | 浮点数 | 左闭右开区间 `[min, max)` 随机浮点数 |
 | `random_string(length)` | 正整数 | 字符串 | 指定长度的随机字母数字串（`a-zA-Z0-9`） |
-| `random_date(start, end)` | 两个日期字符串 | 字符串 | `YYYY-MM-DD` 格式之间的随机日期 |
+| `random_date(start, end)` | 两个日期字符串 `YYYY-MM-DD` | `LocalDate` 对象 | 区间内随机日期；插入时自动按 JDBC `DATE` 类型绑定（避免 PG `date is of type date but expression is of type character varying` 报错） |
+| `random_datetime(start, end)` | 两个日期字符串 `YYYY-MM-DD` | `LocalDateTime` 对象 | 区间内随机时间戳（秒级精度），插入时自动按 `TIMESTAMP` 类型绑定 |
+| `random_time()` | 无 | `LocalTime` 对象 | 随机 `HH:mm:ss`，插入时按 `TIME` 类型绑定 |
 | `random_email()` | 无 | 字符串 | 格式 `user_<随机数字>@example.com` |
 | `random_phone()` | 无 | 字符串 | 11 位手机号（`138/139/150/...` 开头） |
 | `random_name()` | 无 | 字符串 | 随机姓名（内置中英文姓名池，如 `张三`/`Alice`） |
@@ -740,6 +742,31 @@ for i = 1, count do
   })
 end
 ```
+
+---
+
+**示例 7 — 日期/时间类型列（PG `date` / `timestamp` 列）**
+
+`random_date` 返回 `LocalDate`、`random_datetime` 返回 `LocalDateTime`、`random_time` 返回 `LocalTime`，引擎会按 JDBC `DATE` / `TIMESTAMP` / `TIME` 类型绑定到 `?` 占位符，避免 PG 报 `column "..." is of type date but expression is of type character varying`：
+
+```lua
+for i = 1, 100 do
+  insert('biz_user', {
+    username    = 'user_' .. i,
+    birthday    = random_date('1970-01-01', '2005-12-31'),            -- -> setDate
+    last_login_at = random_datetime('2024-01-01', '2026-06-30'),       -- -> setTimestamp
+    wake_up_at  = random_time(),                                       -- -> setTime
+  })
+end
+```
+
+如果需要在脚本里拼接日期字符串传给非时间戳列（如 `varchar` 备注），可继续使用 `..` 拼接 —— `LocalDate.toString()` 在拼接时自动转为 ISO 字符串：
+
+```lua
+remark = "用户出生于 " .. random_date('1990-01-01', '2000-12-31')
+```
+
+> 推荐直接传 `LocalDate` / `LocalDateTime` / `LocalTime` 对象给时间相关列，避免依赖 `..` 拼接的副作用（不同时区/精度/小数秒）。
 
 ---
 
@@ -1033,7 +1060,7 @@ PostgreSQL 函数、存储过程和触发器管理模块，支持创建、查询
 - **安全防护**：强制使用 PreparedStatement 防止 SQL 注入
 - **JDBC 游标流式**：大结果集通过服务端游标逐行拉取，避免客户端内存溢出
 - **日志隔离**：所有日志输出到滚动文件 (`~/.config/idb/logs/idb-engine.log`)，不污染 stdout JSON 流
-- **嵌入式造数引擎**：LuaJIT 脚本驱动，支持多表按序造数、外键引用、沙箱隔离、流式进度回报
+- **嵌入式造数引擎**：LuaJIT 脚本驱动，支持多表按序造数、外键引用、沙箱隔离、流式进度回报；日期/时间列直接传 `LocalDate`/`LocalDateTime`/`LocalTime`，按 JDBC `DATE`/`TIMESTAMP`/`TIME` 类型绑定
 - **函数与存储过程管理**：PostgreSQL 完整实现（创建/查询/调用/调试/删除/详情自动解析类型，含触发器支持），MySQL 占位
 - **数据导出**：5 种格式（CSV / JSON Lines / SQL INSERT / Excel / Parquet），**独立子进程运行**，JDBC 游标流式逐行处理，支持超大数据量防 OOM
 
