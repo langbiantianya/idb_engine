@@ -86,7 +86,16 @@ object ExportEngine {
             // 5. 获取元数据
             val metaData = resultSet.metaData
             val columnCount = metaData.columnCount
-            val columns = (1..columnCount).map { metaData.getColumnLabel(it) }
+
+            // 构建列信息
+            val columnInfos = (1..columnCount).map { i ->
+                ColumnInfo(
+                    name = metaData.getColumnLabel(i),
+                    typeName = metaData.getColumnTypeName(i),
+                    typeCode = metaData.getColumnType(i)
+                )
+            }
+            val columns = columnInfos.map { it.name }
 
             // 6. 创建写入器
             writer = when (request.format) {
@@ -97,11 +106,18 @@ object ExportEngine {
                     request.tableName ?: throw IllegalArgumentException("SQL INSERT 格式需要指定 tableName")
                 )
                 ExportFormat.EXCEL -> ExcelWriter(outputFile)
-                ExportFormat.PARQUET -> ParquetWriter(outputFile)
+                ExportFormat.PARQUET -> {
+                    val pw = ParquetWriter(outputFile)
+                    // Parquet 需要先初始化 schema
+                    pw.writeHeaderWithTypes(columnInfos)
+                    pw
+                }
             }
 
-            // 7. 写入表头
-            writer.writeHeader(columns)
+            // 7. 写入表头（仅非 Parquet 格式需要）
+            if (request.format != ExportFormat.PARQUET) {
+                writer.writeHeader(columns)
+            }
 
             // 7.1 发送初始进度（确保前端收到开始通知）
             onProgress(ExportProgress(

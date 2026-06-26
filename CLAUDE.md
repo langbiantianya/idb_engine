@@ -910,7 +910,7 @@ PostgreSQL 函数和存储过程管理模块，支持创建、查询、调用、
 | JSON Lines | .jsonl | 复用 kotlinx-serialization | 每行一个独立 JSON 对象 |
 | SQL INSERT | .sql | 零依赖 | 逐行生成 INSERT 语句，自动转义 |
 | Excel | .xlsx | POI SXSSF 流式 | 100 万数据行/Sheet 自动分页，1000 行内存窗口，表头仅首 Sheet 写入 |
-| Parquet | .parquet | parquet-hadoop | 动态 Schema，字符串统一类型 |
+| Parquet | .parquet | parquet-hadoop | 动态 Schema，智能推断类型（整数→INT32/INT64，浮点→FLOAT/DOUBLE，字符串→BINARY(UTF8)，DATE→INT32(DATE)，TIME/TIMESTAMP→INT64(TIME/TIMESTAMP_MICROS)） |
 
 **请求 payload 顶层字段**：
 

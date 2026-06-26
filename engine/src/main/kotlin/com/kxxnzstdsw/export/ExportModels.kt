@@ -54,3 +54,15 @@ data class ExportProgress(
     /** 错误信息（如果有） */
     val error: String? = null
 )
+
+/**
+ * 列信息
+ */
+data class ColumnInfo(
+    /** 列名 */
+    val name: String,
+    /** JDBC 类型名称 */
+    val typeName: String,
+    /** JDBC 类型代码 */
+    val typeCode: Int
+)

@@ -163,7 +163,7 @@ object ExportSubProcess {
 
         val job = CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
             try {
-                ExportEngine.export(config, parseRequest(payload)) { progress ->
+                val result = ExportEngine.export(config, parseRequest(payload)) { progress ->
                     logger.info("PROGRESS_CALLBACK: completed=${progress.completed}, exportedRows=${progress.exportedRows}, filePath=${progress.filePath}")
                     val progressJson = buildJsonObject {
                         put("exportedRows", progress.exportedRows)
@@ -185,6 +185,18 @@ object ExportSubProcess {
                     outputChannel.send(encoded)
                     logger.info("PROGRESS_SENT (len=${encoded.length}, end=${progress.completed})")
                 }
+
+                // 检查导出引擎的返回值（即使没有抛异常也可能失败）
+                if (!result.success) {
+                    logger.error("Export returned failure: exportedRows=${result.exportedRows}, error=${result.error}")
+                    val errorResponse = Response(
+                        id = exportId,
+                        success = false,
+                        error = result.error ?: "Export failed"
+                    )
+                    outputChannel.send(json.encodeToString(Response.serializer(), errorResponse))
+                }
+
                 logger.info("EXPORT_FINISHED: $exportId")
             } catch (e: ExportEngine.ExportCancelledException) {
                 logger.info("Export cancelled: $exportId")
