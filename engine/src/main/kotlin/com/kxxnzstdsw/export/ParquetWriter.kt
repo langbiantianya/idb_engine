@@ -163,7 +163,15 @@ class ParquetWriter(private val outputFile: File) : ExportWriter {
             }
         } else {
             when (parquetType.parquetType) {
-                PrimitiveType.PrimitiveTypeName.INT32 -> group.append(columnName, (value as Number).toInt())
+                PrimitiveType.PrimitiveTypeName.INT32 -> {
+                    // DATE 类型使用 java.util.Date / java.sql.Date（java.sql.Date extends java.util.Date）
+                    if (value is java.util.Date) {
+                        // epoch days: milliseconds since 1970-01-01 / 86400000
+                        group.append(columnName, (value.time / 86400000).toInt())
+                    } else {
+                        group.append(columnName, (value as Number).toInt())
+                    }
+                }
                 PrimitiveType.PrimitiveTypeName.INT64 -> {
                     val longValue = when (value) {
                         is Long -> value
