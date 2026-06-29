@@ -88,6 +88,7 @@ object ExportProcessManager {
                 "-Xmx${formatMem(childMaxMem)}",
                 "-Xms${formatMem(childMaxMem)}",
                 "-XX:+UseSerialGC",
+                "-Dexport.subprocess=true",
                 "-cp", classPath,
                 "com.kxxnzstdsw.export.ExportSubProcess"
             )

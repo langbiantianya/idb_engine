@@ -1,5 +1,6 @@
 package com.kxxnzstdsw.export
 
+import com.kxxnzstdsw.handlers.ExportHandler
 import com.kxxnzstdsw.models.ConnectionConfig
 import com.kxxnzstdsw.models.Response
 import kotlinx.coroutines.*
@@ -19,11 +20,10 @@ object ExportSubProcess {
     private val json = Json { ignoreUnknownKeys = true }
 
     // Force stdout to autoflush - critical for pipe-based communication with parent process
-    // When stdout is redirected to a pipe (via ProcessBuilder), Java may buffer it.
-    // This ensures each println() is immediately flushed to the pipe.
     private val out = PrintStream(System.out, true, Charsets.UTF_8)
 
-    private val activeExports = ConcurrentHashMap<String, kotlinx.coroutines.Job>()
+    // 正在执行的导出任务 ID 集合（仅用于日志/状态查询，ExportEngine.isCancelled 控制实际取消）
+    private val activeExports = ConcurrentHashMap.newKeySet<String>()
 
     @Volatile
     private var shouldStop = false
@@ -51,9 +51,7 @@ object ExportSubProcess {
 
         val outputJob = launch(Dispatchers.IO) {
             for (response in outputChannel) {
-                logger.info("SUBPROCESS_OUT (len=${response.length}): {}", response)
                 out.println(response)
-                logger.info("SUBPROCESS_FLUSHED (len=${response.length})")
             }
         }
 
@@ -156,56 +154,17 @@ object ExportSubProcess {
         payload: JsonObject,
         outputChannel: Channel<String>
     ) {
-        if (activeExports.containsKey(exportId)) {
+        if (activeExports.contains(exportId)) {
             sendError(exportId, "Export $exportId already running", outputChannel)
             return
         }
 
-        val job = CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+        activeExports.add(exportId)
+        // 启动独立协程执行导出，主循环继续读取其他命令（如 STOP_EXPORT）
+        CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
             try {
-                val result = ExportEngine.export(config, parseRequest(payload)) { progress ->
-                    logger.info("PROGRESS_CALLBACK: completed=${progress.completed}, exportedRows=${progress.exportedRows}, filePath=${progress.filePath}")
-                    val progressJson = buildJsonObject {
-                        put("exportedRows", progress.exportedRows)
-                        put("columnCount", progress.columnCount)
-                        put("completed", progress.completed)
-                        progress.filePath?.let { put("filePath", it) }
-                        progress.error?.let { put("error", it) }
-                    }
-                    val response = Response(
-                        id = exportId,
-                        success = true,
-                        stream = true,
-                        end = progress.completed,
-                        data = progressJson
-                    )
-                    val encoded = json.encodeToString(Response.serializer(), response)
-                    logger.info("PROGRESS_ENCODED (len=${encoded.length}): $encoded")
-                    // 使用 send (阻塞) 而非 trySend，确保消息不丢失
-                    outputChannel.send(encoded)
-                    logger.info("PROGRESS_SENT (len=${encoded.length}, end=${progress.completed})")
-                }
-
-                // 检查导出引擎的返回值（即使没有抛异常也可能失败）
-                if (!result.success) {
-                    logger.error("Export returned failure: exportedRows=${result.exportedRows}, error=${result.error}")
-                    val errorResponse = Response(
-                        id = exportId,
-                        success = false,
-                        error = result.error ?: "Export failed"
-                    )
-                    outputChannel.send(json.encodeToString(Response.serializer(), errorResponse))
-                }
-
-                logger.info("EXPORT_FINISHED: $exportId")
-            } catch (e: ExportEngine.ExportCancelledException) {
-                logger.info("Export cancelled: $exportId")
-                val errorResponse = Response(
-                    id = exportId,
-                    success = false,
-                    error = e.message ?: "Export cancelled by user"
-                )
-                outputChannel.send(json.encodeToString(Response.serializer(), errorResponse))
+                // 委托给 ExportHandler 统一执行（业务编排 + 进度回报）
+                ExportHandler.execute(exportId, config, payload, outputChannel)
             } catch (e: Exception) {
                 logger.error("Export failed: $exportId", e)
                 val errorResponse = Response(
@@ -218,54 +177,22 @@ object ExportSubProcess {
                 activeExports.remove(exportId)
             }
         }
-
-        activeExports[exportId] = job
-        logger.info("Started export: $exportId")
-    }
-
-    private fun parseRequest(payload: JsonObject): ExportRequest {
-        val sql = payload["sql"]?.jsonPrimitive?.content
-            ?: throw IllegalArgumentException("缺少参数 'sql'")
-        val outputDir = payload["outputDir"]?.jsonPrimitive?.content
-            ?: throw IllegalArgumentException("缺少参数 'outputDir'")
-        val fileName = payload["fileName"]?.jsonPrimitive?.content
-            ?: throw IllegalArgumentException("缺少参数 'fileName'")
-        val formatStr = payload["format"]?.jsonPrimitive?.content?.uppercase()
-            ?: throw IllegalArgumentException("缺少参数 'format'")
-        val format = try {
-            ExportFormat.valueOf(formatStr)
-        } catch (e: Exception) {
-            throw IllegalArgumentException("不支持的格式: $formatStr")
-        }
-        val tableName = payload["tableName"]?.jsonPrimitive?.content
-        val fetchSize = payload["fetchSize"]?.jsonPrimitive?.intOrNull ?: 1000
-
-        return ExportRequest(
-            sql = sql,
-            outputDir = outputDir,
-            fileName = fileName,
-            format = format,
-            tableName = tableName,
-            fetchSize = fetchSize
-        )
     }
 
     private fun stopExport(exportId: String) {
-        activeExports[exportId]?.let { job ->
+        if (activeExports.remove(exportId)) {
             logger.info("Stopping export: $exportId")
             // 设置取消标志，ExportEngine 会在下一次循环检查时抛出 ExportCancelledException
             ExportEngine.isCancelled = true
-            activeExports.remove(exportId)
         }
     }
 
     private fun stopAllExports() {
         logger.info("Stopping all exports...")
-        activeExports.forEach { (id, job) ->
-            job.cancel()
-            logger.info("Cancelled export: $id")
+        if (activeExports.isNotEmpty()) {
+            ExportEngine.isCancelled = true
+            activeExports.clear()
         }
-        activeExports.clear()
     }
 
     private suspend fun sendError(id: String, message: String, outputChannel: Channel<String>) {

@@ -1,17 +1,13 @@
 package com.kxxnzstdsw.dispatcher
 
-import com.kxxnzstdsw.export.ExportProcessManager
 import com.kxxnzstdsw.handlers.*
 import com.kxxnzstdsw.models.Action
 import com.kxxnzstdsw.models.Category
 import com.kxxnzstdsw.models.Request
 import com.kxxnzstdsw.models.Response
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.delay
 import kotlinx.serialization.json.*
 import org.slf4j.LoggerFactory
-import java.io.File
-import kotlin.time.Duration.Companion.milliseconds
 
 object RequestDispatcher {
     private val logger = LoggerFactory.getLogger(RequestDispatcher::class.java)
@@ -30,9 +26,9 @@ object RequestDispatcher {
                 return
             }
 
-            // EXPORT 走子进程模式（防 OOM，保护主进程）
+            // EXPORT 由 ExportHandler 统一处理（业务编排 + 子进程通信）
             if (request.category == Category.EXPORT && request.action == Action.EXPORT) {
-                handleExport(request, outputChannel)
+                ExportHandler.execute(request.id, request.connection, request.payload, outputChannel)
                 return
             }
 
@@ -77,63 +73,6 @@ object RequestDispatcher {
             )
             outputChannel.send(json.encodeToString(Response.serializer(), errorResponse))
         }
-    }
-
-    private suspend fun handleExport(request: Request, outputChannel: Channel<String>) {
-        val id = request.id
-
-        // 获取 jar 路径（通过类加载器找到 idb-engine.jar）
-        val jarPath = findEngineJarPath()
-        if (jarPath == null) {
-            val errorResponse = Response(id = id, success = false, error = "Cannot find idb-engine.jar path")
-            outputChannel.send(json.encodeToString(Response.serializer(), errorResponse))
-            return
-        }
-
-        // 检查是否为停止导出请求
-        val stopExportId = request.payload["stopExportId"]?.jsonPrimitive?.content
-        if (stopExportId != null) {
-            // 确保子进程运行中
-            if (!ExportProcessManager.isRunning.value) {
-                ExportProcessManager.start(jarPath)
-                delay(100.milliseconds)
-            }
-            ExportProcessManager.stopExport(stopExportId)
-            val response = Response(
-                id = id,
-                success = true,
-                data = buildJsonObject { put("stopped", stopExportId) }
-            )
-            outputChannel.send(json.encodeToString(Response.serializer(), response))
-            return
-        }
-
-        // 确保子进程运行中（首次）
-        // 子进程的响应通过 ExportProcessManager.responseBuffer → forwardResponses → GlobalOutputChannel
-        // 最终由 Main.kt 的 outputJob 统一串行化输出到 stdout
-        if (!ExportProcessManager.isRunning.value) {
-            ExportProcessManager.start(jarPath)
-            // 等待子进程启动
-            delay(100.milliseconds)
-        }
-
-        // 发送导出命令到子进程
-        ExportProcessManager.startExport(id, request.connection.toJson(), request.payload)
-    }
-
-    private fun findEngineJarPath(): String? {
-        // 通过类路径找到 idb-engine.jar 的位置
-        val classPath = System.getProperty("java.class.path", "")
-        val paths = classPath.split(File.pathSeparator)
-        val cwd = File(".").absoluteFile
-        for (raw in paths) {
-            val candidate = if (File(raw).isAbsolute) File(raw) else File(cwd, raw)
-            if (candidate.exists() && candidate.name.contains("idb-engine.jar")) {
-                return candidate.absolutePath
-            }
-        }
-        // 回退：扫描当前工作目录
-        return File(".", "idb-engine.jar").takeIf { it.exists() }?.absolutePath
     }
 
     private suspend fun handleStreamDataList(request: Request, outputChannel: Channel<String>) {

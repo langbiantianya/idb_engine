@@ -164,7 +164,7 @@ tasks.jar {
 // Hadoop 3.3.5 的 winutils 与 3.5.0 二进制兼容
 val copyWinutils by tasks.registering {
     description = "下载windows上的hadoop winutils 依赖"
-    val winutilsUrl = "https://github.com/cdarlint/winutils/raw/master/hadoop-3.3.5/bin/winutils.exe"
+    val winutilsUrl = "https://raw.githubusercontent.com/cdarlint/winutils/refs/heads/master/hadoop-3.3.6/bin/winutils.exe"
     val outDir = layout.buildDirectory.dir("libs/bin")
     outputs.dir(outDir)
     doLast {
