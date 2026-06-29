@@ -59,6 +59,11 @@ object ExportEngine {
         var resultSet: ResultSet? = null
         var writer: ExportWriter? = null
         var exportedRows = 0L
+        // 进度节流：行数阈值（每写入 N 行报一次）+ 时间阈值（即使行数未达也按 N 毫秒报一次）
+        val progressRowInterval = 1000L
+        val progressTimeIntervalMs = 200L
+        var lastProgressTime = System.currentTimeMillis()
+        var lastReportedRows = 0L
 
         try {
             // 1. 创建流式 Statement
@@ -138,20 +143,22 @@ object ExportEngine {
                 writer.writeRow(row)
                 exportedRows = writer.getExportedRows()
 
-                // 每 1000 行报告一次进度
-                if (exportedRows % 1000 == 0L) {
-                    logger.debug("已导出 $exportedRows 行")
+                // 进度报告：行数阈值（每 N 行）或时间阈值（每 M 毫秒）任一触发即推送
+                val now = System.currentTimeMillis()
+                val rowDelta = exportedRows - lastReportedRows
+                if (rowDelta >= progressRowInterval || (now - lastProgressTime) >= progressTimeIntervalMs) {
                     onProgress(ExportProgress(
                         exportedRows = exportedRows,
                         columnCount = columnCount,
                         completed = false
                     ))
+                    lastProgressTime = now
+                    lastReportedRows = exportedRows
                 }
             }
 
-            // 8.1 发送最终进度
+            // 8.1 发送最终进度（确保即使最后余数不足 1000 行也发送正确总数）
             exportedRows = writer.getExportedRows()
-            logger.info("Sending final progress: exportedRows=$exportedRows, filePath=${outputFile.absolutePath}")
             onProgress(ExportProgress(
                 exportedRows = exportedRows,
                 columnCount = columnCount,

@@ -6,6 +6,7 @@ import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
+import java.sql.PreparedStatement
 import java.sql.ResultSet
 
 object DataHandler {
@@ -133,13 +134,15 @@ object DataHandler {
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
+            val columnTypes = loadColumnTypes(conn, config.database, tableName)
+
             val columns = values.keys.joinToString(", ") { dialect.quoteIdentifier(it) }
             val placeholders = values.keys.joinToString(", ") { "?" }
             val sql = "INSERT INTO ${dialect.quoteIdentifier(tableName)} ($columns) VALUES ($placeholders)"
 
             conn.prepareStatement(sql).use { stmt ->
-                values.values.forEachIndexed { index, value ->
-                    stmt.setString(index + 1, value.jsonPrimitive.content)
+                values.entries.forEachIndexed { index, (name, value) ->
+                    bindTypedValue(stmt, index + 1, columnTypes[name], value)
                 }
                 val affectedRows = stmt.executeUpdate()
                 buildJsonObject { put("affectedRows", affectedRows) }
@@ -160,17 +163,19 @@ object DataHandler {
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
+            val columnTypes = loadColumnTypes(conn, config.database, tableName)
+
             val setClause = changes.keys.joinToString(", ") { "${dialect.quoteIdentifier(it)} = ?" }
             val whereClause = where.keys.joinToString(" AND ") { "${dialect.quoteIdentifier(it)} = ?" }
             val sql = "UPDATE ${dialect.quoteIdentifier(tableName)} SET $setClause WHERE $whereClause"
 
             conn.prepareStatement(sql).use { stmt ->
                 var paramIndex = 1
-                changes.values.forEach { value ->
-                    stmt.setString(paramIndex++, value.jsonPrimitive.content)
+                changes.forEach { (name, value) ->
+                    bindTypedValue(stmt, paramIndex++, columnTypes[name], value)
                 }
-                where.values.forEach { value ->
-                    stmt.setString(paramIndex++, value.jsonPrimitive.content)
+                where.forEach { (name, value) ->
+                    bindTypedValue(stmt, paramIndex++, columnTypes[name], value)
                 }
                 val affectedRows = stmt.executeUpdate()
                 buildJsonObject { put("affectedRows", affectedRows) }
@@ -189,16 +194,103 @@ object DataHandler {
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
+            val columnTypes = loadColumnTypes(conn, config.database, tableName)
+
             val whereClause = where.keys.joinToString(" AND ") { "${dialect.quoteIdentifier(it)} = ?" }
             val sql = "DELETE FROM ${dialect.quoteIdentifier(tableName)} WHERE $whereClause"
 
             conn.prepareStatement(sql).use { stmt ->
-                where.values.forEachIndexed { index, value ->
-                    stmt.setString(index + 1, value.jsonPrimitive.content)
+                where.entries.forEachIndexed { index, (name, value) ->
+                    bindTypedValue(stmt, index + 1, columnTypes[name], value)
                 }
                 val affectedRows = stmt.executeUpdate()
                 buildJsonObject { put("affectedRows", affectedRows) }
             }
+        }
+    }
+
+    /**
+     * 通过 DatabaseMetaData 获取表的列类型映射（columnName -> TYPE_NAME）。
+     * 名称统一为小写匹配；TYPE_NAME 保持原始大小写供后续 dispatch 使用。
+     * 查询失败时返回空 map，调用方会回退到 setString。
+     */
+    private fun loadColumnTypes(
+        conn: java.sql.Connection,
+        database: String?,
+        tableName: String
+    ): Map<String, String> {
+        return try {
+            val metaData = conn.metaData
+            val types = mutableMapOf<String, String>()
+            metaData.getColumns(database, null, tableName, "%").use { rs ->
+                while (rs.next()) {
+                    val name = rs.getString("COLUMN_NAME") ?: continue
+                    val type = rs.getString("TYPE_NAME") ?: continue
+                    types[name.lowercase()] = type
+                }
+            }
+            types
+        } catch (_: Exception) {
+            emptyMap()
+        }
+    }
+
+    /**
+     * 根据列 SQL 类型名将 JsonPrimitive 绑定到 PreparedStatement。
+     * 涵盖常见 PG / MySQL 数值/布尔/日期/文本类型，未匹配则回退到 setString。
+     */
+    private fun bindTypedValue(
+        stmt: PreparedStatement,
+        paramIndex: Int,
+        sqlType: String?,
+        value: JsonElement
+    ) {
+        if (value is JsonNull) {
+            stmt.setObject(paramIndex, null)
+            return
+        }
+        val raw = value.jsonPrimitive.content
+        val type = sqlType?.uppercase()
+
+        when (type) {
+            // 整数类型
+            "TINYINT", "SMALLINT", "INT2", "INT", "MEDIUMINT", "INT4", "INTEGER",
+            "YEAR", "BIGINT", "INT8", "SERIAL", "BIGSERIAL", "SMALLSERIAL" -> {
+                try {
+                    stmt.setLong(paramIndex, raw.toLong())
+                } catch (_: NumberFormatException) {
+                    stmt.setString(paramIndex, raw)
+                }
+            }
+            // 浮点类型
+            "FLOAT", "REAL", "FLOAT4", "DOUBLE", "DOUBLE PRECISION", "FLOAT8",
+            "NUMERIC", "DECIMAL", "MONEY" -> {
+                try {
+                    stmt.setDouble(paramIndex, raw.toDouble())
+                } catch (_: NumberFormatException) {
+                    stmt.setString(paramIndex, raw)
+                }
+            }
+            // 布尔
+            "BOOL", "BOOLEAN", "BIT" -> {
+                val v = raw.trim().lowercase()
+                when (v) {
+                    "true", "1", "t", "yes", "y" -> stmt.setBoolean(paramIndex, true)
+                    "false", "0", "f", "no", "n" -> stmt.setBoolean(paramIndex, false)
+                    else -> stmt.setString(paramIndex, raw)
+                }
+            }
+            // 日期时间（按字符串绑定，由驱动解析；PG 也接受 ISO-8601 字符串）
+            "DATE", "TIME", "DATETIME", "TIMESTAMP", "TIMESTAMPTZ",
+            "TIMESTAMP WITHOUT TIME ZONE", "TIMESTAMP WITH TIME ZONE" -> {
+                stmt.setString(paramIndex, raw)
+            }
+            // 二进制
+            "BLOB", "BINARY", "VARBINARY", "LONGBLOB", "MEDIUMBLOB", "TINYBLOB", "BYTEA" -> {
+                stmt.setBytes(paramIndex, raw.toByteArray(Charsets.UTF_8))
+            }
+            // 默认按字符串（涵盖 VARCHAR/TEXT/CHAR/ENUM/SET/JSON/JSONB 等）
+            else -> stmt.setString(paramIndex, raw)
         }
     }
 }
