@@ -8,6 +8,10 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import java.sql.PreparedStatement
 import java.sql.ResultSet
+import java.sql.Types
+import java.time.OffsetDateTime
+import java.time.OffsetTime
+import java.time.format.DateTimeFormatter
 
 object DataHandler {
     /**
@@ -134,7 +138,7 @@ object DataHandler {
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
-            val columnTypes = loadColumnTypes(conn, config.database, tableName)
+            val columnTypes = loadColumnTypes(conn, config.database, schema, tableName)
 
             val columns = values.keys.joinToString(", ") { dialect.quoteIdentifier(it) }
             val placeholders = values.keys.joinToString(", ") { "?" }
@@ -142,7 +146,7 @@ object DataHandler {
 
             conn.prepareStatement(sql).use { stmt ->
                 values.entries.forEachIndexed { index, (name, value) ->
-                    bindTypedValue(stmt, index + 1, columnTypes[name], value)
+                    bindTypedValue(stmt, index + 1, columnTypes[name.lowercase()], value)
                 }
                 val affectedRows = stmt.executeUpdate()
                 buildJsonObject { put("affectedRows", affectedRows) }
@@ -163,7 +167,7 @@ object DataHandler {
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
-            val columnTypes = loadColumnTypes(conn, config.database, tableName)
+            val columnTypes = loadColumnTypes(conn, config.database, schema, tableName)
 
             val setClause = changes.keys.joinToString(", ") { "${dialect.quoteIdentifier(it)} = ?" }
             val whereClause = where.keys.joinToString(" AND ") { "${dialect.quoteIdentifier(it)} = ?" }
@@ -172,10 +176,10 @@ object DataHandler {
             conn.prepareStatement(sql).use { stmt ->
                 var paramIndex = 1
                 changes.forEach { (name, value) ->
-                    bindTypedValue(stmt, paramIndex++, columnTypes[name], value)
+                    bindTypedValue(stmt, paramIndex++, columnTypes[name.lowercase()], value)
                 }
                 where.forEach { (name, value) ->
-                    bindTypedValue(stmt, paramIndex++, columnTypes[name], value)
+                    bindTypedValue(stmt, paramIndex++, columnTypes[name.lowercase()], value)
                 }
                 val affectedRows = stmt.executeUpdate()
                 buildJsonObject { put("affectedRows", affectedRows) }
@@ -194,14 +198,14 @@ object DataHandler {
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
-            val columnTypes = loadColumnTypes(conn, config.database, tableName)
+            val columnTypes = loadColumnTypes(conn, config.database, schema, tableName)
 
             val whereClause = where.keys.joinToString(" AND ") { "${dialect.quoteIdentifier(it)} = ?" }
             val sql = "DELETE FROM ${dialect.quoteIdentifier(tableName)} WHERE $whereClause"
 
             conn.prepareStatement(sql).use { stmt ->
                 where.entries.forEachIndexed { index, (name, value) ->
-                    bindTypedValue(stmt, index + 1, columnTypes[name], value)
+                    bindTypedValue(stmt, index + 1, columnTypes[name.lowercase()], value)
                 }
                 val affectedRows = stmt.executeUpdate()
                 buildJsonObject { put("affectedRows", affectedRows) }
@@ -217,12 +221,13 @@ object DataHandler {
     private fun loadColumnTypes(
         conn: java.sql.Connection,
         database: String?,
+        schema: String,
         tableName: String
     ): Map<String, String> {
         return try {
             val metaData = conn.metaData
             val types = mutableMapOf<String, String>()
-            metaData.getColumns(database, null, tableName, "%").use { rs ->
+            metaData.getColumns(database, schema.takeIf { it.isNotEmpty() }, tableName, "%").use { rs ->
                 while (rs.next()) {
                     val name = rs.getString("COLUMN_NAME") ?: continue
                     val type = rs.getString("TYPE_NAME") ?: continue
@@ -232,6 +237,47 @@ object DataHandler {
             types
         } catch (_: Exception) {
             emptyMap()
+        }
+    }
+
+    /**
+     * 工业做法（对齐 MyBatis BaseTypeHandler / Hibernate JdbcTimeJavaType）：
+     * 对带 TZ 类型（PG timestamptz / timetz），字符串必须先解析成 java.time 对象
+     * 然后 setObject — 因为 PG JDBC `setObject(idx, String, Types.TIMESTAMP_WITH_TIMEZONE)`
+     * 会主动拒绝 String（其它类型已支持）。
+     *
+     * - 无 TZ 类型（DATE / TIME / DATETIME / TIMESTAMP）直接 setObject 字符串：
+     *   PG/MySQL driver 都接受 ISO-8601 字符串。
+     *
+     * 失败时抛 IllegalArgumentException 让 RequestDispatcher 包成错误信封。
+     */
+    private fun bindTemporal(
+        stmt: PreparedStatement,
+        paramIndex: Int,
+        raw: String,
+        sqlType: Int
+    ) {
+        try {
+            when (sqlType) {
+                Types.TIMESTAMP_WITH_TIMEZONE ->
+                    stmt.setObject(
+                        paramIndex,
+                        OffsetDateTime.parse(raw, DateTimeFormatter.ISO_OFFSET_DATE_TIME),
+                        sqlType
+                    )
+                Types.TIME_WITH_TIMEZONE ->
+                    stmt.setObject(
+                        paramIndex,
+                        OffsetTime.parse(raw),
+                        sqlType
+                    )
+                else -> stmt.setObject(paramIndex, raw, sqlType)
+            }
+        } catch (e: Exception) {
+            throw IllegalArgumentException(
+                "Cannot bind '$raw' as SQL type $sqlType for parameter $paramIndex: ${e.message}",
+                e
+            )
         }
     }
 
@@ -280,11 +326,20 @@ object DataHandler {
                     else -> stmt.setString(paramIndex, raw)
                 }
             }
-            // 日期时间（按字符串绑定，由驱动解析；PG 也接受 ISO-8601 字符串）
-            "DATE", "TIME", "DATETIME", "TIMESTAMP", "TIMESTAMPTZ",
-            "TIMESTAMP WITHOUT TIME ZONE", "TIMESTAMP WITH TIME ZONE" -> {
-                stmt.setString(paramIndex, raw)
-            }
+            // 日期时间 — 走 MyBatis / Hibernate 风格：一律 `setObject(idx, raw)` 让驱动解析
+            // driver 接受 ISO-8601 字符串，按列类型自动转换到 java.time / 二进制 timestamp
+            "DATE" -> bindTemporal(stmt, paramIndex, raw, Types.DATE)
+            "TIME" -> bindTemporal(stmt, paramIndex, raw, Types.TIME)
+            "DATETIME", "TIMESTAMP", "TIMESTAMP WITHOUT TIME ZONE" -> bindTemporal(
+                stmt, paramIndex, raw, Types.TIMESTAMP
+            )
+            // 带 TZ 类型：PG driver 仍要把 VARCHAR 显式标成 *_WITH_TIMEZONE，否则走不了二进制 timestamp 协议
+            "TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE" -> bindTemporal(
+                stmt, paramIndex, raw, Types.TIMESTAMP_WITH_TIMEZONE
+            )
+            "TIMETZ", "TIME WITH TIME ZONE" -> bindTemporal(
+                stmt, paramIndex, raw, Types.TIME_WITH_TIMEZONE
+            )
             // 二进制
             "BLOB", "BINARY", "VARBINARY", "LONGBLOB", "MEDIUMBLOB", "TINYBLOB", "BYTEA" -> {
                 stmt.setBytes(paramIndex, raw.toByteArray(Charsets.UTF_8))
