@@ -1,6 +1,9 @@
+import com.google.protobuf.gradle.id
+
 plugins {
     kotlin("jvm")
     alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.protobuf)
 }
 
 group = "com.kxxnzstdsw"
@@ -9,7 +12,6 @@ version = "1.0-SNAPSHOT"
 dependencies {
     implementation(project(":api"))
     implementation(libs.kotlinx.serialization.json)
-    implementation(libs.kotlinx.serialization.protobuf)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.hikari)
     implementation(libs.slf4j.api)
@@ -88,7 +90,7 @@ dependencies {
         exclude(group = "commons-cli", module = "commons-cli")
         // 保留 commons-configuration2、commons-lang3、commons-text、commons-collections4 等 Hadoop 实际运行依赖
         exclude(group = "org.apache.kerby", module = "kerb-core")
-        exclude(group = "org.apache.kerby", module = "kerby-asn1")
+        exclude(group = "org.apache.kerby", module = "kerb-asn1")
         exclude(group = "org.apache.kerby", module = "kerby-pkix")
         exclude(group = "org.apache.kerby", module = "kerby-util")
         exclude(group = "io.dropwizard.metrics", module = "metrics-core")
@@ -104,6 +106,15 @@ dependencies {
         exclude(group = "org.xerial.snappy", module = "snappy-java")
         exclude(group = "io.airlift", module = "aircompressor")
     }
+
+    // gRPC 服务端（Netty 实现，HTTP/2 over TCP loopback）
+    implementation(libs.grpc.core)
+    implementation(libs.grpc.stub)
+    implementation(libs.grpc.protobuf)
+    implementation(libs.grpc.netty.shaded)
+    implementation(libs.grpc.kotlin.stub)
+    implementation(libs.protobuf.kotlin)
+    implementation(libs.protobuf.java.util)
 
     // JDBC Drivers — 不编译依赖，构建时复制到 drivers/
     val jdbcDrivers by configurations.creating {
@@ -122,6 +133,54 @@ dependencies {
     testImplementation(project(":dialect-postgresql"))
 }
 
+// Protobuf — 启用 java/kotlin 双代码生成
+protobuf {
+    protoc {
+        artifact = "com.google.protobuf:protoc:${libs.versions.protobuf.asProvider().get()}"
+    }
+    plugins {
+        id("grpc") {
+            artifact = "io.grpc:protoc-gen-grpc-java:${libs.versions.grpc.asProvider().get()}"
+        }
+        id("grpckt") {
+            artifact = "io.grpc:protoc-gen-grpc-kotlin:1.3.0:jdk8@jar"
+        }
+    }
+    generateProtoTasks {
+        all().forEach { task ->
+            task.plugins {
+                id("grpc")
+                id("grpckt")
+            }
+            // 仅为 kotlin 生成 lite 代码；java 生成由 protobuf-gradle-plugin 默认 builtin 提供
+            task.builtins {
+                id("kotlin") {
+                    option("lite")
+                }
+            }
+        }
+    }
+}
+
+sourceSets {
+    main {
+        proto {
+            srcDir("src/main/proto")
+        }
+    }
+}
+
+// proto 文件仅供 protoc 消费，不打包到 JAR
+tasks.processResources {
+    exclude("**/*.proto")
+}
+
+// 把 proto 生成目录加入 Kotlin 编译输入
+kotlin.sourceSets["main"].kotlin.srcDir(layout.buildDirectory.dir("generated/source/proto/main/java"))
+kotlin.sourceSets["main"].kotlin.srcDir(layout.buildDirectory.dir("generated/source/proto/main/grpc"))
+kotlin.sourceSets["main"].kotlin.srcDir(layout.buildDirectory.dir("generated/source/proto/main/grpckt"))
+kotlin.sourceSets["main"].kotlin.srcDir(layout.buildDirectory.dir("generated/source/proto/main/kotlin"))
+
 tasks.test {
     useJUnitPlatform()
 }
@@ -132,7 +191,7 @@ tasks.jar {
     archiveClassifier.set("")
     archiveVersion.set("")
     manifest {
-        attributes["Main-Class"] = "com.kxxnzstdsw.MainKt"
+        attributes["Main-Class"] = "com.kxxnzstdsw.server.IdbEngineServerKt"
         attributes["Class-Path"] = configurations.runtimeClasspath.get().joinToString(" ") {
             "libs/${it.name}"
         }

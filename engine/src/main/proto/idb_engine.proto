@@ -1,0 +1,89 @@
+// IDB Engine — 统一 gRPC 服务定义
+// 所有 payload 字段使用 google.protobuf.Value，兼容 JSON 中的 string/number/bool/null/object/array
+// proto3 字段默认零值不可与 null 区分，与历史 wire 协议中 Response.error = "" 等约定保持一致
+
+syntax = "proto3";
+
+option java_package = "com.kxxnzstdsw.grpc";
+option java_multiple_files = true;
+
+import "google/protobuf/struct.proto";
+
+// 业务对象类别 — 与历史 Request.Category 一一对应（保留扩展能力）
+enum Category {
+  CATEGORY_UNSPECIFIED = 0;
+  SCHEMA = 1;
+  USER = 2;
+  TABLE = 3;
+  DATA = 4;
+  SQL = 5;
+  SYSTEM = 6;
+  FUNCTION = 7;
+  EXPORT = 8;
+  VIEW = 9;
+  INDEX = 10;
+  FOREIGN_KEY = 11;
+  TRIGGER = 12;
+}
+
+// 操作类型 — 与历史 Request.Action 一一对应
+// 注意：RUN_EXPORT 用于 Category=EXPORT 的导出执行（原 Action.EXPORT，proto3 enum 全局唯一故重命名）
+enum Action {
+  ACTION_UNSPECIFIED = 0;
+  LIST = 1;
+  CREATE = 2;
+  UPDATE = 3;
+  DELETE = 4;
+  EXECUTE = 5;
+  GET_DDL = 6;
+  INFO = 7;
+  GRANTS = 8;
+  GENERATE = 9;
+  DEBUG = 10;
+  CALL = 11;
+  RUN_EXPORT = 12;
+  RENAME = 13;
+  TRUNCATE = 14;
+  EXPLAIN = 15;
+  TEST_CONNECTION = 16;
+  SERVER_INFO = 17;
+}
+
+// 数据库连接凭证 — 完全无状态设计的核心载体
+// 注意：每次请求都需携带完整凭证；password 参与 SHA-256 哈希缓存键
+message ConnectionConfig {
+  string driver = 1;   // Mysql / Postgresql / H2
+  string host = 2;
+  int32  port = 3;
+  string user = 4;
+  string password = 5;
+  string database = 6; // MySQL/H2 为数据库名；PG 为数据库容器（postgres/template1/...）
+  string schema = 7;   // 可选：PG 专用 search_path 上下文；H2 视为 schema 名称
+  bool   use_ssl = 8;
+  map<string, string> properties = 9; // JDBC 扩展参数 / SSH 配置
+}
+
+// 统一请求体 — 业务参数全部走 payload map
+message Request {
+  string id = 1;
+  Category category = 2;
+  Action   action   = 3;
+  ConnectionConfig connection = 4;
+  map<string, google.protobuf.Value> payload = 5;
+}
+
+// 统一响应体 — 支持流式（stream/end 字段）
+// error 为空字符串表示无错误；非空即视为错误响应（历史 isError 扩展语义）
+message Response {
+  string id = 1;
+  bool   success = 2;
+  string error   = 3;
+  bool   stream  = 4;
+  bool   end     = 5;
+  google.protobuf.Value data = 6;
+}
+
+// 主服务 — 服务端流式 RPC（一次请求可产生多帧响应：DATA LIST 流式、SQL SELECT、EXPORT 进度、Lua 造数进度）
+service IdbEngine {
+  rpc Handle(Request) returns (stream Response);
+}

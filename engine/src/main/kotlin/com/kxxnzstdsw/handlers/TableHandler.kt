@@ -1,7 +1,7 @@
 package com.kxxnzstdsw.handlers
 
 import com.kxxnzstdsw.loader.DialectLoader
-import com.kxxnzstdsw.models.ConnectionConfig
+import com.kxxnzstdsw.grpc.ConnectionConfig
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -24,51 +24,20 @@ object TableHandler {
             ?: throw IllegalArgumentException("Missing 'tableName' in payload")
         val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
         val connection = PoolManager.getConnection(config, schema)
+        val dialect = DialectLoader.getDialect(config.driver)
+
         return@withContext connection.use { conn ->
-            val columns = mutableListOf<JsonObject>()
-            val metaData = conn.metaData
-
-            // H2 内存库：catalog 必须为 null；H2 unquoted 标识符默认大写，dialect quoteIdentifier 保留原大小写
-            // → 双重查找：原名 + 大写名，合并结果
-            val catalog = if (config.driver.equals("H2", ignoreCase = true)) null else config.database
-            val candidates = if (config.driver.equals("H2", ignoreCase = true)) {
-                listOf(tableName, tableName.uppercase()).distinct()
-            } else {
-                listOf(tableName)
-            }
-            val lookupSchema = if (config.driver.equals("H2", ignoreCase = true)) schema.ifBlank { "PUBLIC" } else schema
-
-            // Get primary keys
-            val primaryKeys = mutableSetOf<String>()
-            for (candidate in candidates) {
-                metaData.getPrimaryKeys(catalog, lookupSchema, candidate).use { rs ->
-                    while (rs.next()) {
-                        primaryKeys.add(rs.getString("COLUMN_NAME"))
-                    }
-                }
-            }
-
-            // Get columns
-            for (candidate in candidates) {
-                metaData.getColumns(catalog, lookupSchema, candidate, "%").use { rs ->
-                    while (rs.next()) {
-                        val columnName = rs.getString("COLUMN_NAME")
-                        val defaultValue = rs.getString("COLUMN_DEF")
-                        if (columns.any { it["name"]?.jsonPrimitive?.content == columnName }) continue
-
-                        columns.add(buildJsonObject {
-                            put("name", columnName)
-                            put("type", rs.getString("TYPE_NAME"))
-                            put("size", rs.getInt("COLUMN_SIZE"))
-                            put("nullable", rs.getInt("NULLABLE") == 1)
-                            put("isPrimaryKey", primaryKeys.contains(columnName))
-                            if (defaultValue != null) {
-                                put("defaultValue", defaultValue)
-                            } else {
-                                put("defaultValue", JsonNull)
-                            }
-                        })
-                    }
+            // 委托给方言的 listColumns，由 dialect 自行处理 catalog/schema 边界差异
+            val cols = dialect.listColumns(conn, config.database, schema, tableName)
+            val columns = cols.map { col ->
+                buildJsonObject {
+                    put("name", JsonPrimitive(col["name"]?.toString() ?: ""))
+                    put("type", JsonPrimitive(col["type"]?.toString() ?: ""))
+                    put("size", JsonPrimitive((col["size"] as? Number)?.toInt() ?: 0))
+                    put("nullable", JsonPrimitive(col["nullable"] as? Boolean ?: true))
+                    put("isPrimaryKey", JsonPrimitive(col["isPrimaryKey"] as? Boolean ?: false))
+                    val dv = col["defaultValue"]
+                    if (dv != null) put("defaultValue", JsonPrimitive(dv.toString())) else put("defaultValue", JsonNull)
                 }
             }
             Json.encodeToJsonElement(columns)

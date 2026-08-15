@@ -5,6 +5,7 @@ import com.kxxnzstdsw.testutil.H2Fixture
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -101,6 +102,57 @@ class FunctionHandlerIntegrationTest : H2Fixture() {
         assertTrue(debug.jsonArray.any {
             it.jsonObject["type"]?.jsonPrimitive?.content in listOf("EXPLAIN", "INFO")
         })
+    }
+
+    @Test
+    fun `CALL returns unified result with routine_type and schema fields`() = runBlocking {
+        FunctionHandler.create(config, buildJsonObject {
+            put("ddl", "CREATE ALIAS unified_func FOR \"java.lang.Math.toDegrees\"")
+        })
+        val result = FunctionHandler.call(config, buildJsonObject {
+            put("name", "unified_func")
+            put("routineType", "FUNCTION")
+            put("schema", "PUBLIC")
+            putJsonArray("args") { add(JsonPrimitive("3.141592653589793")) }
+        }).jsonObject
+        // Phase H 统一返回形状：{ routine_type, schema, result?, row_count?, ... }
+        assertEquals("FUNCTION", result["routine_type"]?.jsonPrimitive?.content)
+        assertNotNull(result["schema"])
+        assertNotNull(result["result"])
+    }
+
+    @Test
+    fun `CALL with null arg does not throw`() = runBlocking {
+        FunctionHandler.create(config, buildJsonObject {
+            put("ddl", "CREATE ALIAS to_deg_safe FOR \"java.lang.Math.toDegrees\"")
+        })
+        // 单参方法，传 null — 应绑定为 SQL NULL，不报错
+        val result = FunctionHandler.call(config, buildJsonObject {
+            put("name", "to_deg_safe")
+            put("routineType", "FUNCTION")
+            put("schema", "PUBLIC")
+            putJsonArray("args") { add(JsonNull) }
+        })
+        assertNotNull(result)
+    }
+
+    @Test
+    fun `VALIDATE accepts valid ALIAS DDL`() = runBlocking {
+        val result = FunctionHandler.validate(config, buildJsonObject {
+            put("ddl", """CREATE ALIAS "valid_one" FOR "java.lang.Math.toDegrees"""")
+        })
+        assertEquals(true, result.jsonObject["valid"]?.jsonPrimitive?.booleanOrNull)
+    }
+
+    @Test
+    fun `VALIDATE rejects multi-statement`() = runBlocking {
+        assertThrows<IllegalArgumentException> {
+            runBlocking {
+                FunctionHandler.validate(config, buildJsonObject {
+                    put("ddl", """CREATE ALIAS a FOR "java.lang.Math.toDegrees"; DROP ALIAS b""")
+                })
+            }
+        }
     }
 
     private fun assertFalse(condition: Boolean, message: String = "") {

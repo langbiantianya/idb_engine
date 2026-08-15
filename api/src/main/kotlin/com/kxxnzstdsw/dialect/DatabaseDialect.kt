@@ -45,10 +45,22 @@ interface DatabaseDialect {
     }
 
     /**
-     * List all schemas/databases.
-     * @param database 可选的数据库名。为空时返回数据库列表；有值时返回该库下的 schema 列表（PG）。
+     * 列出所有 database（导航第一级：MySQL 的 SHOW DATABASES / PG 的 pg_database / H2 的 [config.database]）。
+     *
+     * MySQL 默认过滤掉 information_schema / mysql / performance_schema / sys 等系统库。
+     * PG 返回所有 datistemplate=false 的数据库。
+     * H2 单实例内存库：返回 `setOf(config.database)` — 见具体实现。
      */
-    suspend fun listSchemas(conn: Connection, database: String = ""): List<String>
+    suspend fun listDatabases(conn: Connection): List<String> {
+        // 默认实现：兼容旧 SPI 实现，由各方言覆盖
+        return listSchemas(conn, "")
+    }
+
+    /**
+     * 列出指定 database 下的 schema（导航第二级：PG pg_namespace / MySQL 不支持 / H2 INFORMATION_SCHEMA.SCHEMATA）。
+     * @param database 必填 — PG 会 assert 该 database 名；MySQL 抛 UnsupportedOperationException
+     */
+    suspend fun listSchemas(conn: Connection, database: String): List<String>
 
     /**
      * Create a new schema/database
@@ -69,19 +81,80 @@ interface DatabaseDialect {
     suspend fun listTables(conn: Connection, database: String, schema: String = ""): List<Map<String, String>>
 
     /**
+     * 获取表的列定义列表 — 由方言实现处理 catalog/schema 边界差异。
+     * 默认实现：走 JDBC DatabaseMetaData.getColumns，H2/MySQL/PG 共用。
+     *
+     * @param database 数据库名（catalog）
+     * @param schema schema 名（PG 必填，MySQL 通常留空，H2 大写如 PUBLIC）
+     * @param tableName 表名
+     * @return 列定义列表，每列至少包含 name/type/size/nullable/isPrimaryKey/defaultValue
+     */
+    suspend fun listColumns(
+        conn: Connection,
+        database: String,
+        schema: String,
+        tableName: String
+    ): List<Map<String, Any?>> {
+        // 默认实现：使用 JDBC metaData.getColumns（与原 TableHandler.columnList 行为一致）
+        val result = mutableListOf<Map<String, Any?>>()
+        // 主键查询 — 合并各候选名（原样 + 大写）
+        val candidates = buildList {
+            add(tableName)
+            if (driverName.equals("H2", ignoreCase = true)) add(tableName.uppercase())
+        }.distinct()
+        val lookupSchema = if (driverName.equals("H2", ignoreCase = true)) schema.ifBlank { "PUBLIC" } else schema
+        val catalog = if (driverName.equals("H2", ignoreCase = true)) null else database.ifBlank { null }
+
+        val primaryKeys = mutableSetOf<String>()
+        for (cand in candidates) {
+            conn.metaData.getPrimaryKeys(catalog, lookupSchema, cand).use { rs ->
+                while (rs.next()) primaryKeys.add(rs.getString("COLUMN_NAME"))
+            }
+        }
+
+        val seen = mutableSetOf<String>()
+        for (cand in candidates) {
+            conn.metaData.getColumns(catalog, lookupSchema, cand, "%").use { rs ->
+                while (rs.next()) {
+                    val name = rs.getString("COLUMN_NAME")
+                    if (!seen.add(name)) continue
+                    result.add(mapOf(
+                        "name" to name,
+                        "type" to rs.getString("TYPE_NAME"),
+                        "size" to rs.getInt("COLUMN_SIZE"),
+                        "nullable" to (rs.getInt("NULLABLE") == 1),
+                        "isPrimaryKey" to (name in primaryKeys),
+                        "defaultValue" to rs.getString("COLUMN_DEF")
+                    ))
+                }
+            }
+        }
+        return result
+    }
+
+    /**
      * List all users
      */
     suspend fun listUsers(conn: Connection): List<Map<String, String>>
 
     /**
-     * Grant or revoke privileges
+     * Grant or revoke privileges.
+     *
+     * @param user 用户名
+     * @param schema database/schema 名
+     * @param privileges 权限列表（"SELECT"、"INSERT"、"ALL"、"ALL PRIVILEGES" 等）
+     * @param isGrant true=GRANT, false=REVOKE
+     * @param tableName 可选的表名（null 时走 schema 级 GRANT/REVOKE，非空时为表级）
+     * @param withGrantOption 是否 WITH GRANT OPTION（PG/H2 支持，MySQL 用 WITH GRANT OPTION 关键字）
      */
     suspend fun updatePrivileges(
         conn: Connection,
         user: String,
         schema: String,
         privileges: List<String>,
-        isGrant: Boolean
+        isGrant: Boolean,
+        tableName: String? = null,
+        withGrantOption: Boolean = false
     ): Boolean
 
     /**

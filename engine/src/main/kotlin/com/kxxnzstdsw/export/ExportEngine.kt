@@ -1,7 +1,7 @@
 package com.kxxnzstdsw.export
 
 import com.kxxnzstdsw.loader.DialectLoader
-import com.kxxnzstdsw.models.ConnectionConfig
+import com.kxxnzstdsw.grpc.ConnectionConfig
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext

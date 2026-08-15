@@ -18,16 +18,31 @@ class MySQLDialect : DatabaseDialect {
         return original
     }
 
-    override suspend fun listSchemas(conn: Connection, database: String): List<String> = withContext(Dispatchers.IO) {
-        val schemas = mutableListOf<String>()
+    override suspend fun listDatabases(conn: Connection): List<String> = withContext(Dispatchers.IO) {
+        // MySQL 没有独立的 schema 层，schema == database
+        // 过滤系统库（information_schema / mysql / performance_schema / sys）
+        val databases = mutableListOf<String>()
         conn.createStatement().use { stmt ->
             stmt.executeQuery("SHOW DATABASES").use { rs ->
                 while (rs.next()) {
-                    schemas.add(rs.getString(1))
+                    val name = rs.getString(1)
+                    if (name in setOf("information_schema", "mysql", "performance_schema", "sys")) continue
+                    databases.add(name)
                 }
             }
         }
-        schemas
+        databases
+    }
+
+    override suspend fun listSchemas(conn: Connection, database: String): List<String> = withContext(Dispatchers.IO) {
+        // MySQL 不支持第二级 schema — listSchemas 必须传 database，否则直接抛错
+        if (database.isBlank()) {
+            throw IllegalArgumentException(
+                "MySQL 不支持跨数据库的 schema 列表 — 必须先选定 database 后再调用 listSchemas"
+            )
+        }
+        // 对 MySQL 而言 schema == database，返回单元素
+        listOf(database)
     }
 
     override suspend fun createSchema(conn: Connection, name: String, options: Map<String, String>): Boolean = withContext(Dispatchers.IO) {
@@ -66,14 +81,17 @@ class MySQLDialect : DatabaseDialect {
     }
 
     override suspend fun listUsers(conn: Connection): List<Map<String, String>> = withContext(Dispatchers.IO) {
+        // 默认过滤 MySQL 系统用户（mysql.sys / mysql.session / mysql.infoschema 等）。
+        // 任何 'mysql.%' 开头的用户视为系统用户 — MySQL 8 默认还有 public / role_* 等也过滤。
+        val SYSTEM_USER_PREFIXES = listOf("mysql.", "mariadb.")
         val users = mutableListOf<Map<String, String>>()
         conn.createStatement().use { stmt ->
             stmt.executeQuery("SELECT User, Host FROM mysql.user").use { rs ->
                 while (rs.next()) {
-                    users.add(mapOf(
-                        "user" to rs.getString("User"),
-                        "host" to rs.getString("Host")
-                    ))
+                    val u = rs.getString("User") ?: continue
+                    val h = rs.getString("Host") ?: ""
+                    if (SYSTEM_USER_PREFIXES.any { u.startsWith(it) }) continue
+                    users.add(mapOf("user" to u, "host" to h))
                 }
             }
         }
@@ -85,23 +103,31 @@ class MySQLDialect : DatabaseDialect {
         user: String,
         schema: String,
         privileges: List<String>,
-        isGrant: Boolean
+        isGrant: Boolean,
+        tableName: String?,
+        withGrantOption: Boolean
     ): Boolean = withContext(Dispatchers.IO) {
         val safeUser = sanitizeIdentifier(user, "user name")
         val safeSchema = sanitizeIdentifier(schema, "schema name")
-        // 校验权限名只含字母下划线，防止注入
+        // 校验权限名：允许大写字母 + 空格（"ALL PRIVILEGES" / "ALL"）+ 下划线。
         val safePrivs = privileges.map { priv ->
             val p = priv.trim()
-            if (!p.matches(Regex("^[A-Z_]+$", RegexOption.IGNORE_CASE))) {
-                throw IllegalArgumentException("Invalid privilege name: $p")
+            if (!p.matches(Regex("^[A-Z_ ]+$", RegexOption.IGNORE_CASE))) {
+                throw IllegalArgumentException("Invalid privilege name: $p — 仅允许字母/空格/下划线")
             }
-            p
+            p.uppercase()
         }
         val privilegeList = safePrivs.joinToString(", ")
-        val sql = if (isGrant) {
-            "GRANT $privilegeList ON ${quoteIdentifier(safeSchema)}.* TO '${safeUser}'"
+        val grantOptionSql = if (withGrantOption) " WITH GRANT OPTION" else ""
+        val onTarget = if (tableName.isNullOrBlank()) {
+            "${quoteIdentifier(safeSchema)}.*"
         } else {
-            "REVOKE $privilegeList ON ${quoteIdentifier(safeSchema)}.* FROM '${safeUser}'"
+            "${quoteIdentifier(safeSchema)}.${quoteIdentifier(sanitizeIdentifier(tableName, "table name"))}"
+        }
+        val sql = if (isGrant) {
+            "GRANT $privilegeList ON $onTarget TO '$safeUser'@'%'$grantOptionSql"
+        } else {
+            "REVOKE $privilegeList ON $onTarget FROM '$safeUser'@'%'"
         }
         conn.createStatement().use { stmt ->
             stmt.execute(sql)
@@ -111,29 +137,35 @@ class MySQLDialect : DatabaseDialect {
 
     override suspend fun createUser(conn: Connection, user: String, password: String, host: String): Boolean = withContext(Dispatchers.IO) {
         val safeUser = sanitizeIdentifier(user, "user name")
-        val safeHost = sanitizeIdentifier(host, "host")
-        val escapedPwd = password.replace("'", "\\'")
+        // host 必须用反引号包裹，不允许 `'` / `\` 等破坏引号的字符
+        val hostSafe = host.takeIf { '\'' !in it && '\\' !in it && '"' !in it }
+            ?: throw IllegalArgumentException(
+                "Invalid MySQL host '$host' — 不允许包含 '、\\ 或 \" 字符（避免 SQL 注入）"
+            )
+        val escapedPwd = password.replace("\\", "\\\\").replace("'", "\\'")
         conn.createStatement().use { stmt ->
-            stmt.execute("CREATE USER '$safeUser'@'$safeHost' IDENTIFIED BY '$escapedPwd'")
+            stmt.execute("CREATE USER '$safeUser'@'$hostSafe' IDENTIFIED BY '$escapedPwd'")
         }
         true
     }
 
     override suspend fun deleteUser(conn: Connection, user: String, host: String): Boolean = withContext(Dispatchers.IO) {
         val safeUser = sanitizeIdentifier(user, "user name")
-        val safeHost = sanitizeIdentifier(host, "host")
+        val hostSafe = host.takeIf { '\'' !in it && '\\' !in it && '"' !in it }
+            ?: throw IllegalArgumentException("Invalid MySQL host '$host'")
         conn.createStatement().use { stmt ->
-            stmt.execute("DROP USER '$safeUser'@'$safeHost'")
+            stmt.execute("DROP USER '$safeUser'@'$hostSafe'")
         }
         true
     }
 
     override suspend fun updatePassword(conn: Connection, user: String, password: String, host: String): Boolean = withContext(Dispatchers.IO) {
         val safeUser = sanitizeIdentifier(user, "user name")
-        val safeHost = sanitizeIdentifier(host, "host")
-        val escapedPwd = password.replace("'", "\\'")
+        val hostSafe = host.takeIf { '\'' !in it && '\\' !in it && '"' !in it }
+            ?: throw IllegalArgumentException("Invalid MySQL host '$host'")
+        val escapedPwd = password.replace("\\", "\\\\").replace("'", "\\'")
         conn.createStatement().use { stmt ->
-            stmt.execute("ALTER USER '$safeUser'@'$safeHost' IDENTIFIED BY '$escapedPwd'")
+            stmt.execute("ALTER USER '$safeUser'@'$hostSafe' IDENTIFIED BY '$escapedPwd'")
         }
         true
     }
@@ -187,8 +219,26 @@ class MySQLDialect : DatabaseDialect {
 
     private fun sanitizeIdentifier(name: String, label: String): String {
         if (name.isBlank()) throw IllegalArgumentException("$label cannot be empty")
+        // 拒绝 null 字节（0x00）— 防 SQL 截断
         if (name.contains(' ')) throw IllegalArgumentException("$label contains null byte")
+        // 拒绝单引号 — 防 SQL 注入跳出字面量
+        if (name.contains('\'')) throw IllegalArgumentException("$label contains single quote")
+        // 拒绝反斜杠 — 防转义序列注入
+        if (name.contains('\\')) throw IllegalArgumentException("$label contains backslash")
+        // 拒绝分号 — 防语句分割
+        if (name.contains(';')) throw IllegalArgumentException("$label contains semicolon")
         return name
+    }
+
+    /**
+     * MySQL 风格的字符串字面量转义（用于 DDL 中无法参数化的位置，如 COMMENT 子句）。
+     * 拒绝 null 字节；保留单引号转义为 \\\'
+     */
+    internal fun escapeSqlString(value: String, label: String): String {
+        if (value.contains(' ')) throw IllegalArgumentException("$label contains null byte")
+        if (value.contains(';')) throw IllegalArgumentException("$label contains semicolon")
+        if (value.contains('\n')) throw IllegalArgumentException("$label contains newline")
+        return value.replace("\\\\", "\\\\\\\\").replace("'", "\\'")
     }
 
     override fun buildColumnDefinition(
@@ -307,31 +357,175 @@ class MySQLDialect : DatabaseDialect {
         }
     }
 
-    // region 函数/存储过程管理（MySQL 占位实现）
+    // region 函数/存储过程管理
 
     /**
-     * 列出函数/存储过程（MySQL 暂未实现）
+     * 列出 schema 下所有函数、存储过程和触发器。
+     *
+     * MySQL schema == database：从 INFORMATION_SCHEMA.ROUTINES 读函数/过程，
+     * 从 INFORMATION_SCHEMA.TRIGGERS 读触发器，最后按名称合并。
      */
-    override suspend fun listRoutines(conn: Connection, schema: String): List<Map<String, String>> {
-        throw UnsupportedOperationException("MySQL 函数/存储过程管理暂未实现")
+    override suspend fun listRoutines(conn: Connection, schema: String): List<Map<String, String>> = withContext(Dispatchers.IO) {
+        val routines = mutableListOf<Map<String, String>>()
+        val safeDb = sanitizeIdentifier(schema.ifBlank { conn.catalog ?: "" }, "database name")
+
+        // 1. 函数 / 存储过程
+        conn.prepareStatement("""
+            SELECT ROUTINE_NAME, ROUTINE_TYPE, DATA_TYPE, REMARKS,
+                   SQL_DATA_ACCESS, IS_DETERMINISTIC, SECURITY_TYPE
+            FROM INFORMATION_SCHEMA.ROUTINES
+            WHERE ROUTINE_SCHEMA = ?
+            ORDER BY ROUTINE_TYPE, ROUTINE_NAME
+        """.trimIndent()).use { stmt ->
+            stmt.setString(1, safeDb)
+            stmt.executeQuery().use { rs ->
+                while (rs.next()) {
+                    val sqlDataAccess = rs.getString("SQL_DATA_ACCESS") ?: ""
+                    val deterministic = rs.getString("IS_DETERMINISTIC") ?: "NO"
+                    routines.add(mapOf(
+                        "name" to (rs.getString("ROUTINE_NAME") ?: ""),
+                        "routine_type" to (rs.getString("ROUTINE_TYPE") ?: "FUNCTION"),
+                        "return_type" to (rs.getString("DATA_TYPE") ?: ""),
+                        "language" to "SQL",
+                        "security_definer" to (rs.getString("SECURITY_TYPE") ?: "DEFINER"),
+                        "volatility" to if (deterministic.equals("YES", ignoreCase = true)) "DETERMINISTIC"
+                                        else if (sqlDataAccess.equals("NO SQL", ignoreCase = true)) "NO SQL"
+                                        else "VOLATILE",
+                        "arg_count" to countParameters(conn, safeDb, rs.getString("ROUTINE_NAME") ?: ""),
+                        "arg_names" to listParameterNames(conn, safeDb, rs.getString("ROUTINE_NAME") ?: ""),
+                        "schema" to safeDb,
+                        "description" to (rs.getString("REMARKS") ?: ""),
+                        "trigger_table" to ""
+                    ))
+                }
+            }
+        }
+
+        // 2. 触发器
+        conn.prepareStatement("""
+            SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, REMARKS, ACTION_TIMING, EVENT_MANIPULATION
+            FROM INFORMATION_SCHEMA.TRIGGERS
+            WHERE TRIGGER_SCHEMA = ?
+            ORDER BY TRIGGER_NAME
+        """.trimIndent()).use { stmt ->
+            stmt.setString(1, safeDb)
+            stmt.executeQuery().use { rs ->
+                while (rs.next()) {
+                    routines.add(mapOf(
+                        "name" to (rs.getString("TRIGGER_NAME") ?: ""),
+                        "routine_type" to "TRIGGER",
+                        "return_type" to "${rs.getString("ACTION_TIMING") ?: ""} ${rs.getString("EVENT_MANIPULATION") ?: ""}".trim(),
+                        "language" to "SQL",
+                        "security_definer" to "DEFINER",
+                        "volatility" to "VOLATILE",
+                        "arg_count" to "0",
+                        "arg_names" to "",
+                        "schema" to safeDb,
+                        "description" to (rs.getString("REMARKS") ?: ""),
+                        "trigger_table" to (rs.getString("EVENT_OBJECT_TABLE") ?: "")
+                    ))
+                }
+            }
+        }
+
+        routines
+    }
+
+    private fun countParameters(conn: Connection, db: String, routineName: String): String {
+        conn.prepareStatement(
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.PARAMETERS " +
+            "WHERE SPECIFIC_SCHEMA = ? AND SPECIFIC_NAME = ? AND PARAMETER_NAME IS NOT NULL"
+        ).use { stmt ->
+            stmt.setString(1, db)
+            stmt.setString(2, routineName)
+            stmt.executeQuery().use { rs -> if (rs.next()) return rs.getInt(1).toString() }
+        }
+        return "0"
+    }
+
+    private fun listParameterNames(conn: Connection, db: String, routineName: String): String {
+        val names = mutableListOf<String>()
+        conn.prepareStatement(
+            "SELECT PARAMETER_NAME, PARAMETER_MODE, DATA_TYPE " +
+            "FROM INFORMATION_SCHEMA.PARAMETERS " +
+            "WHERE SPECIFIC_SCHEMA = ? AND SPECIFIC_NAME = ? AND PARAMETER_NAME IS NOT NULL " +
+            "ORDER BY ORDINAL_POSITION"
+        ).use { stmt ->
+            stmt.setString(1, db)
+            stmt.setString(2, routineName)
+            stmt.executeQuery().use { rs ->
+                while (rs.next()) {
+                    val mode = rs.getString("PARAMETER_MODE") ?: "IN"
+                    val name = rs.getString("PARAMETER_NAME") ?: continue
+                    val type = rs.getString("DATA_TYPE") ?: ""
+                    names.add("$mode $name $type")
+                }
+            }
+        }
+        return names.joinToString(", ")
     }
 
     /**
-     * 获取函数/存储过程/触发器 DDL（MySQL 暂未实现）
+     * 获取函数/存储过程/触发器的 DDL 定义。
+     * 使用 MySQL 原生 SHOW CREATE 命令。
      */
-    override suspend fun getRoutineDDL(conn: Connection, routineName: String, schema: String): String {
-        throw UnsupportedOperationException("MySQL 函数/存储过程管理暂未实现")
+    override suspend fun getRoutineDDL(conn: Connection, routineName: String, schema: String): String = withContext(Dispatchers.IO) {
+        val safeName = sanitizeIdentifier(routineName, "routine name")
+        val safeDb = sanitizeIdentifier(schema.ifBlank { conn.catalog ?: "" }, "database name")
+        val ddl = mutableListOf<String>()
+
+        // 尝试 SHOW CREATE PROCEDURE
+        try {
+            conn.prepareStatement("SHOW CREATE PROCEDURE ${quoteIdentifier(safeDb)}.${quoteIdentifier(safeName)}").use { stmt ->
+                stmt.executeQuery().use { rs ->
+                    if (rs.next()) {
+                        // 第 2 列是 Create Procedure
+                        val createSql = rs.getString(2)
+                        if (!createSql.isNullOrBlank()) return@withContext createSql
+                    }
+                }
+            }
+        } catch (_: Exception) { /* 可能是函数而非过程，继续 */ }
+
+        // 尝试 SHOW CREATE FUNCTION
+        try {
+            conn.prepareStatement("SHOW CREATE FUNCTION ${quoteIdentifier(safeDb)}.${quoteIdentifier(safeName)}").use { stmt ->
+                stmt.executeQuery().use { rs ->
+                    if (rs.next()) {
+                        val createSql = rs.getString(2)
+                        if (!createSql.isNullOrBlank()) return@withContext createSql
+                    }
+                }
+            }
+        } catch (_: Exception) { /* 可能是触发器 */ }
+
+        // 尝试 SHOW CREATE TRIGGER
+        try {
+            conn.prepareStatement("SHOW CREATE TRIGGER ${quoteIdentifier(safeDb)}.${quoteIdentifier(safeName)}").use { stmt ->
+                stmt.executeQuery().use { rs ->
+                    if (rs.next()) {
+                        // MySQL 8.0+ SHOW CREATE TRIGGER 返回的列为 SQL Original Statement
+                        val createSql = try { rs.getString(2) } catch (_: Exception) { rs.getString(1) }
+                        if (!createSql.isNullOrBlank()) return@withContext createSql
+                    }
+                }
+            }
+        } catch (_: Exception) { /* 都不是 — 抛错 */ }
+
+        throw IllegalArgumentException("未找到函数/存储过程/触发器 '$routineName'，database: '$safeDb'")
     }
 
     /**
-     * 执行 DDL 创建函数/存储过程（MySQL 暂未实现）
+     * 执行 DDL 创建函数/存储过程/触发器。
+     * 注意：CREATE TRIGGER 不支持 IF NOT EXISTS；DDL 中必须携带完整定义。
      */
-    override suspend fun createRoutine(conn: Connection, ddl: String): Boolean {
-        throw UnsupportedOperationException("MySQL 函数/存储过程管理暂未实现")
+    override suspend fun createRoutine(conn: Connection, ddl: String): Boolean = withContext(Dispatchers.IO) {
+        conn.createStatement().use { stmt -> stmt.execute(ddl) }
+        true
     }
 
     /**
-     * 删除函数/存储过程（MySQL 暂未实现）
+     * 删除函数/存储过程/触发器。
      */
     override suspend fun dropRoutine(
         conn: Connection,
@@ -340,12 +534,46 @@ class MySQLDialect : DatabaseDialect {
         schema: String,
         ifExists: Boolean,
         cascade: Boolean
-    ): Boolean {
-        throw UnsupportedOperationException("MySQL 函数/存储过程管理暂未实现")
+    ): Boolean = withContext(Dispatchers.IO) {
+        val safeName = sanitizeIdentifier(routineName, "routine name")
+        val safeDb = sanitizeIdentifier(schema.ifBlank { conn.catalog ?: "" }, "database name")
+        val upperType = routineType.uppercase()
+
+        val sql = buildString {
+            when (upperType) {
+                "TRIGGER" -> {
+                    append("DROP TRIGGER ")
+                    if (ifExists) append("IF EXISTS ")
+                    append(quoteIdentifier(safeDb))
+                    append(".")
+                    append(quoteIdentifier(safeName))
+                }
+                "FUNCTION" -> {
+                    append("DROP FUNCTION ")
+                    if (ifExists) append("IF EXISTS ")
+                    append(quoteIdentifier(safeDb))
+                    append(".")
+                    append(quoteIdentifier(safeName))
+                }
+                "PROCEDURE" -> {
+                    append("DROP PROCEDURE ")
+                    if (ifExists) append("IF EXISTS ")
+                    append(quoteIdentifier(safeDb))
+                    append(".")
+                    append(quoteIdentifier(safeName))
+                }
+                else -> throw IllegalArgumentException("Unsupported routine type: $routineType")
+            }
+        }
+        conn.createStatement().use { stmt -> stmt.execute(sql) }
+        true
     }
 
     /**
-     * 调用函数/存储过程（MySQL 暂未实现）
+     * 调用函数或存储过程 — 使用参数化绑定防止注入。
+     *
+     * 函数：SELECT name(?, ?, ...)
+     * 过程：CALL schema.name(?, ?, ...)
      */
     override suspend fun callRoutine(
         conn: Connection,
@@ -353,30 +581,227 @@ class MySQLDialect : DatabaseDialect {
         routineType: String,
         schema: String,
         args: List<String?>
-    ): Map<String, Any?> {
-        throw UnsupportedOperationException("MySQL 函数/存储过程管理暂未实现")
+    ): Map<String, Any?> = withContext(Dispatchers.IO) {
+        val safeName = sanitizeIdentifier(routineName, "routine name")
+        val safeDb = sanitizeIdentifier(schema.ifBlank { conn.catalog ?: "" }, "database name")
+        val isProcedure = routineType.equals("PROCEDURE", ignoreCase = true)
+
+        val result = mutableMapOf<String, Any?>()
+        val placeholders = args.joinToString(", ") { "?" }
+        val qualifiedName = "${quoteIdentifier(safeDb)}.${quoteIdentifier(safeName)}"
+        val sql = if (isProcedure) {
+            "CALL $qualifiedName($placeholders)"
+        } else {
+            "SELECT $qualifiedName($placeholders) AS result"
+        }
+
+        if (isProcedure) {
+            conn.prepareCall(sql).use { callable ->
+                bindArgs(callable, args)
+                val hasResultSet = callable.execute()
+                if (hasResultSet) {
+                    val rs = callable.resultSet
+                    val rows = mutableListOf<Map<String, Any?>>()
+                    val metaData = rs.metaData
+                    val columnCount = metaData.columnCount
+                    while (rs.next()) {
+                        val row = mutableMapOf<String, Any?>()
+                        for (col in 1..columnCount) row[metaData.getColumnLabel(col)] = rs.getObject(col)
+                        rows.add(row)
+                    }
+                    result["result_set"] = rows
+                    result["row_count"] = rows.size
+                }
+                val updateCount = callable.updateCount
+                if (updateCount >= 0) result["update_count"] = updateCount
+            }
+        } else {
+            conn.prepareStatement(sql).use { stmt ->
+                bindArgs(stmt, args)
+                stmt.executeQuery().use { rs ->
+                    if (rs.next()) {
+                        val metaData = rs.metaData
+                        val columnCount = metaData.columnCount
+                        if (columnCount == 1) {
+                            result["result"] = rs.getObject(1)
+                        } else {
+                            val row = mutableMapOf<String, Any?>()
+                            for (col in 1..columnCount) row[metaData.getColumnLabel(col)] = rs.getObject(col)
+                            result["result"] = row
+                        }
+                        result["row_count"] = 1
+                    }
+                }
+            }
+        }
+
+        result["routine_type"] = upperType(routineType)
+        result["schema"] = safeDb
+        result
+    }
+
+    private fun bindArgs(stmt: java.sql.PreparedStatement, args: List<String?>) {
+        for ((i, v) in args.withIndex()) {
+            if (v == null) stmt.setNull(i + 1, java.sql.Types.NULL)
+            else stmt.setString(i + 1, v)
+        }
     }
 
     /**
-     * 获取函数/存储过程详细信息（MySQL 暂未实现）
+     * 获取函数/存储过程/触发器的详细信息（后端自动解析 routineType）。
      */
-    override suspend fun getRoutineInfo(conn: Connection, routineName: String, schema: String): Map<String, String> {
-        throw UnsupportedOperationException("MySQL 函数/存储过程管理暂未实现")
+    override suspend fun getRoutineInfo(conn: Connection, routineName: String, schema: String): Map<String, String> = withContext(Dispatchers.IO) {
+        val safeName = sanitizeIdentifier(routineName, "routine name")
+        val safeDb = sanitizeIdentifier(schema.ifBlank { conn.catalog ?: "" }, "database name")
+
+        // 1. 查 ROUTINES（函数/过程）
+        conn.prepareStatement("""
+            SELECT ROUTINE_NAME, ROUTINE_TYPE, DATA_TYPE, REMARKS,
+                   SQL_DATA_ACCESS, IS_DETERMINISTIC, SECURITY_TYPE, CREATED, LAST_ALTERED
+            FROM INFORMATION_SCHEMA.ROUTINES
+            WHERE ROUTINE_SCHEMA = ? AND ROUTINE_NAME = ?
+        """.trimIndent()).use { stmt ->
+            stmt.setString(1, safeDb)
+            stmt.setString(2, safeName)
+            stmt.executeQuery().use { rs ->
+                if (rs.next()) {
+                    val sqlDataAccess = rs.getString("SQL_DATA_ACCESS") ?: ""
+                    val deterministic = rs.getString("IS_DETERMINISTIC") ?: "NO"
+                    return@withContext mapOf(
+                        "name" to (rs.getString("ROUTINE_NAME") ?: safeName),
+                        "routine_type" to (rs.getString("ROUTINE_TYPE") ?: "FUNCTION"),
+                        "schema" to safeDb,
+                        "language" to "SQL",
+                        "return_type" to (rs.getString("DATA_TYPE") ?: ""),
+                        "volatility" to if (deterministic.equals("YES", ignoreCase = true)) "DETERMINISTIC"
+                                        else if (sqlDataAccess.equals("NO SQL", ignoreCase = true)) "NO SQL"
+                                        else "VOLATILE",
+                        "security_definer" to (rs.getString("SECURITY_TYPE") ?: "DEFINER"),
+                        "arg_count" to countParameters(conn, safeDb, safeName),
+                        "arg_names" to listParameterNames(conn, safeDb, safeName),
+                        "description" to (rs.getString("REMARKS") ?: ""),
+                        "trigger_table" to "",
+                        "created" to (rs.getTimestamp("CREATED")?.toString() ?: ""),
+                        "last_altered" to (rs.getTimestamp("LAST_ALTERED")?.toString() ?: "")
+                    )
+                }
+            }
+        }
+
+        // 2. 查 TRIGGERS
+        conn.prepareStatement("""
+            SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, REMARKS, ACTION_TIMING, EVENT_MANIPULATION
+            FROM INFORMATION_SCHEMA.TRIGGERS
+            WHERE TRIGGER_SCHEMA = ? AND TRIGGER_NAME = ?
+        """.trimIndent()).use { stmt ->
+            stmt.setString(1, safeDb)
+            stmt.setString(2, safeName)
+            stmt.executeQuery().use { rs ->
+                if (rs.next()) {
+                    return@withContext mapOf(
+                        "name" to (rs.getString("TRIGGER_NAME") ?: safeName),
+                        "routine_type" to "TRIGGER",
+                        "schema" to safeDb,
+                        "language" to "SQL",
+                        "return_type" to "${rs.getString("ACTION_TIMING") ?: ""} ${rs.getString("EVENT_MANIPULATION") ?: ""}".trim(),
+                        "volatility" to "VOLATILE",
+                        "security_definer" to "DEFINER",
+                        "arg_count" to "0",
+                        "arg_names" to "",
+                        "description" to (rs.getString("REMARKS") ?: ""),
+                        "trigger_table" to (rs.getString("EVENT_OBJECT_TABLE") ?: "")
+                    )
+                }
+            }
+        }
+
+        throw IllegalArgumentException("未找到函数/存储过程/触发器 '$routineName'，database: '$safeDb'")
     }
 
     /**
-     * 调试函数（MySQL 暂未实现）
+     * 调试函数（SHOW CREATE + 参数列表 + 依赖关系）。
      */
-    override suspend fun debugRoutine(conn: Connection, routineName: String, schema: String): List<Map<String, String>> {
-        throw UnsupportedOperationException("MySQL 函数/存储过程管理暂未实现")
+    override suspend fun debugRoutine(conn: Connection, routineName: String, schema: String): List<Map<String, String>> = withContext(Dispatchers.IO) {
+        val safeName = sanitizeIdentifier(routineName, "routine name")
+        val safeDb = sanitizeIdentifier(schema.ifBlank { conn.catalog ?: "" }, "database name")
+        val results = mutableListOf<Map<String, String>>()
+
+        // 1. DDL (SHOW CREATE)
+        try {
+            val ddl = getRoutineDDL(conn, safeName, safeDb)
+            results.add(mapOf("type" to "DDL", "output" to ddl))
+        } catch (e: Exception) {
+            results.add(mapOf("type" to "DDL", "output" to "(DDL 不可用: ${e.message})"))
+        }
+
+        // 2. INFO
+        try {
+            val info = getRoutineInfo(conn, safeName, safeDb)
+            results.add(mapOf(
+                "type" to "INFO",
+                "output" to buildString {
+                    appendLine("Name: ${info["name"]}")
+                    appendLine("Database: ${info["schema"]}")
+                    appendLine("Type: ${info["routine_type"]}")
+                    appendLine("Language: ${info["language"]}")
+                    appendLine("Return: ${info["return_type"]}")
+                    appendLine("Determinism: ${info["volatility"]}")
+                    appendLine("Security: ${info["security_definer"]}")
+                    appendLine("Parameters: ${info["arg_names"]}")
+                    appendLine("Description: ${info["description"]}")
+                }
+            ))
+        } catch (e: Exception) {
+            results.add(mapOf("type" to "INFO", "output" to "(INFO 不可用: ${e.message})"))
+        }
+
+        // 3. EXPLAIN（MySQL 函数不支持 EXPLAIN — 给出说明）
+        results.add(mapOf("type" to "EXPLAIN", "output" to "MySQL 不支持函数级别的 EXPLAIN — 请使用 SHOW CREATE 或检查调用方 SQL"))
+
+        results
     }
 
     /**
-     * 验证 DDL 语法（MySQL 暂未实现）
+     * 验证 DDL 语法 — 解析后尝试用临时隔离名执行并立即回滚（MySQL DDL 隐式提交，
+     * 因此无法回滚；改用解析对象名后用临时别名创建并立即 DROP）。
      */
-    override suspend fun validateRoutineDDL(conn: Connection, ddl: String): Boolean {
-        throw UnsupportedOperationException("MySQL 函数/存储过程管理暂未实现")
+    override suspend fun validateRoutineDDL(conn: Connection, ddl: String): Boolean = withContext(Dispatchers.IO) {
+        // 拒绝多语句注入：只允许一条 CREATE 类型的 DDL
+        val trimmed = ddl.trim().trimEnd(';')
+        if (trimmed.contains(';')) throw IllegalArgumentException("DDL 不允许包含多条语句（分号）")
+
+        // 解析 DDL 类型 + 名称（schema.name）
+        val match = Regex("""(?i)CREATE\s+(?:OR\s+REPLACE\s+)?(FUNCTION|PROCEDURE|TRIGGER)\s+(?:`?(\w+)`?\.)?`?(\w+)`?""").find(trimmed)
+            ?: throw IllegalArgumentException("无法从 DDL 中解析对象类型/名称")
+
+        val objType = match.groupValues[1].uppercase()
+        val objSchema = match.groupValues[2].ifBlank { conn.catalog ?: "" }
+        val objName = match.groupValues[3]
+        if (objSchema.isBlank()) throw IllegalArgumentException("无法定位对象所属 database")
+
+        val qualifiedName = "${quoteIdentifier(objSchema)}.${quoteIdentifier(objName)}"
+        // 用 SET autocommit=0 + ROLLBACK 隔离（DDL 在 MySQL 仍会隐式提交，best-effort 验证）
+        try {
+            conn.createStatement().use { stmt ->
+                stmt.execute(trimmed)
+                // 立刻清理
+                val dropSql = when (objType) {
+                    "FUNCTION" -> "DROP FUNCTION IF EXISTS $qualifiedName"
+                    "PROCEDURE" -> "DROP PROCEDURE IF EXISTS $qualifiedName"
+                    "TRIGGER" -> "DROP TRIGGER IF EXISTS $qualifiedName"
+                    else -> ""
+                }
+                if (dropSql.isNotEmpty()) {
+                    try { stmt.execute(dropSql) } catch (_: Exception) { /* 忽略清理失败 */ }
+                }
+            }
+            true
+        } catch (e: Exception) {
+            throw IllegalArgumentException("DDL 语法验证失败: ${e.message}")
+        }
     }
+
+    private fun upperType(s: String): String = s.uppercase()
 
     // endregion
 

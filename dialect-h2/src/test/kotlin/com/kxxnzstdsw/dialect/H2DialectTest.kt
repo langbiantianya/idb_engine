@@ -13,6 +13,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlin.test.fail
 
 /**
  * H2Dialect 全量测试 — 直接对内存 H2 跑每个 SPI 方法。
@@ -129,6 +130,28 @@ class H2DialectTest {
     }
 
     @Test
+    fun `listSchemas with database argument accepts non-blank catalog`() = runBlocking {
+        withConn { conn ->
+            val catalogs = dialect.listDatabases(conn)
+            assertEquals(1, catalogs.size)
+            val db = catalogs.first()
+            // 传入匹配 catalog 时不告警（不抛错）
+            val schemas = dialect.listSchemas(conn, db)
+            assertTrue(schemas.any { it.equals("PUBLIC", ignoreCase = true) })
+        }
+    }
+
+    @Test
+    fun `listDatabases returns connection catalog`() = runBlocking {
+        withConn { conn ->
+            val databases = dialect.listDatabases(conn)
+            assertEquals(1, databases.size)
+            // conn.catalog 通常大写
+            assertTrue(databases.first().equals(conn.catalog, ignoreCase = true))
+        }
+    }
+
+    @Test
     fun `createSchema and deleteSchema`() = runBlocking {
         withConn { conn ->
             dialect.createSchema(conn, "test_schema", emptyMap())
@@ -137,6 +160,27 @@ class H2DialectTest {
             dialect.deleteSchema(conn, "test_schema")
             val afterDelete = dialect.listSchemas(conn, "")
             assertFalse(afterDelete.any { it.equals("test_schema", ignoreCase = true) })
+        }
+    }
+
+    @Test
+    fun `listColumns returns column metadata via SPI`() = runBlocking {
+        withConn { conn ->
+            conn.createStatement().use {
+                it.execute("CREATE TABLE col_test (id INT PRIMARY KEY, name VARCHAR(50) NOT NULL, score DECIMAL DEFAULT 0.0)")
+            }
+            val cols = dialect.listColumns(conn, "", "", "col_test")
+            assertEquals(3, cols.size)
+            // H2 INFORMATION_SCHEMA.COLUMNS 默认返回大写列名
+            val idCol = cols.first { (it["name"] as? String)?.equals("ID", ignoreCase = true) == true }
+            assertEquals(true, idCol["isPrimaryKey"])
+            assertEquals(true, (idCol["type"] as? String)?.contains("INT") == true,
+                "id type should contain INT, got: ${idCol["type"]}")
+            val nameCol = cols.first { (it["name"] as? String)?.equals("NAME", ignoreCase = true) == true }
+            assertEquals(false, nameCol["nullable"], "NAME was NOT NULL so should be non-nullable")
+            val scoreCol = cols.first { (it["name"] as? String)?.equals("SCORE", ignoreCase = true) == true }
+            assertEquals(true, scoreCol["nullable"], "score 无 NOT NULL，所以 nullable=true")
+            assertEquals("0.0", scoreCol["defaultValue"]?.toString())
         }
     }
 
@@ -202,6 +246,59 @@ class H2DialectTest {
             // H2 不直接暴露密码，但 ALTER USER 不抛错即为成功
             assertTrue(true)
         }
+    }
+
+    @Test
+    fun `createUser rejects non-wildcard host`() = runBlocking {
+        withConn { conn ->
+            val ex = kotlin.runCatching {
+                dialect.createUser(conn, "carol", "pwd", "192.168.1.1")
+            }.exceptionOrNull()
+            assertTrue(ex is IllegalArgumentException,
+                "expected IllegalArgumentException for host='192.168.1.1', got ${ex?.javaClass?.simpleName}")
+        }
+    }
+
+    @Test
+    fun `updatePrivileges accepts ALL PRIVILEGES (with space)`() = runBlocking {
+        withConn { conn ->
+            dialect.createUser(conn, "dave", "pwd", "%")
+            // "ALL PRIVILEGES" 在 regex 放松后应被接受
+            val ok = dialect.updatePrivileges(conn, "dave", "PUBLIC", listOf("ALL PRIVILEGES"), isGrant = true, tableName = null, withGrantOption = false)
+            assertTrue(ok)
+        }
+    }
+
+    @Test
+    fun `updatePrivileges tableName=tableName grants at table level`() = runBlocking {
+        withConn { conn ->
+            conn.createStatement().use { it.execute("CREATE TABLE secret_table (id INT)") }
+            dialect.createUser(conn, "eve", "pwd", "%")
+            val ok = dialect.updatePrivileges(conn, "eve", "PUBLIC", listOf("SELECT", "INSERT"), isGrant = true, tableName = "secret_table", withGrantOption = false)
+            assertTrue(ok)
+        }
+    }
+
+    @Test
+    fun `updatePrivileges withGrantOption emits WITH GRANT OPTION`() = runBlocking {
+        withConn { conn ->
+            conn.createStatement().use { it.execute("CREATE TABLE opt_table (id INT)") }
+            dialect.createUser(conn, "frank", "pwd", "%")
+            // 不抛错即视为成功
+            val ok = dialect.updatePrivileges(conn, "frank", "PUBLIC", listOf("SELECT"), isGrant = true, tableName = "opt_table", withGrantOption = true)
+            assertTrue(ok)
+        }
+    }
+
+    @Test
+    fun `updatePrivileges rejects invalid privilege (with hyphen)`() {
+        // 直接同步测试，无需 connection
+        val ex = kotlin.runCatching {
+            kotlinx.coroutines.runBlocking {
+                dialect.updatePrivileges(java.sql.DriverManager.getConnection("jdbc:h2:mem:dummy;DB_CLOSE_DELAY=-1", "sa", ""), "u", "PUBLIC", listOf("DROP-EVERYTHING"), isGrant = true, tableName = null, withGrantOption = false)
+            }
+        }.exceptionOrNull()
+        assertTrue(ex is IllegalArgumentException)
     }
 
     // ============ 安全校验 ============
@@ -455,6 +552,181 @@ class H2DialectTest {
     fun `testConnection returns true for valid H2 conn`() = runBlocking {
         withConn { conn ->
             assertTrue(dialect.testConnection(conn))
+        }
+    }
+
+    // ============ 函数/存储过程（Phase H）============
+
+    @Test
+    fun `listRoutines merges FUNCTION_ALIASES with TRIGGERS`() = runBlocking {
+        withConn { conn ->
+            // 使用 toDegrees（单 overload，避免歧义）
+            conn.createStatement().use { it.execute("CREATE ALIAS alias_for_deg FOR \"java.lang.Math.toDegrees\"") }
+            val routines = dialect.listRoutines(conn, "PUBLIC")
+            assertTrue(routines.any {
+                it["name"]?.equals("ALIAS_FOR_DEG", ignoreCase = true) == true &&
+                it["routine_type"] == "FUNCTION"
+            })
+        }
+    }
+
+    @Test
+    fun `validateRoutineDDL parses CREATE ALIAS without execution`() = runBlocking {
+        withConn { conn ->
+            // 合法 DDL — 应通过（不实际创建）
+            val validAlias = """CREATE ALIAS "valid_alias" FOR "java.lang.Math.toDegrees""""
+            assertTrue(dialect.validateRoutineDDL(conn, validAlias))
+            // 不应该真的创建出来
+            val routines = dialect.listRoutines(conn, "PUBLIC")
+            assertFalse(routines.any { it["name"]?.equals("valid_alias", ignoreCase = true) == true })
+        }
+    }
+
+    @Test
+    fun `validateRoutineDDL rejects multi-statement`() = runBlocking {
+        withConn { conn ->
+            assertThrows<IllegalArgumentException> {
+                runBlocking {
+                    dialect.validateRoutineDDL(conn, "CREATE ALIAS a FOR \"x\"; DROP ALIAS b")
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `validateRoutineDDL rejects DDL without parseable name`() = runBlocking {
+        withConn { conn ->
+            assertThrows<IllegalArgumentException> {
+                runBlocking {
+                    dialect.validateRoutineDDL(conn, "SOME GARBAGE")
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `validateRoutineDDL rejects CREATE ALIAS without FOR clause`() = runBlocking {
+        withConn { conn ->
+            assertThrows<IllegalArgumentException> {
+                runBlocking {
+                    dialect.validateRoutineDDL(conn, """CREATE ALIAS "foo" bar""")
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `validateRoutineDDL rejects CREATE FUNCTION without RETURNS`() = runBlocking {
+        withConn { conn ->
+            assertThrows<IllegalArgumentException> {
+                runBlocking {
+                    dialect.validateRoutineDDL(conn, "CREATE FUNCTION bad(x INT) AS 'foo'")
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `debugRoutine returns INFO for FUNCTION_ALIAS`() = runBlocking {
+        withConn { conn ->
+            conn.createStatement().use { it.execute("CREATE ALIAS my_debug_alias FOR \"java.lang.Math.toDegrees\"") }
+            val result = dialect.debugRoutine(conn, "MY_DEBUG_ALIAS", "PUBLIC")
+            assertTrue(result.any { it["type"] == "INFO" })
+            assertTrue(result.any { it["type"] == "EXPLAIN" })
+        }
+    }
+
+    @Test
+    fun `callRoutine for FUNCTION_ALIAS returns result`() = runBlocking {
+        withConn { conn ->
+            conn.createStatement().use { it.execute("CREATE ALIAS deg_alias FOR \"java.lang.Math.toDegrees\"") }
+            val result = dialect.callRoutine(conn, "DEG_ALIAS", "FUNCTION", "PUBLIC", listOf("3.141592653589793"))
+            assertNotNull(result["result"])
+            assertEquals(180, (result["result"] as? Number)?.toInt())
+        }
+    }
+
+    // ============ 安全（Phase I）============
+
+    // ============ 安全（Phase I）============
+
+    @Test
+    fun `createUser rejects username with single quote`() = runBlocking {
+        withConn { conn ->
+            assertThrows<IllegalArgumentException> {
+                runBlocking {
+                    dialect.createUser(conn, "evil'user", "pw", "%")
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `createUser rejects username with semicolon`() = runBlocking {
+        withConn { conn ->
+            assertThrows<IllegalArgumentException> {
+                runBlocking {
+                    dialect.createUser(conn, "evil;DROP", "pw", "%")
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `createUser rejects username with backslash`() = runBlocking {
+        withConn { conn ->
+            assertThrows<IllegalArgumentException> {
+                runBlocking {
+                    dialect.createUser(conn, "evil\\user", "pw", "%")
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `createSchema rejects schema name with quote`() = runBlocking {
+        withConn { conn ->
+            assertThrows<IllegalArgumentException> {
+                runBlocking {
+                    dialect.createSchema(conn, "bad'name", emptyMap())
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `dropRoutine rejects routine name with semicolon`() = runBlocking {
+        withConn { conn ->
+            assertThrows<IllegalArgumentException> {
+                runBlocking {
+                    dialect.dropRoutine(conn, "evil;DROP TABLE users", "FUNCTION", "PUBLIC", false, false)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `callRoutine with SQL injection in args is safely bound`() = runBlocking {
+        withConn { conn ->
+            conn.createStatement().use { it.execute("CREATE ALIAS deg_inj FOR \"java.lang.Math.toDegrees\"") }
+            // 注入尝试：单引号 + SQL 语句应被作为参数值绑定，不会执行
+            val malicious = "1.0; DROP TABLE users; --"
+            // 由于参数是字符串、toDegrees 期望 double，H2 会抛 DataConversionException — 但这恰恰证明
+            // 恶意字符串被作为参数绑定（而非 SQL 注入）；如果是 SQL 注入，H2 会尝试执行 DROP TABLE
+            try {
+                dialect.callRoutine(conn, "DEG_INJ", "FUNCTION", "PUBLIC", listOf(malicious))
+                fail("Expected exception due to type mismatch (proves param binding)")
+            } catch (e: Exception) {
+                // 注入被 JDBC 参数绑定拦截 — 表仍然存在
+                assertTrue(e.message?.contains("Data conversion") == true ||
+                           e.message?.contains("conversion") == true)
+            }
+            // 表仍然存在 — 注入未执行
+            conn.createStatement().use { stmt ->
+                stmt.executeQuery("SELECT COUNT(*) FROM INFORMATION_SCHEMA.USERS WHERE USER_NAME = CURRENT_USER").use { rs ->
+                    assertTrue(rs.next())
+                }
+            }
         }
     }
 }

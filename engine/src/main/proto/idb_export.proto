@@ -1,0 +1,42 @@
+// IDB Engine — 导出子进程 RPC
+// 设计：主进程在端口 P0 上托管 IdbEngine 服务；同进程同时托管一个 ExportHub gRPC 服务（端口 P1）。
+// 导出子进程以 gRPC client 形式连接到 ExportHub，发送 ExportCommand 流，接收流式 ExportResponse。
+// 与历史 stdin/stdout 管道不同：现在统一走 gRPC/HTTP2，子进程可同时复用同一 channel 处理多个导出。
+
+syntax = "proto3";
+
+option java_package = "com.kxxnzstdsw.grpc";
+option java_multiple_files = true;
+
+import "google/protobuf/struct.proto";
+import "idb_engine.proto";
+
+// 子进程命令 — 由主进程 → 子进程
+message ExportCommand {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    START_EXPORT = 1;     // 启动一个新的导出任务（payload 含 sql/format/outputDir/fileName/fetchSize/stopExportId）
+    STOP_EXPORT  = 2;     // 取消正在进行的导出（export_id 标识）
+    SHUTDOWN     = 3;     // 子进程优雅退出
+  }
+  Kind kind = 1;
+  string id = 2;          // 业务请求 ID（与上层 IdbEngine Request.id 一致）
+  ConnectionConfig connection = 3;
+  map<string, google.protobuf.Value> payload = 4;
+  string export_id = 5;   // 导出任务的稳定 ID（与 START_EXPORT 时分配的 ID 相同，用于 STOP_EXPORT）
+}
+
+// 子进程响应 — 由子进程 → 主进程（与 IdbEngine 响应体同构，方便主进程直接转发给原始调用方）
+message ExportResponse {
+  string id = 1;          // 业务请求 ID（与 ExportCommand.id 对应）
+  bool   success = 2;
+  string error   = 3;
+  bool   stream  = 4;
+  bool   end     = 5;
+  google.protobuf.Value data = 6;
+}
+
+// 导出服务 — 双向流：主进程可并发推送多个 START_EXPORT，子进程返回流式进度
+service ExportHub {
+  rpc Stream(stream ExportCommand) returns (stream ExportResponse);
+}

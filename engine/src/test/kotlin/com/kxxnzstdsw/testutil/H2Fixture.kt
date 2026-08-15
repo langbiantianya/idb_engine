@@ -2,7 +2,7 @@ package com.kxxnzstdsw.testutil
 
 import com.kxxnzstdsw.dialect.H2Dialect
 import com.kxxnzstdsw.loader.DialectLoader
-import com.kxxnzstdsw.models.ConnectionConfig
+import com.kxxnzstdsw.grpc.ConnectionConfig
 import com.kxxnzstdsw.pool.PoolManager
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
@@ -37,14 +37,14 @@ abstract class H2Fixture {
 
     protected val dialect = H2Dialect()
     protected val dbName: String = "test_${UUID.randomUUID().toString().replace("-", "")}"
-    protected val config: ConnectionConfig = ConnectionConfig(
-        driver = "H2",
-        host = "mem",
-        port = 0,
-        user = "sa",
-        password = "",
-        database = dbName
-    )
+    protected val config: ConnectionConfig = ConnectionConfig.newBuilder()
+        .setDriver("H2")
+        .setHost("mem")
+        .setPort(0)
+        .setUser("sa")
+        .setPassword("")
+        .setDatabase(dbName)
+        .build()
 
     /** JDBC URL for direct connections */
     protected val jdbcUrl: String = dialect.buildJdbcUrl(config.host, config.port, config.database)

@@ -65,29 +65,46 @@ class PostgreSQLDialect : DatabaseDialect {
 
     // region Schema / Table / User 管理
 
+    override suspend fun listDatabases(conn: Connection): List<String> = withContext(Dispatchers.IO) {
+        val databases = mutableListOf<String>()
+        conn.createStatement().use { stmt ->
+            stmt.executeQuery(
+                "SELECT datname FROM pg_catalog.pg_database " +
+                "WHERE datistemplate = false ORDER BY datname"
+            ).use { rs ->
+                while (rs.next()) {
+                    databases.add(rs.getString(1))
+                }
+            }
+        }
+        databases
+    }
+
     override suspend fun listSchemas(conn: Connection, database: String): List<String> = withContext(Dispatchers.IO) {
+        // PG 导航第二级：必须传 database（assert 它 == 连接 database）
+        if (database.isBlank()) {
+            throw IllegalArgumentException(
+                "PostgreSQL 列出 schema 必须先指定 database — 调用 listDatabases 选定 database 后再调用 listSchemas"
+            )
+        }
+        // 防御性 assert：database 名应当与连接的数据库匹配（防止用户传错）
+        val currentDb = conn.catalog ?: ""
+        if (currentDb.isNotEmpty() && !currentDb.equals(database, ignoreCase = true)) {
+            // 不抛错而是警告 — PG 跨库查询 schema 名空间无意义，但仍可能工作
+            logger.warn(
+                "listSchemas called with database='$database' but connection catalog is '$currentDb' — " +
+                "结果可能与预期不符"
+            )
+        }
         val schemas = mutableListOf<String>()
         conn.createStatement().use { stmt ->
-            if (database.isBlank()) {
-                // 未指定数据库 → 返回所有数据库列表
-                stmt.executeQuery(
-                    "SELECT datname FROM pg_catalog.pg_database " +
-                    "WHERE datistemplate = false ORDER BY datname"
-                ).use { rs ->
-                    while (rs.next()) {
-                        schemas.add(rs.getString(1))
-                    }
-                }
-            } else {
-                // 指定了数据库 → 返回该库下的所有 schema（排除系统 schema）
-                stmt.executeQuery(
-                    "SELECT nspname FROM pg_catalog.pg_namespace " +
-                    "WHERE nspname NOT LIKE 'pg_%' AND nspname != 'information_schema' " +
-                    "ORDER BY nspname"
-                ).use { rs ->
-                    while (rs.next()) {
-                        schemas.add(rs.getString(1))
-                    }
+            stmt.executeQuery(
+                "SELECT nspname FROM pg_catalog.pg_namespace " +
+                "WHERE nspname NOT LIKE 'pg_%' AND nspname != 'information_schema' " +
+                "ORDER BY nspname"
+            ).use { rs ->
+                while (rs.next()) {
+                    schemas.add(rs.getString(1))
                 }
             }
         }
@@ -158,14 +175,16 @@ class PostgreSQLDialect : DatabaseDialect {
         user: String,
         schema: String,
         privileges: List<String>,
-        isGrant: Boolean
+        isGrant: Boolean,
+        tableName: String?,
+        withGrantOption: Boolean
     ): Boolean = withContext(Dispatchers.IO) {
         val safeUser = sanitizeIdentifier(user, "user name")
         val safeSchema = sanitizeIdentifier(schema, "schema name")
         val safePrivs = privileges.map { priv ->
             val p = priv.trim()
-            if (!p.matches(Regex("^[A-Z_]+$", RegexOption.IGNORE_CASE))) {
-                throw IllegalArgumentException("Invalid privilege name: $p")
+            if (!p.matches(Regex("^[A-Z_ ]+$", RegexOption.IGNORE_CASE))) {
+                throw IllegalArgumentException("Invalid privilege name: $p — 仅允许字母/空格/下划线")
             }
             p.uppercase()
         }
@@ -174,33 +193,60 @@ class PostgreSQLDialect : DatabaseDialect {
         val schemaLevel = setOf("CREATE", "USAGE")
         val schemaPrivs = safePrivs.filter { it in schemaLevel }
         val tablePrivs = safePrivs.filter { it !in schemaLevel }
+        val grantOption = if (withGrantOption) " WITH GRANT OPTION" else ""
 
         conn.createStatement().use { stmt ->
             // Schema 级权限：GRANT ... ON SCHEMA
             if (schemaPrivs.isNotEmpty()) {
                 val privList = schemaPrivs.joinToString(", ")
                 val sql = if (isGrant) {
-                    "GRANT $privList ON SCHEMA ${quoteIdentifier(safeSchema)} TO ${quoteIdentifier(safeUser)}"
+                    "GRANT $privList ON SCHEMA ${quoteIdentifier(safeSchema)} TO ${quoteIdentifier(safeUser)}$grantOption"
                 } else {
                     "REVOKE $privList ON SCHEMA ${quoteIdentifier(safeSchema)} FROM ${quoteIdentifier(safeUser)}"
                 }
                 stmt.execute(sql)
             }
-            // 表级权限：GRANT ... ON ALL TABLES IN SCHEMA
+            // 表级权限：若指定 tableName → ON TABLE，否则 ON ALL TABLES IN SCHEMA
             if (tablePrivs.isNotEmpty()) {
                 val privList = tablePrivs.joinToString(", ")
                 val sql = if (isGrant) {
-                    "GRANT $privList ON ALL TABLES IN SCHEMA ${quoteIdentifier(safeSchema)} TO ${quoteIdentifier(safeUser)}"
+                    if (tableName.isNullOrBlank()) {
+                        "GRANT $privList ON ALL TABLES IN SCHEMA ${quoteIdentifier(safeSchema)} TO ${quoteIdentifier(safeUser)}$grantOption"
+                    } else {
+                        "GRANT $privList ON TABLE ${quoteIdentifier(safeSchema)}.${quoteIdentifier(sanitizeIdentifier(tableName, "table name"))} TO ${quoteIdentifier(safeUser)}$grantOption"
+                    }
                 } else {
-                    "REVOKE $privList ON ALL TABLES IN SCHEMA ${quoteIdentifier(safeSchema)} FROM ${quoteIdentifier(safeUser)}"
+                    if (tableName.isNullOrBlank()) {
+                        "REVOKE $privList ON ALL TABLES IN SCHEMA ${quoteIdentifier(safeSchema)} FROM ${quoteIdentifier(safeUser)}"
+                    } else {
+                        "REVOKE $privList ON TABLE ${quoteIdentifier(safeSchema)}.${quoteIdentifier(sanitizeIdentifier(tableName, "table name"))} FROM ${quoteIdentifier(safeUser)}"
+                    }
                 }
                 stmt.execute(sql)
+            }
+            // ALTER DEFAULT PRIVILEGES — 仅 schema 内默认权限，授予未来新建表/视图
+            if (isGrant && tableName.isNullOrBlank() && tablePrivs.isNotEmpty()) {
+                val privList = tablePrivs.joinToString(", ")
+                try {
+                    stmt.execute(
+                        "ALTER DEFAULT PRIVILEGES IN SCHEMA ${quoteIdentifier(safeSchema)} " +
+                        "GRANT $privList ON TABLES TO ${quoteIdentifier(safeUser)}$grantOption"
+                    )
+                } catch (e: Exception) {
+                    logger.warn("ALTER DEFAULT PRIVILEGES 失败（非特权用户）：${e.message}")
+                }
             }
         }
         true
     }
 
     override suspend fun createUser(conn: Connection, user: String, password: String, host: String): Boolean = withContext(Dispatchers.IO) {
+        // PG/H2 没有 host 概念 — host 参数必须为 "%" 或空（表示默认）
+        if (host.isNotBlank() && host != "%") {
+            throw IllegalArgumentException(
+                "PostgreSQL 不支持 host 参数（必须为空或 '%'，表示不限定 host）"
+            )
+        }
         val safeUser = sanitizeIdentifier(user, "user name")
         val escapedPwd = password.replace("'", "''")
         conn.createStatement().use { stmt ->
@@ -210,6 +256,9 @@ class PostgreSQLDialect : DatabaseDialect {
     }
 
     override suspend fun deleteUser(conn: Connection, user: String, host: String): Boolean = withContext(Dispatchers.IO) {
+        if (host.isNotBlank() && host != "%") {
+            throw IllegalArgumentException("PostgreSQL 不支持 host 参数")
+        }
         val safeUser = sanitizeIdentifier(user, "user name")
         conn.createStatement().use { stmt ->
             stmt.execute("DROP USER ${quoteIdentifier(safeUser)}")
@@ -218,6 +267,9 @@ class PostgreSQLDialect : DatabaseDialect {
     }
 
     override suspend fun updatePassword(conn: Connection, user: String, password: String, host: String): Boolean = withContext(Dispatchers.IO) {
+        if (host.isNotBlank() && host != "%") {
+            throw IllegalArgumentException("PostgreSQL 不支持 host 参数")
+        }
         val safeUser = sanitizeIdentifier(user, "user name")
         val escapedPwd = password.replace("'", "''")
         conn.createStatement().use { stmt ->
@@ -227,6 +279,9 @@ class PostgreSQLDialect : DatabaseDialect {
     }
 
     override suspend fun listPrivileges(conn: Connection, user: String, host: String): List<Map<String, String>> = withContext(Dispatchers.IO) {
+        if (host.isNotBlank() && host != "%") {
+            throw IllegalArgumentException("PostgreSQL 不支持 host 参数")
+        }
         val safeUser = sanitizeIdentifier(user, "user name")
         val privileges = mutableListOf<Map<String, String>>()
         conn.prepareStatement(
@@ -249,21 +304,33 @@ class PostgreSQLDialect : DatabaseDialect {
     }
 
     override suspend fun listAllGrants(conn: Connection, user: String, host: String): List<Map<String, String>> = withContext(Dispatchers.IO) {
+        if (host.isNotBlank() && host != "%") {
+            throw IllegalArgumentException("PostgreSQL 不支持 host 参数")
+        }
         val safeUser = sanitizeIdentifier(user, "user name")
         val grants = mutableListOf<Map<String, String>>()
+        // UNION table_privileges + routine_privileges（PG 函数/存储过程 EXECUTE）
         conn.prepareStatement(
-            "SELECT table_schema, table_name, string_agg(privilege_type, ', ' ORDER BY privilege_type) AS privileges " +
-            "FROM information_schema.table_privileges " +
-            "WHERE grantee = ? " +
-            "GROUP BY table_schema, table_name " +
-            "ORDER BY table_schema, table_name"
+            """SELECT table_schema AS schema, table_name AS objname, 'TABLE' AS objtype,
+                      string_agg(privilege_type, ', ' ORDER BY privilege_type) AS privileges
+               FROM information_schema.table_privileges
+               WHERE grantee = ?
+               GROUP BY table_schema, table_name
+               UNION ALL
+               SELECT routine_schema, routine_name, 'ROUTINE', string_agg(privilege_type, ', ' ORDER BY privilege_type)
+               FROM information_schema.routine_privileges
+               WHERE grantee = ?
+               GROUP BY routine_schema, routine_name
+               ORDER BY schema, objname"""
         ).use { stmt ->
             stmt.setString(1, safeUser)
+            stmt.setString(2, safeUser)
             stmt.executeQuery().use { rs ->
                 while (rs.next()) {
                     grants.add(mapOf(
-                        "schema" to rs.getString("table_schema"),
-                        "table" to rs.getString("table_name"),
+                        "schema" to rs.getString("schema"),
+                        "table" to rs.getString("objname"),
+                        "object_type" to rs.getString("objtype"),
                         "privileges" to rs.getString("privileges")
                     ))
                 }
@@ -284,8 +351,26 @@ class PostgreSQLDialect : DatabaseDialect {
 
     private fun sanitizeIdentifier(name: String, label: String): String {
         if (name.isBlank()) throw IllegalArgumentException("$label cannot be empty")
+        // 拒绝 null 字节（0x00）— 防 SQL 截断
         if (name.contains(' ')) throw IllegalArgumentException("$label contains null byte")
+        // 拒绝单引号 — 防 SQL 注入跳出字面量
+        if (name.contains('\'')) throw IllegalArgumentException("$label contains single quote")
+        // 拒绝反斜杠 — 防转义序列注入
+        if (name.contains('\\')) throw IllegalArgumentException("$label contains backslash")
+        // 拒绝分号 — 防语句分割
+        if (name.contains(';')) throw IllegalArgumentException("$label contains semicolon")
         return name
+    }
+
+    /**
+     * 字符串字面量转义（用于 DDL 中无法参数化的位置）。
+     * 拒绝 null 字节、分号、换行；保留单引号转义为 \\\'
+     */
+    internal fun escapeSqlString(value: String, label: String): String {
+        if (value.contains(' ')) throw IllegalArgumentException("$label contains null byte")
+        if (value.contains(';')) throw IllegalArgumentException("$label contains semicolon")
+        if (value.contains('\n')) throw IllegalArgumentException("$label contains newline")
+        return value.replace("'", "''")
     }
 
     // endregion
@@ -895,7 +980,10 @@ class PostgreSQLDialect : DatabaseDialect {
     }
 
     /**
-     * 调用函数或存储过程
+     * 调用函数或存储过程 — 使用参数化绑定防止 SQL 注入。
+     *
+     * 函数：SELECT * FROM schema.name(?, ?, ...)  + setObject
+     * 过程：{ CALL schema.name(?, ?, ...) }         + setObject
      */
     override suspend fun callRoutine(
         conn: Connection,
@@ -907,29 +995,22 @@ class PostgreSQLDialect : DatabaseDialect {
         val targetSchema = if (schema.isNotBlank()) schema else "public"
         val safeRoutineName = sanitizeIdentifier(routineName, "routine name")
         val safeSchema = sanitizeIdentifier(targetSchema, "schema name")
-        val isFunction = routineType.uppercase() != "PROCEDURE"
+        val isProcedure = routineType.uppercase() == "PROCEDURE"
 
         val result = mutableMapOf<String, Any?>()
-        val actualArgs = args.filterNotNull()
+        val placeholders = args.joinToString(", ") { "?" }
+        val qualifiedName = "${quoteIdentifier(safeSchema)}.${quoteIdentifier(safeRoutineName)}"
 
-        // 对于函数，直接构造 SQL 并用 Statement 执行（避免 PreparedStatement 参数绑定问题）
-        if (isFunction) {
-            // 转义参数中的单引号
-            val escapedArgs = actualArgs.map { it.replace("'", "''") }
-            val argsStr = if (escapedArgs.isNotEmpty()) {
-                escapedArgs.joinToString(", ") { "'$it'" }
+        if (!isProcedure) {
+            // 函数 — 使用 PreparedStatement 绑定参数
+            val sql = if (args.isNotEmpty()) {
+                "SELECT * FROM $qualifiedName($placeholders)"
             } else {
-                ""
+                "SELECT * FROM $qualifiedName()"
             }
-
-            val sql = if (argsStr.isNotEmpty()) {
-                "SELECT * FROM ${quoteIdentifier(safeSchema)}.${quoteIdentifier(safeRoutineName)}($argsStr)"
-            } else {
-                "SELECT * FROM ${quoteIdentifier(safeSchema)}.${quoteIdentifier(safeRoutineName)}()"
-            }
-
-            conn.createStatement().use { stmt ->
-                stmt.executeQuery(sql).use { rs ->
+            conn.prepareStatement(sql).use { stmt ->
+                bindArgs(stmt, args)
+                stmt.executeQuery().use { rs ->
                     val metaData = rs.metaData
                     val columnCount = metaData.columnCount
                     if (rs.next()) {
@@ -937,9 +1018,7 @@ class PostgreSQLDialect : DatabaseDialect {
                             result["result"] = rs.getObject(1)
                         } else {
                             val row = mutableMapOf<String, Any?>()
-                            for (col in 1..columnCount) {
-                                row[metaData.getColumnLabel(col)] = rs.getObject(col)
-                            }
+                            for (col in 1..columnCount) row[metaData.getColumnLabel(col)] = rs.getObject(col)
                             result["result"] = row
                         }
                         result["row_count"] = 1
@@ -947,46 +1026,46 @@ class PostgreSQLDialect : DatabaseDialect {
                 }
             }
         } else {
-            // 存储过程调用
-            val escapedArgs = actualArgs.map { it.replace("'", "''") }
-            val argsStr = if (escapedArgs.isNotEmpty()) {
-                escapedArgs.joinToString(", ") { "'$it'" }
+            // 存储过程 — 使用 CallableStatement 绑定参数
+            val sql = if (args.isNotEmpty()) {
+                "{ CALL $qualifiedName($placeholders) }"
             } else {
-                ""
+                "{ CALL $qualifiedName() }"
             }
-
-            val sql = if (argsStr.isNotEmpty()) {
-                "{ CALL ${quoteIdentifier(safeSchema)}.${quoteIdentifier(safeRoutineName)}($argsStr) }"
-            } else {
-                "{ CALL ${quoteIdentifier(safeSchema)}.${quoteIdentifier(safeRoutineName)}() }"
-            }
-
-            conn.prepareCall(sql).use { callableStmt ->
-                val hasResultSet = callableStmt.execute()
+            conn.prepareCall(sql).use { callable ->
+                bindArgs(callable, args)
+                val hasResultSet = callable.execute()
                 if (hasResultSet) {
-                    val rs = callableStmt.resultSet
+                    val rs = callable.resultSet
                     val rows = mutableListOf<Map<String, Any?>>()
                     val metaData = rs.metaData
                     val columnCount = metaData.columnCount
                     while (rs.next()) {
                         val row = mutableMapOf<String, Any?>()
-                        for (col in 1..columnCount) {
-                            row[metaData.getColumnLabel(col)] = rs.getObject(col)
-                        }
+                        for (col in 1..columnCount) row[metaData.getColumnLabel(col)] = rs.getObject(col)
                         rows.add(row)
                     }
                     result["result_set"] = rows
                     result["row_count"] = rows.size
                 }
-                // 获取 OUT 参数
-                val updateCount = callableStmt.updateCount
-                if (updateCount >= 0) {
-                    result["update_count"] = updateCount
-                }
+                val updateCount = callable.updateCount
+                if (updateCount >= 0) result["update_count"] = updateCount
             }
         }
 
+        result["routine_type"] = routineType.uppercase()
+        result["schema"] = safeSchema
         result
+    }
+
+    /**
+     * 把 String? 列表绑定到 PreparedStatement 的位置参数（统一入口）
+     */
+    private fun bindArgs(stmt: java.sql.PreparedStatement, args: List<String?>) {
+        for ((i, v) in args.withIndex()) {
+            if (v == null) stmt.setNull(i + 1, java.sql.Types.NULL)
+            else stmt.setString(i + 1, v)
+        }
     }
 
     /**
@@ -1125,84 +1204,139 @@ class PostgreSQLDialect : DatabaseDialect {
     }
 
     /**
-     * 调试函数（EXPLAIN、执行计划、依赖分析等）
+     * 调试函数/存储过程（EXPLAIN、执行计划、依赖分析等）。
+     * 支持函数/过程/触发器；EXPLAIN 仅对函数有效，过程给出来源信息。
      */
     override suspend fun debugRoutine(conn: Connection, routineName: String, schema: String): List<Map<String, String>> = withContext(Dispatchers.IO) {
         val targetSchema = if (schema.isNotBlank()) schema else "public"
+        val safeName = sanitizeIdentifier(routineName, "routine name")
+        val safeSchema = sanitizeIdentifier(targetSchema, "schema name")
 
-        // 获取函数 OID
+        // 获取对象 OID + 类型
         val oidQuery = """
-            SELECT p.oid FROM pg_proc p
+            SELECT p.oid, p.prokind FROM pg_proc p
             JOIN pg_namespace n ON n.oid = p.pronamespace
-            WHERE p.proname = ? AND n.nspname = ? AND p.prokind = 'f'
+            WHERE p.proname = ? AND n.nspname = ? AND p.prokind IN ('f', 'p', 'w')
         """.trimIndent()
 
+        var funcOid = -1
+        var prokind = ""
         conn.prepareStatement(oidQuery).use { oidStmt ->
-            oidStmt.setString(1, routineName)
-            oidStmt.setString(2, targetSchema)
+            oidStmt.setString(1, safeName)
+            oidStmt.setString(2, safeSchema)
             oidStmt.executeQuery().use { oidRs ->
-                if (!oidRs.next()) {
-                    throw IllegalArgumentException("未找到函数 '$routineName'，schema: '$targetSchema'")
+                if (oidRs.next()) {
+                    funcOid = oidRs.getInt(1)
+                    prokind = oidRs.getString(2) ?: ""
                 }
-                val funcOid = oidRs.getInt(1)
-
-                val results = mutableListOf<Map<String, String>>()
-
-                // 1. EXPLAIN 输出
-                conn.prepareStatement("EXPLAIN (FORMAT JSON) SELECT $routineName()").use { stmt ->
-                    stmt.executeQuery().use { rs ->
-                        if (rs.next()) {
-                            results.add(mapOf(
-                                "type" to "EXPLAIN",
-                                "output" to rs.getString(1)
-                            ))
-                        }
-                    }
-                }
-
-                // 2. 函数信息（使用 getRoutineInfo，自动解析 routineType）
-                val info = getRoutineInfo(conn, routineName, targetSchema)
-                results.add(mapOf(
-                    "type" to "INFO",
-                    "output" to buildString {
-                        appendLine("函数名: ${info["name"]}")
-                        appendLine("Schema: ${info["schema"]}")
-                        appendLine("语言: ${info["language"]}")
-                        appendLine("返回类型: ${info["return_type"]}")
-                        appendLine("稳定性: ${info["volatility"]}")
-                        appendLine("安全性: ${info["security_definer"]}")
-                        appendLine("参数: ${info["arg_names"]}")
-                    }
-                ))
-
-                // 3. 函数依赖
-                conn.prepareStatement("""
-                    SELECT DISTINCT c.relname AS dependent_object, c.relkind,
-                           CASE c.relkind WHEN 'r' THEN 'TABLE' WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'S' THEN 'SEQUENCE' ELSE 'UNKNOWN' END AS type
-                    FROM pg_depend d
-                    JOIN pg_proc p ON d.refobjid = p.oid
-                    JOIN pg_class c ON d.objid = c.oid
-                    WHERE d.refobjid = ? AND d.deptype = 'n'
-                    ORDER BY c.relkind, c.relname
-                """.trimIndent()).use { depStmt ->
-                    depStmt.setInt(1, funcOid)
-                    depStmt.executeQuery().use { rs ->
-                        val deps = mutableListOf<String>()
-                        while (rs.next()) {
-                            deps.add("${rs.getString("type")}: ${rs.getString("dependent_object")}")
-                        }
-                        if (deps.isNotEmpty()) {
-                            results.add(mapOf(
-                                "type" to "DEPENDENCIES",
-                                "output" to deps.joinToString("\n")
-                            ))
-                        }
-                    }
-                }
-
-                results
             }
         }
+
+        // 触发器也尝试（pg_proc 不覆盖触发器，pg_trigger 也需要处理）
+        if (funcOid <= 0) {
+            conn.prepareStatement(
+                "SELECT t.oid, c.relname FROM pg_trigger t " +
+                "JOIN pg_class c ON t.tgrelid = c.oid " +
+                "JOIN pg_namespace n ON c.relnamespace = n.oid " +
+                "WHERE t.tgname = ? AND n.nspname = ? AND NOT t.tgisinternal"
+            ).use { stmt ->
+                stmt.setString(1, safeName)
+                stmt.setString(2, safeSchema)
+                stmt.executeQuery().use { rs ->
+                    if (rs.next()) {
+                        // 触发器也按 routines 暴露，所以这里不需要单独处理
+                        return@withContext listOf(mapOf(
+                            "type" to "INFO",
+                            "output" to "触发器 '$safeName' 关联表: ${rs.getString(2)}"
+                        ))
+                    }
+                }
+            }
+            throw IllegalArgumentException("未找到函数/存储过程 '$safeName'，schema: '$safeSchema'")
+        }
+
+        val results = mutableListOf<Map<String, String>>()
+
+        // 1. EXPLAIN 输出 — 仅函数（prokind = 'f'）有效；存储过程无法 EXPLAIN
+        if (prokind == "f") {
+            try {
+                // 用 prepared statement + 字符串字面量构造 EXPLAIN — 名称已通过 sanitizeIdentifier 过滤
+                val callSql = qualifiedCallSql(conn, safeSchema, safeName)
+                conn.createStatement().use { stmt ->
+                    stmt.executeQuery("EXPLAIN (FORMAT JSON) SELECT $callSql").use { rs ->
+                        if (rs.next()) {
+                            results.add(mapOf("type" to "EXPLAIN", "output" to (rs.getString(1) ?: "")))
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                results.add(mapOf("type" to "EXPLAIN", "output" to "(EXPLAIN 失败: ${e.message})"))
+            }
+        } else {
+            results.add(mapOf("type" to "EXPLAIN", "output" to "(存储过程/聚合函数不支持 EXPLAIN)"))
+        }
+
+        // 2. INFO（复用 getRoutineInfo）
+        val info = getRoutineInfo(conn, safeName, safeSchema)
+        results.add(mapOf(
+            "type" to "INFO",
+            "output" to buildString {
+                appendLine("Name: ${info["name"]}")
+                appendLine("Schema: ${info["schema"]}")
+                appendLine("Language: ${info["language"]}")
+                appendLine("Type: ${info["routine_type"]}")
+                appendLine("Return: ${info["return_type"]}")
+                appendLine("Volatility: ${info["volatility"]}")
+                appendLine("Security: ${info["security_definer"]}")
+                appendLine("Arguments: ${info["arg_names"]}")
+            }
+        ))
+
+        // 3. 依赖对象
+        conn.prepareStatement("""
+            SELECT DISTINCT c.relname AS dependent_object, c.relkind,
+                   CASE c.relkind WHEN 'r' THEN 'TABLE' WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'S' THEN 'SEQUENCE' ELSE 'UNKNOWN' END AS type
+            FROM pg_depend d
+            JOIN pg_class c ON d.objid = c.oid
+            WHERE d.refobjid = ? AND d.deptype = 'n'
+            ORDER BY c.relkind, c.relname
+        """.trimIndent()).use { depStmt ->
+            depStmt.setInt(1, funcOid)
+            depStmt.executeQuery().use { rs ->
+                val deps = mutableListOf<String>()
+                while (rs.next()) deps.add("${rs.getString("type")}: ${rs.getString("dependent_object")}")
+                if (deps.isNotEmpty()) {
+                    results.add(mapOf("type" to "DEPENDENCIES", "output" to deps.joinToString("\n")))
+                }
+            }
+        }
+
+        results
+    }
+
+    /**
+     * 构造用于 EXPLAIN 的 `schema.name()` 调用 — 因为 EXPLAIN 不接受 ? 占位符，
+     * 名称必须直接拼 SQL（已由 sanitizeIdentifier 过滤反引号/null 字节）。
+     */
+    private fun qualifiedCallSql(conn: Connection, schema: String, name: String): String {
+        // 查询参数的 pronargs，决定参数个数
+        val safeSchema = sanitizeIdentifier(schema, "schema name")
+        val safeName = sanitizeIdentifier(name, "routine name")
+        conn.prepareStatement(
+            "SELECT p.pronargs FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace " +
+            "WHERE p.proname = ? AND n.nspname = ?"
+        ).use { stmt ->
+            stmt.setString(1, safeName)
+            stmt.setString(2, safeSchema)
+            stmt.executeQuery().use { rs ->
+                if (rs.next()) {
+                    val n = rs.getInt(1)
+                    val placeholders = List(n) { "NULL" }.joinToString(", ")
+                    return "${quoteIdentifier(safeSchema)}.${quoteIdentifier(safeName)}($placeholders)"
+                }
+            }
+        }
+        return "${quoteIdentifier(safeSchema)}.${quoteIdentifier(safeName)}()"
     }
 
     /**

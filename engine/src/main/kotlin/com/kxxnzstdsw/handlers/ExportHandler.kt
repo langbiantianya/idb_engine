@@ -1,111 +1,106 @@
-@file:OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
-
 package com.kxxnzstdsw.handlers
 
 import com.kxxnzstdsw.export.ExportEngine
 import com.kxxnzstdsw.export.ExportFormat
 import com.kxxnzstdsw.export.ExportProcessManager
 import com.kxxnzstdsw.export.ExportRequest
-import com.kxxnzstdsw.export.GlobalOutputChannel
-import com.kxxnzstdsw.models.ConnectionConfig
-import com.kxxnzstdsw.models.Response
-import com.kxxnzstdsw.proto.PayloadValue
-import com.kxxnzstdsw.proto.PayloadValueKind
-import com.kxxnzstdsw.proto.ProtoConverters
+import com.kxxnzstdsw.grpc.ConnectionConfig
+import com.kxxnzstdsw.grpc.PayloadAdapter
+import com.kxxnzstdsw.grpc.Request
+import com.kxxnzstdsw.grpc.Response
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.protobuf.ProtoBuf
+import kotlinx.serialization.json.put
 import java.io.File
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
- * 数据导出 Handler（统一入口）
+ * 数据导出 Handler（gRPC 统一入口）
  *
  * 责任划分：
  * - 本类负责业务解析（payload → ExportRequest）
- * - 主进程调用：根据 -Dexport.subprocess 是否设置决定走子进程编排路径
- *   - 主进程模式：解析参数后通过 ExportProcessManager 启动子进程并投递命令
- *   - 子进程模式：直接调用 ExportEngine.export 并把进度写入 outputChannel
- * - 进度响应在子进程模式下走 outputChannel；在主进程模式下由子进程通过
- *   GlobalOutputChannel 流入主进程统一的 stdout 管线
+ * - 主进程模式：根据 payload 决定启动导出还是停止已有任务，通过 ExportProcessManager
+ *   投递命令到子进程，并订阅子进程返回的流式进度
+ * - 子进程模式：直接调用 ExportEngine.export 并通过返回 Flow 推送进度
  *
- * 输出元素类型为 ByteArray（protobuf 编码的 Response 帧），
- * 与 RequestDispatcher / Main.kt 的输出管线兼容。
+ * Flow<Response> 返回：被 RequestDispatcher 直接 emit 给 gRPC StreamObserver
  */
 object ExportHandler {
 
-    @OptIn(ExperimentalSerializationApi::class)
-    private val proto = ProtoBuf { encodeDefaults = true }
-
     /**
-     * 执行导出（业务编排）
-     *
-     * 该方法根据调用方环境有两种行为：
-     * - 主进程调用：根据 payload 决定是启动导出还是停止已有任务，命令投递到子进程
-     * - 子进程调用：直接执行 ExportEngine.export 并把进度写入 outputChannel
-     *
-     * @param id 请求 ID（用于响应匹配）
-     * @param config 数据库连接配置
-     * @param payload 导出参数（JsonObject — Handler 内部使用的统一格式）
-     * @param outputChannel 输出 Channel（仅子进程场景使用，主进程调用时传 null 即可）
+     * 入口：根据模式分流
+     * - 主进程：编排子进程
+     * - 子进程：直接执行 ExportEngine
      */
-    suspend fun execute(
-        id: String,
-        config: ConnectionConfig,
-        payload: JsonObject,
-        outputChannel: Channel<ByteArray>?
-    ) {
-        // 主进程模式：编排子进程（优先处理 stopExportId 分支，避免对其余字段的解析失败）
-        if (isMainProcessMode()) {
-            handleInMainProcess(id, config, payload, outputChannel)
-            return
-        }
-
-        // 子进程模式：直接执行
-        if (outputChannel != null) {
-            val exportRequest = parseExportRequest(payload)
-            withContext(Dispatchers.IO) {
-                ExportEngine.export(config, exportRequest) { progress ->
-                    val progressMap = mapOf(
-                        "exportedRows" to PayloadValue(kind = PayloadValueKind.NUMBER, numberValue = progress.exportedRows.toDouble()),
-                        "columnCount" to PayloadValue(kind = PayloadValueKind.NUMBER, numberValue = progress.columnCount.toDouble()),
-                        "completed" to PayloadValue(kind = PayloadValueKind.BOOL, boolValue = progress.completed),
-                        "filePath" to (progress.filePath?.let { PayloadValue(kind = PayloadValueKind.STRING, stringValue = it) } ?: PayloadValue.NULL),
-                        "error" to (progress.error?.let { PayloadValue(kind = PayloadValueKind.STRING, stringValue = it) } ?: PayloadValue.NULL)
-                    )
-                    val resp = Response(
-                        id = id,
-                        success = true,
-                        stream = true,
-                        end = progress.completed,
-                        data = PayloadValue(kind = PayloadValueKind.STRUCT, structValue = progressMap)
-                    )
-                    val frame = proto.encodeToByteArray(Response.serializer(), resp)
-                    outputChannel.send(frame)
-                }
-            }
+    fun execute(request: Request): Flow<Response> {
+        return if (isSubprocessMode()) {
+            executeAsSubprocess(request)
+        } else {
+            executeInMainProcess(request)
         }
     }
 
     /**
-     * 主进程模式：解析参数、启动/复用子进程、投递命令
+     * 子进程模式：在 Flow 中调用 ExportEngine 并 emit 进度
      */
-    private suspend fun handleInMainProcess(
-        id: String,
-        config: ConnectionConfig,
-        payload: JsonObject,
-        outputChannel: Channel<ByteArray>?
-    ) {
+    fun executeAsSubprocess(request: Request): Flow<Response> = flow {
+        val id = request.id
+        val config = request.connection
+        val payload = PayloadAdapter.toJsonObject(request.payloadMap)
+        try {
+            val exportRequest = parseExportRequest(payload)
+            withContext(Dispatchers.IO) {
+                ExportEngine.export(config, exportRequest) { progress ->
+                    val data = buildJsonObject {
+                        put("exportedRows", progress.exportedRows)
+                        put("columnCount", progress.columnCount)
+                        put("completed", progress.completed)
+                        if (progress.filePath != null) put("filePath", progress.filePath)
+                        if (progress.error != null) put("error", progress.error)
+                    }
+                    runBlocking {
+                        emit(
+                            Response.newBuilder()
+                                .setId(id).setSuccess(true).setStream(true).setEnd(progress.completed)
+                                .setData(PayloadAdapter.toValue(data))
+                                .build()
+                        )
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            emit(
+                Response.newBuilder()
+                    .setId(id).setSuccess(false)
+                    .setError(e.message ?: "Export failed")
+                    .build()
+            )
+        }
+    }
+
+    /**
+     * 主进程模式：编排子进程 + 收集子进程响应
+     */
+    private fun executeInMainProcess(request: Request): Flow<Response> = flow {
+        val id = request.id
+        val config = request.connection
+        val payload = PayloadAdapter.toJsonObject(request.payloadMap)
+
         val jarPath = findEngineJarPath()
         if (jarPath == null) {
-            sendError(id, "Cannot find idb-engine.jar path", outputChannel)
-            return
+            emit(
+                Response.newBuilder().setId(id).setSuccess(false)
+                    .setError("Cannot find idb-engine.jar path").build()
+            )
+            return@flow
         }
 
         // 停止导出分支
@@ -113,31 +108,34 @@ object ExportHandler {
         if (stopExportId != null) {
             ensureSubprocessRunning(jarPath)
             ExportProcessManager.stopExport(stopExportId)
-            val resp = Response(
-                id = id,
-                success = true,
-                data = PayloadValue(
-                    kind = PayloadValueKind.STRUCT,
-                    structValue = mapOf("stopped" to PayloadValue(kind = PayloadValueKind.STRING, stringValue = stopExportId))
-                )
+            emit(
+                Response.newBuilder().setId(id).setSuccess(true)
+                    .setData(
+                        PayloadAdapter.toValue(
+                            buildJsonObject { put("stopped", stopExportId) }
+                        )
+                    )
+                    .build()
             )
-            sendResponse(id, resp, outputChannel)
-            return
+            return@flow
         }
 
-        // 启动导出分支：把 JsonObject 转回 Map<String, PayloadValue> 投递到子进程
+        // 启动导出分支
         ensureSubprocessRunning(jarPath)
-        ExportProcessManager.startExport(id, config, ProtoConverters.toPayloadMap(payload))
+        ExportProcessManager.startExport(id, config, PayloadAdapter.toPayloadMap(payload))
+
+        // 收集子进程响应转发给上游 gRPC StreamObserver
+        ExportProcessManager.collectResponses(id).collect { emit(it) }
     }
 
     /**
      * 启动或复用导出子进程
      */
     private suspend fun ensureSubprocessRunning(jarPath: String) {
-        if (!ExportProcessManager.isRunning.value) {
+        if (!ExportProcessManager.isRunning) {
             ExportProcessManager.start(jarPath)
-            // 等待子进程初始化
-            delay(100.milliseconds)
+            // 等待子进程初始化 + 连接到主进程 ExportHub
+            delay(200.milliseconds)
         }
     }
 
@@ -190,35 +188,10 @@ object ExportHandler {
     }
 
     /**
-     * 判定当前是否运行在主进程（非子进程）。
-     * 由 ExportProcessManager 启动子进程时设置 -Dexport.subprocess=true。
+     * 判定当前是否运行在子进程模式
+     * 由 ExportProcessManager 启动子进程时设置 -Didb.subprocess=true
      */
-    private fun isMainProcessMode(): Boolean {
-        return System.getProperty("export.subprocess") != "true"
-    }
-
-    /**
-     * 发送响应（优先使用调用方的 outputChannel，回退到 GlobalOutputChannel）
-     */
-    @OptIn(ExperimentalSerializationApi::class)
-    private suspend fun sendResponse(
-        id: String,
-        response: Response,
-        outputChannel: Channel<ByteArray>?
-    ) {
-        val encoded = proto.encodeToByteArray(Response.serializer(), response)
-        val target = outputChannel ?: GlobalOutputChannel.channel
-        target?.send(encoded)
-    }
-
-    /**
-     * 错误响应
-     */
-    private suspend fun sendError(
-        id: String,
-        message: String,
-        outputChannel: Channel<ByteArray>?
-    ) {
-        sendResponse(id, Response(id = id, success = false, error = message), outputChannel)
+    private fun isSubprocessMode(): Boolean {
+        return System.getProperty("idb.subprocess") == "true"
     }
 }

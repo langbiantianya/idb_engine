@@ -1,6 +1,8 @@
 # IDB Engine - Database Management Backend
 
-基于 Kotlin + JDBC 的无头数据库管理引擎，通过 **stdin/stdout 上的长度前缀 Protobuf 帧** 与 Wails 前端通信（**无 JSON 行**）。方言层采用 SPI 插件化架构，支持动态加载。
+基于 Kotlin + JDBC 的无头数据库管理引擎，通过 **gRPC**（HTTP/2 + Protobuf） 与 Wails 前端通信。方言层采用 SPI 插件化架构，支持动态加载。
+
+> **架构升级**：自 v2.0 起，引擎使用 **gRPC 服务端**模式运行（默认端口 `:50051`，可通过 `IDB_ENGINE_PORT` 覆盖），完全替代旧的 stdin/stdout 长度前缀 Protobuf 帧协议。客户端通过 gRPC streaming 调用发送 `Request`，接收多条 `Response`（流式响应使用 `stream`/`end` 字段分帧）。
 
 ## 项目结构
 
@@ -11,10 +13,15 @@ idb_engine/
 ├── api/                        公共 SPI 接口（DatabaseDialect + Driver 枚举）
 ├── dialect-mysql/              MySQL 方言插件 JAR
 ├── dialect-postgresql/         PostgreSQL 方言插件 JAR
-└── engine/                     主引擎（业务逻辑 + 动态加载 + Protobuf wire 协议）
-    ├── proto/                  Protobuf payload 类型（PayloadValue + ProtoConverters）
-    ├── transport/              帧协议（4-byte BE length prefix）
-    └── models/                 Request / Response / ExportCommand（@Serializable protobuf）
+├── dialect-h2/                 H2 方言插件 JAR（嵌入式数据库 + 测试）
+└── engine/                     主引擎（业务逻辑 + gRPC 服务端 + Protobuf wire）
+    ├── proto/                  .proto 源文件（idb_engine.proto / idb_export.proto）
+    ├── server/                 gRPC 服务端（IdbEngineServer + IdbEngineImpl）
+    ├── dispatcher/             Request → handler 路由 + Flow<Response>
+    ├── pool/                   HikariCP 连接池管理
+    ├── export/                 数据导出子进程（独立 JVM，gRPC 客户端）
+    ├── handlers/               业务处理层（SchemaHandler / TableHandler / ...）
+    └── loader/                 ServiceLoader 动态加载 drivers/ + dialects/
 ```
 
 引擎启动时通过 `ServiceLoader` 自动扫描 `dialects/` 目录，发现并注册所有方言插件，无需硬编码。
@@ -42,7 +49,7 @@ engine/build/libs/
 cd engine/build/libs && java -jar idb-engine.jar
 ```
 
-程序启动后自动加载 `dialects/` 目录中的方言插件和 `drivers/` 目录中的 JDBC 驱动，然后监听标准输入等待**长度前缀 Protobuf 帧**请求。
+程序启动后自动加载 `dialects/` 目录中的方言插件和 `drivers/` 目录中的 JDBC 驱动，然后启动 gRPC 服务监听端口（默认 `:50051`，可通过 `IDB_ENGINE_PORT` 环境变量覆盖）。
 
 ## 添加新方言
 
@@ -52,47 +59,50 @@ cd engine/build/libs && java -jar idb-engine.jar
 4. 构建后将 JAR 放入 `engine/build/libs/dialects/` 目录
 5. 无需修改主引擎代码，重启即自动加载
 
-## 通信协议
+## 通信协议（gRPC）
 
-引擎与调用方（Wails Go 主进程 / 任何客户端）通过 **stdin/stdout 上的长度前缀 Protobuf 帧** 传递结构化数据。**不使用 JSON 行**——每帧是紧凑的二进制 protobuf 消息。
+引擎是一个 **gRPC 服务端**，通过 HTTP/2 上的标准 Protobuf 消息与调用方通信（替代了旧的 stdin/stdout 长度前缀帧协议）。
 
-### Wire 帧格式
+### 服务定义
 
+```proto
+service IdbEngine {
+  rpc Handle(Request) returns (stream Response);
+}
 ```
-┌────────────────────────────────────────┬────────────────────────────────────────┐
-│  length: uint32 big-endian (4 bytes)   │  payload: protobuf-encoded bytes (N)  │
-└────────────────────────────────────────┴────────────────────────────────────────┘
-```
 
-- **length**：大端序无符号 32 位整数，表示其后 payload 的字节数
-- **payload**：由 `kotlinx-serialization-protobuf` 编码的 `Request` / `Response` / `ExportCommand` 字节流
-- **单帧最大**：256 MiB（`Framing.MAX_FRAME_SIZE`，超出抛错避免恶意输入耗尽内存）
-- **EOF 语义**：调用方关闭 stdin 后，引擎优雅退出
-- **损坏语义**：调用方发送截断 header 或损坏 payload 时，引擎发送 `id="unknown"` 的错误响应帧并退出
+- **Handle** 是双向流式 RPC：客户端发送一条 `Request`，服务端按需返回多条 `Response`（普通响应一条；流式响应多条，最后一条 `end: true`）。
 
-**Go 端读写示例**：
+### 端口
+
+- 默认端口 `:50051`（可通过 `IDB_ENGINE_PORT` 环境变量覆盖）
+- 最大入站消息大小：256 MiB（`maxInboundMessageSize`）
+- 底层传输：Netty（生产路径），回退到 JDK `ServerBuilder`
+
+### Go 端示例
 
 ```go
 import (
-    "encoding/binary"
-    "io"
-    "google.golang.org/protobuf/proto"
+    "google.golang.org/grpc"
+    "google.golang.org/grpc/credentials/insecure"
+    pb "your/proto/gen"  // 由 .proto 编译生成
 )
 
-func writeFrame(w io.Writer, payload []byte) error {
-    var header [4]byte
-    binary.BigEndian.PutUint32(header[:], uint32(len(payload)))
-    if _, err := w.Write(header[:]); err != nil { return err }
-    _, err := w.Write(payload)
-    return err
-}
+conn, _ := grpc.Dial("localhost:50051",
+    grpc.WithTransportCredentials(insecure.NewCredentials()))
+defer conn.Close()
 
-func readFrame(r io.Reader) ([]byte, error) {
-    var header [4]byte
-    if _, err := io.ReadFull(r, header[:]); err != nil { return nil, err }
-    payload := make([]byte, binary.BigEndian.Uint32(header[:]))
-    _, err := io.ReadFull(r, payload)
-    return payload, err
+client := pb.NewIdbEngineClient(conn)
+stream, _ := client.Handle(ctx, &pb.Request{
+    Id:       "req-001",
+    Category: pb.Category_TABLE,
+    Action:   pb.Action_LIST,
+    Connection: &pb.ConnectionConfig{Driver: "Mysql", Host: "127.0.0.1", Port: 3306, User: "root", Password: "secret", Database: "test"},
+})
+for {
+    resp, err := stream.Recv()
+    if err == io.EOF { break }
+    // 处理 resp — 流式响应检查 resp.End
 }
 ```
 

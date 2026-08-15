@@ -1,7 +1,7 @@
 package com.kxxnzstdsw.handlers
 
 import com.kxxnzstdsw.loader.DialectLoader
-import com.kxxnzstdsw.models.ConnectionConfig
+import com.kxxnzstdsw.grpc.ConnectionConfig
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -138,7 +138,7 @@ object DataHandler {
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
-            val columnTypes = loadColumnTypes(conn, config.database, schema, tableName)
+            val columnTypes = loadColumnTypes(conn, config.driver, config.database, schema, tableName)
 
             val columns = values.keys.joinToString(", ") { dialect.quoteIdentifier(it) }
             val placeholders = values.keys.joinToString(", ") { "?" }
@@ -167,7 +167,7 @@ object DataHandler {
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
-            val columnTypes = loadColumnTypes(conn, config.database, schema, tableName)
+            val columnTypes = loadColumnTypes(conn, config.driver, config.database, schema, tableName)
 
             val setClause = changes.keys.joinToString(", ") { "${dialect.quoteIdentifier(it)} = ?" }
             val whereClause = where.keys.joinToString(" AND ") { "${dialect.quoteIdentifier(it)} = ?" }
@@ -198,7 +198,7 @@ object DataHandler {
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
-            val columnTypes = loadColumnTypes(conn, config.database, schema, tableName)
+            val columnTypes = loadColumnTypes(conn, config.driver, config.database, schema, tableName)
 
             val whereClause = where.keys.joinToString(" AND ") { "${dialect.quoteIdentifier(it)} = ?" }
             val sql = "DELETE FROM ${dialect.quoteIdentifier(tableName)} WHERE $whereClause"
@@ -214,27 +214,27 @@ object DataHandler {
     }
 
     /**
-     * 通过 DatabaseMetaData 获取表的列类型映射（columnName -> TYPE_NAME）。
+     * 通过方言的 listColumns SPI 获取表的列类型映射（columnName -> TYPE_NAME）。
      * 名称统一为小写匹配；TYPE_NAME 保持原始大小写供后续 dispatch 使用。
      * 查询失败时返回空 map，调用方会回退到 setString。
      */
     private fun loadColumnTypes(
         conn: java.sql.Connection,
+        driver: String,
         database: String?,
         schema: String,
         tableName: String
     ): Map<String, String> {
         return try {
-            val metaData = conn.metaData
-            val types = mutableMapOf<String, String>()
-            metaData.getColumns(database, schema.takeIf { it.isNotEmpty() }, tableName, "%").use { rs ->
-                while (rs.next()) {
-                    val name = rs.getString("COLUMN_NAME") ?: continue
-                    val type = rs.getString("TYPE_NAME") ?: continue
-                    types[name.lowercase()] = type
-                }
+            val dialect = com.kxxnzstdsw.loader.DialectLoader.getDialect(driver)
+            val cols = kotlinx.coroutines.runBlocking {
+                dialect.listColumns(conn, database ?: "", schema, tableName)
             }
-            types
+            cols.mapNotNull { col ->
+                val name = col["name"] as? String ?: return@mapNotNull null
+                val type = col["type"] as? String ?: return@mapNotNull null
+                name.lowercase() to type
+            }.toMap()
         } catch (_: Exception) {
             emptyMap()
         }

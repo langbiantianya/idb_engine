@@ -1,7 +1,7 @@
 package com.kxxnzstdsw.handlers
 
 import com.kxxnzstdsw.loader.DialectLoader
-import com.kxxnzstdsw.models.ConnectionConfig
+import com.kxxnzstdsw.grpc.ConnectionConfig
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -96,10 +96,15 @@ object UserHandler {
                 val privileges = payload["privileges"]?.jsonArray?.map { it.jsonPrimitive.content }
                     ?: throw IllegalArgumentException("Missing 'privileges'")
                 val isGrant = payload["isGrant"]?.jsonPrimitive?.booleanOrNull ?: true
+                val tableName = payload["tableName"]?.jsonPrimitive?.contentOrNull
+                val withGrantOption = payload["withGrantOption"]?.jsonPrimitive?.booleanOrNull ?: false
 
-                dialect.updatePrivileges(conn, user, schema, privileges, isGrant)
+                dialect.updatePrivileges(conn, user, schema, privileges, isGrant, tableName, withGrantOption)
                 buildJsonObject {
                     put("user", user)
+                    put("schema", schema)
+                    if (tableName != null) put("table", tableName)
+                    if (withGrantOption) put("withGrantOption", true)
                     put("action", if (isGrant) "granted" else "revoked")
                 }
             }
