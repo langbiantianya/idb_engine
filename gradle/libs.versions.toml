@@ -7,6 +7,7 @@ slf4j = "2.0.18"
 logback = "1.5.13"
 mysql-connector = "9.7.0"
 postgresql = "42.7.11"
+h2 = "2.3.232"
 luajava = "4.1.0"
 poi = "5.5.1"
 parquet = "1.17.1"
@@ -16,11 +17,13 @@ hadoop = "3.5.0"
 kotlin-gradle-plugin = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin", version.ref = "kotlin" }
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinx-serialization" }
+kotlinx-serialization-protobuf = { module = "org.jetbrains.kotlinx:kotlinx-serialization-protobuf", version.ref = "kotlinx-serialization" }
 hikari = { module = "com.zaxxer:HikariCP", version.ref = "hikari" }
 slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
 logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
 mysql-connector = { module = "com.mysql:mysql-connector-j", version.ref = "mysql-connector" }
 postgresql = { module = "org.postgresql:postgresql", version.ref = "postgresql" }
+h2 = { module = "com.h2database:h2", version.ref = "h2" }
 luajava = { module = "party.iroiro.luajava:luajava", version.ref = "luajava" }
 luajit = { module = "party.iroiro.luajava:luajit", version.ref = "luajava" }
 lua51 = { module = "party.iroiro.luajava:lua51", version.ref = "luajava" }

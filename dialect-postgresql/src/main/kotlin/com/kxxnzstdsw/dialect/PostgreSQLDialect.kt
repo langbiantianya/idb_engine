@@ -342,7 +342,7 @@ class PostgreSQLDialect : DatabaseDialect {
     override fun buildModifyColumnSQL(
         tableName: String,
         name: String,
-        type: String,
+        type: String?,
         size: Int?,
         nullable: Boolean,
         defaultValue: String?,
@@ -350,19 +350,23 @@ class PostgreSQLDialect : DatabaseDialect {
     ): String {
         val table = quoteIdentifier(tableName)
         val col = quoteIdentifier(name)
-        val typeSpec = buildTypeSpec(type, size)
 
         val subCommands = mutableListOf<String>()
 
-        // 类型变更
-        subCommands.add("ALTER COLUMN $col TYPE $typeSpec")
+        // 类型变更（可选 — 纯重命名时跳过）
+        if (!type.isNullOrBlank()) {
+            val typeSpec = buildTypeSpec(type, size)
+            subCommands.add("ALTER COLUMN $col TYPE $typeSpec")
+        }
 
-        // nullable 变更
-        subCommands.add(if (nullable) {
-            "ALTER COLUMN $col DROP NOT NULL"
-        } else {
-            "ALTER COLUMN $col SET NOT NULL"
-        })
+        // nullable 变更（仅在 type 缺省时才有意义，否则 type 已包含 NOT NULL 信息）
+        if (type.isNullOrBlank()) {
+            subCommands.add(if (nullable) {
+                "ALTER COLUMN $col DROP NOT NULL"
+            } else {
+                "ALTER COLUMN $col SET NOT NULL"
+            })
+        }
 
         // 默认值变更
         if (defaultValue != null) {
@@ -381,6 +385,7 @@ class PostgreSQLDialect : DatabaseDialect {
             subCommands.add("RENAME COLUMN $col TO ${quoteIdentifier(newName)}")
         }
 
+        require(subCommands.isNotEmpty()) { "PG MODIFY_COLUMN 至少需要一个修改属性" }
         return "ALTER TABLE $table ${subCommands.joinToString(", ")}"
     }
 
@@ -1239,6 +1244,301 @@ class PostgreSQLDialect : DatabaseDialect {
                 // 忽略清理错误
             }
         }
+    }
+
+    // endregion
+
+    // region Views (视图)
+
+    override suspend fun listViews(conn: Connection, schema: String): List<Map<String, String>> = withContext(Dispatchers.IO) {
+        val targetSchema = if (schema.isNotBlank()) schema else "public"
+        val views = mutableListOf<Map<String, String>>()
+        conn.prepareStatement(
+            "SELECT table_name FROM information_schema.views " +
+            "WHERE table_schema = ? ORDER BY table_name"
+        ).use { stmt ->
+            stmt.setString(1, targetSchema)
+            stmt.executeQuery().use { rs ->
+                while (rs.next()) views.add(mapOf("name" to rs.getString(1)))
+            }
+        }
+        views
+    }
+
+    override suspend fun createView(conn: Connection, viewName: String, definition: String): Boolean = withContext(Dispatchers.IO) {
+        val safeName = sanitizeIdentifier(viewName, "view name")
+        if (definition.contains(';')) throw IllegalArgumentException("视图定义不允许包含分号")
+        conn.createStatement().use { stmt ->
+            stmt.execute("CREATE VIEW ${quoteIdentifier(safeName)} AS $definition")
+        }
+        true
+    }
+
+    override suspend fun dropView(conn: Connection, viewName: String, ifExists: Boolean): Boolean = withContext(Dispatchers.IO) {
+        val safeName = sanitizeIdentifier(viewName, "view name")
+        val sql = buildString {
+            append("DROP VIEW ")
+            if (ifExists) append("IF EXISTS ")
+            append(quoteIdentifier(safeName))
+            append(" CASCADE")
+        }
+        conn.createStatement().use { stmt -> stmt.execute(sql) }
+        true
+    }
+
+    override suspend fun getViewDDL(conn: Connection, viewName: String, schema: String): String = withContext(Dispatchers.IO) {
+        val targetSchema = if (schema.isNotBlank()) schema else "public"
+        conn.prepareStatement(
+            "SELECT view_definition FROM information_schema.views " +
+            "WHERE table_name = ? AND table_schema = ?"
+        ).use { stmt ->
+            stmt.setString(1, viewName)
+            stmt.setString(2, targetSchema)
+            stmt.executeQuery().use { rs ->
+                if (rs.next()) {
+                    val def = rs.getString(1) ?: ""
+                    return@withContext "CREATE VIEW ${quoteIdentifier(viewName)} AS $def"
+                }
+            }
+        }
+        throw IllegalArgumentException("未找到视图 '$viewName'")
+    }
+
+    // endregion
+
+    // region Indexes (索引)
+
+    override suspend fun listIndexes(conn: Connection, tableName: String): List<Map<String, String>> = withContext(Dispatchers.IO) {
+        val safeTable = sanitizeIdentifier(tableName, "table name")
+        val indexes = mutableListOf<Map<String, String>>()
+        conn.prepareStatement(
+            "SELECT indexname, indexdef FROM pg_indexes WHERE tablename = ? ORDER BY indexname"
+        ).use { stmt ->
+            stmt.setString(1, safeTable)
+            stmt.executeQuery().use { rs ->
+                while (rs.next()) {
+                    indexes.add(mapOf(
+                        "name" to rs.getString("indexname"),
+                        "definition" to rs.getString("indexdef")
+                    ))
+                }
+            }
+        }
+        indexes
+    }
+
+    override suspend fun createIndex(
+        conn: Connection,
+        tableName: String,
+        indexName: String,
+        columns: List<String>,
+        unique: Boolean
+    ): Boolean = withContext(Dispatchers.IO) {
+        val safeTable = sanitizeIdentifier(tableName, "table name")
+        val safeIndex = sanitizeIdentifier(indexName, "index name")
+        val safeCols = columns.joinToString(", ") { quoteIdentifier(it) }
+        val sql = buildString {
+            if (unique) append("CREATE UNIQUE INDEX ")
+            else append("CREATE INDEX ")
+            append(quoteIdentifier(safeIndex))
+            append(" ON ${quoteIdentifier(safeTable)} ($safeCols)")
+        }
+        conn.createStatement().use { stmt -> stmt.execute(sql) }
+        true
+    }
+
+    override suspend fun dropIndex(conn: Connection, indexName: String, tableName: String?): Boolean = withContext(Dispatchers.IO) {
+        val safeIndex = sanitizeIdentifier(indexName, "index name")
+        conn.createStatement().use { stmt ->
+            stmt.execute("DROP INDEX IF EXISTS ${quoteIdentifier(safeIndex)}")
+        }
+        true
+    }
+
+    // endregion
+
+    // region Foreign Keys (外键)
+
+    override suspend fun listForeignKeys(conn: Connection, tableName: String): List<Map<String, String>> = withContext(Dispatchers.IO) {
+        val safeTable = sanitizeIdentifier(tableName, "table name")
+        val fks = mutableListOf<Map<String, String>>()
+        conn.prepareStatement(
+            "SELECT tc.constraint_name, kcu.column_name, " +
+            "ccu.table_schema AS ref_schema, ccu.table_name AS ref_table, ccu.column_name AS ref_column, " +
+            "rc.update_rule, rc.delete_rule " +
+            "FROM information_schema.table_constraints tc " +
+            "JOIN information_schema.key_column_usage kcu " +
+            "  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema " +
+            "JOIN information_schema.constraint_column_usage ccu " +
+            "  ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema " +
+            "JOIN information_schema.referential_constraints rc " +
+            "  ON rc.constraint_name = tc.constraint_name " +
+            "WHERE tc.table_name = ? AND tc.constraint_type = 'FOREIGN KEY' " +
+            "ORDER BY tc.constraint_name, kcu.ordinal_position"
+        ).use { stmt ->
+            stmt.setString(1, safeTable)
+            stmt.executeQuery().use { rs ->
+                while (rs.next()) {
+                    fks.add(mapOf(
+                        "name" to rs.getString("constraint_name"),
+                        "column" to rs.getString("column_name"),
+                        "ref_table" to rs.getString("ref_table"),
+                        "ref_column" to rs.getString("ref_column"),
+                        "on_update" to (rs.getString("update_rule") ?: "NO ACTION"),
+                        "on_delete" to (rs.getString("delete_rule") ?: "NO ACTION")
+                    ))
+                }
+            }
+        }
+        fks
+    }
+
+    override suspend fun addForeignKey(
+        conn: Connection,
+        tableName: String,
+        fkName: String,
+        columns: List<String>,
+        refTable: String,
+        refColumns: List<String>,
+        onDelete: String?,
+        onUpdate: String?
+    ): Boolean = withContext(Dispatchers.IO) {
+        val safeTable = sanitizeIdentifier(tableName, "table name")
+        val safeFk = sanitizeIdentifier(fkName, "foreign key name")
+        val cols = columns.joinToString(", ") { quoteIdentifier(it) }
+        val refCols = refColumns.joinToString(", ") { quoteIdentifier(it) }
+        val sql = buildString {
+            append("ALTER TABLE ${quoteIdentifier(safeTable)} ADD CONSTRAINT ${quoteIdentifier(safeFk)} ")
+            append("FOREIGN KEY ($cols) REFERENCES ${quoteIdentifier(refTable)} ($refCols)")
+            onDelete?.takeIf { it.isNotBlank() }?.let { append(" ON DELETE $it") }
+            onUpdate?.takeIf { it.isNotBlank() }?.let { append(" ON UPDATE $it") }
+        }
+        conn.createStatement().use { stmt -> stmt.execute(sql) }
+        true
+    }
+
+    override suspend fun dropForeignKey(conn: Connection, tableName: String, fkName: String): Boolean = withContext(Dispatchers.IO) {
+        val safeTable = sanitizeIdentifier(tableName, "table name")
+        val safeFk = sanitizeIdentifier(fkName, "foreign key name")
+        conn.createStatement().use { stmt ->
+            stmt.execute("ALTER TABLE ${quoteIdentifier(safeTable)} DROP CONSTRAINT ${quoteIdentifier(safeFk)}")
+        }
+        true
+    }
+
+    // endregion
+
+    // region Triggers (触发器) — 复用了 listRoutines 中的触发器查询
+
+    override suspend fun listTriggers(conn: Connection, schema: String): List<Map<String, String>> = withContext(Dispatchers.IO) {
+        val targetSchema = if (schema.isNotBlank()) schema else "public"
+        val triggers = mutableListOf<Map<String, String>>()
+        conn.prepareStatement(
+            "SELECT t.tgname AS name, c.relname AS table_name, " +
+            "obj_description(t.oid, 'pg_trigger') AS description " +
+            "FROM pg_trigger t " +
+            "JOIN pg_class c ON t.tgrelid = c.oid " +
+            "JOIN pg_namespace n ON c.relnamespace = n.oid " +
+            "WHERE n.nspname = ? AND NOT t.tgisinternal " +
+            "ORDER BY c.relname, t.tgname"
+        ).use { stmt ->
+            stmt.setString(1, targetSchema)
+            stmt.executeQuery().use { rs ->
+                while (rs.next()) {
+                    triggers.add(mapOf(
+                        "name" to rs.getString("name"),
+                        "table" to rs.getString("table_name"),
+                        "description" to (rs.getString("description") ?: ""),
+                        "schema" to targetSchema
+                    ))
+                }
+            }
+        }
+        triggers
+    }
+
+    override suspend fun getTriggerDDL(conn: Connection, triggerName: String, schema: String): String = withContext(Dispatchers.IO) {
+        val targetSchema = if (schema.isNotBlank()) schema else "public"
+        conn.prepareStatement(
+            "SELECT pg_get_triggerdef(t.oid) AS def, c.relname AS table_name " +
+            "FROM pg_trigger t JOIN pg_class c ON t.tgrelid = c.oid " +
+            "JOIN pg_namespace n ON c.relnamespace = n.oid " +
+            "WHERE t.tgname = ? AND n.nspname = ? AND NOT t.tgisinternal"
+        ).use { stmt ->
+            stmt.setString(1, triggerName)
+            stmt.setString(2, targetSchema)
+            stmt.executeQuery().use { rs ->
+                if (rs.next()) {
+                    val def = rs.getString("def") ?: ""
+                    return@withContext "CREATE TRIGGER ${quoteIdentifier(triggerName)} $def"
+                }
+            }
+        }
+        throw IllegalArgumentException("未找到触发器 '$triggerName'")
+    }
+
+    // endregion
+
+    // region Table Operations
+
+    override suspend fun renameTable(conn: Connection, oldName: String, newName: String): Boolean = withContext(Dispatchers.IO) {
+        val safeOld = sanitizeIdentifier(oldName, "table name")
+        val safeNew = sanitizeIdentifier(newName, "table name")
+        conn.createStatement().use { stmt ->
+            stmt.execute("ALTER TABLE ${quoteIdentifier(safeOld)} RENAME TO ${quoteIdentifier(safeNew)}")
+        }
+        true
+    }
+
+    override suspend fun truncateTable(conn: Connection, tableName: String): Boolean = withContext(Dispatchers.IO) {
+        val safeTable = sanitizeIdentifier(tableName, "table name")
+        conn.createStatement().use { stmt ->
+            stmt.execute("TRUNCATE TABLE ${quoteIdentifier(safeTable)}")
+        }
+        true
+    }
+
+    // endregion
+
+    // region SQL — EXPLAIN
+
+    override suspend fun explainSQL(conn: Connection, sql: String): List<Map<String, String>> = withContext(Dispatchers.IO) {
+        if (sql.contains(';')) throw IllegalArgumentException("EXPLAIN 不允许包含分号")
+        val rows = mutableListOf<Map<String, String>>()
+        conn.createStatement().use { stmt ->
+            stmt.executeQuery("EXPLAIN $sql").use { rs ->
+                val meta = rs.metaData
+                val columnCount = meta.columnCount
+                while (rs.next()) {
+                    val row = mutableMapOf<String, String>()
+                    for (i in 1..columnCount) row[meta.getColumnLabel(i)] = rs.getString(i) ?: ""
+                    rows.add(row)
+                }
+            }
+        }
+        rows
+    }
+
+    // endregion
+
+    // region Server
+
+    override suspend fun getServerInfo(conn: Connection): Map<String, String> = withContext(Dispatchers.IO) {
+        val meta = conn.metaData
+        val version = mutableMapOf<String, String>()
+        conn.createStatement().use { stmt ->
+            stmt.executeQuery("SHOW server_version").use { rs ->
+                if (rs.next()) version["serverVersion"] = rs.getString(1)
+            }
+        }
+        mapOf(
+            "product" to (meta.databaseProductName ?: ""),
+            "version" to (meta.databaseProductVersion ?: ""),
+            "driver" to (meta.driverName ?: ""),
+            "driverVersion" to (meta.driverVersion ?: ""),
+            "url" to (meta.url ?: ""),
+            "userName" to (meta.userName ?: "")
+        ) + version
     }
 
     // endregion

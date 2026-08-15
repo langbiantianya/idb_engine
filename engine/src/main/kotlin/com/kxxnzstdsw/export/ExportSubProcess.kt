@@ -3,13 +3,15 @@ package com.kxxnzstdsw.export
 import com.kxxnzstdsw.handlers.ExportHandler
 import com.kxxnzstdsw.models.ConnectionConfig
 import com.kxxnzstdsw.models.Response
+import com.kxxnzstdsw.proto.PayloadValue
+import com.kxxnzstdsw.proto.ProtoConverters
+import com.kxxnzstdsw.transport.Framing
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
-import kotlinx.serialization.json.*
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.protobuf.ProtoBuf
 import org.slf4j.LoggerFactory
-import java.io.BufferedReader
 import java.io.File
-import java.io.InputStreamReader
 import java.io.PrintStream
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.system.exitProcess
@@ -17,7 +19,9 @@ import kotlin.system.exitProcess
 object ExportSubProcess {
 
     private val logger = LoggerFactory.getLogger(ExportSubProcess::class.java)
-    private val json = Json { ignoreUnknownKeys = true }
+
+    @OptIn(ExperimentalSerializationApi::class)
+    private val proto = ProtoBuf { encodeDefaults = true }
 
     // Force stdout to autoflush - critical for pipe-based communication with parent process
     private val out = PrintStream(System.out, true, Charsets.UTF_8)
@@ -30,7 +34,7 @@ object ExportSubProcess {
 
     @JvmStatic
     fun main(args: Array<String>) = runBlocking {
-        logger.info("Export SubProcess started, listening on stdin...")
+        logger.info("Export SubProcess started, listening on stdin (protobuf frame protocol)...")
 
         try {
             val baseDir = findBaseDir()
@@ -46,29 +50,30 @@ object ExportSubProcess {
             stopAllExports()
         })
 
-        val reader = BufferedReader(InputStreamReader(System.`in`, Charsets.UTF_8))
-        val outputChannel = Channel<String>(Channel.UNLIMITED)
+        val stdin = System.`in`
+        val outputChannel = Channel<ByteArray>(Channel.UNLIMITED)
 
         val outputJob = launch(Dispatchers.IO) {
-            for (response in outputChannel) {
-                out.println(response)
+            for (frame in outputChannel) {
+                synchronized(out) {
+                    Framing.writeFrame(out, frame)
+                    out.flush()
+                }
             }
         }
 
         try {
             while (!shouldStop) {
-                val line = withContext(Dispatchers.IO) {
-                    reader.readLine()
+                val frame = withContext(Dispatchers.IO) {
+                    Framing.readFrame(stdin)
                 }
 
-                if (line == null || shouldStop) {
+                if (frame == null || shouldStop) {
                     logger.info("EOF or stop signal, shutting down")
                     break
                 }
 
-                if (line.isBlank()) continue
-
-                processCommand(line.trim(), outputChannel)
+                processCommand(frame, outputChannel)
             }
         } catch (e: Exception) {
             logger.error("Fatal error", e)
@@ -94,42 +99,33 @@ object ExportSubProcess {
         return currentDir
     }
 
-    private suspend fun processCommand(command: String, outputChannel: Channel<String>) {
+    @OptIn(ExperimentalSerializationApi::class)
+    private suspend fun processCommand(frame: ByteArray, outputChannel: Channel<ByteArray>) {
         try {
-            val jsonObj = json.parseToJsonElement(command).jsonObject
-            val cmd = jsonObj["CMD"]?.jsonPrimitive?.content
+            val cmd = proto.decodeFromByteArray(ExportCommand.serializer(), frame)
+            logger.debug("Subprocess received command: ${cmd.kind}")
 
-            when (cmd) {
-                "START_EXPORT" -> {
-                    val exportId = jsonObj["id"]?.jsonPrimitive?.content ?: return
-                    val connectionJson = jsonObj["connection"]?.jsonObject
-                    val payload = jsonObj["payload"]?.jsonObject
-
-                    if (connectionJson == null || payload == null) {
-                        sendError(exportId, "Missing connection or payload", outputChannel)
+            when (cmd.kind) {
+                ExportCommandKind.START_EXPORT -> {
+                    if (cmd.id.isBlank()) {
+                        sendError("unknown", "Missing export id", outputChannel)
                         return
                     }
-
-                    val config = parseConnection(connectionJson)
-                    startExport(exportId, config, payload, outputChannel)
+                    val payload = ProtoConverters.toJsonObject(cmd.payload)
+                    startExport(cmd.id, cmd.connection, payload, outputChannel)
                 }
 
-                "STOP_EXPORT" -> {
-                    val exportId = jsonObj["exportId"]?.jsonPrimitive?.content
-                    if (exportId != null) {
-                        stopExport(exportId)
+                ExportCommandKind.STOP_EXPORT -> {
+                    if (cmd.exportId.isNotBlank()) {
+                        stopExport(cmd.exportId)
                     } else {
                         stopAllExports()
                     }
                 }
 
-                "CMD_EXIT" -> {
+                ExportCommandKind.CMD_EXIT -> {
                     logger.info("Received CMD_EXIT")
                     shouldStop = true
-                }
-
-                else -> {
-                    logger.debug("Ignoring non-command message")
                 }
             }
         } catch (e: Exception) {
@@ -137,22 +133,11 @@ object ExportSubProcess {
         }
     }
 
-    private fun parseConnection(jsonObj: JsonObject): ConnectionConfig {
-        return ConnectionConfig(
-            driver = jsonObj["driver"]?.jsonPrimitive?.content ?: "",
-            host = jsonObj["host"]?.jsonPrimitive?.content ?: "localhost",
-            port = jsonObj["port"]?.jsonPrimitive?.intOrNull ?: 0,
-            user = jsonObj["user"]?.jsonPrimitive?.content ?: "",
-            password = jsonObj["password"]?.jsonPrimitive?.content ?: "",
-            database = jsonObj["database"]?.jsonPrimitive?.content ?: ""
-        )
-    }
-
     private suspend fun startExport(
         exportId: String,
         config: ConnectionConfig,
-        payload: JsonObject,
-        outputChannel: Channel<String>
+        payload: kotlinx.serialization.json.JsonObject,
+        outputChannel: Channel<ByteArray>
     ) {
         if (activeExports.contains(exportId)) {
             sendError(exportId, "Export $exportId already running", outputChannel)
@@ -167,12 +152,12 @@ object ExportSubProcess {
                 ExportHandler.execute(exportId, config, payload, outputChannel)
             } catch (e: Exception) {
                 logger.error("Export failed: $exportId", e)
-                val errorResponse = Response(
-                    id = exportId,
-                    success = false,
-                    error = e.message ?: "Export failed"
+                @OptIn(ExperimentalSerializationApi::class)
+                val errFrame = proto.encodeToByteArray(
+                    Response.serializer(),
+                    Response(id = exportId, success = false, error = e.message ?: "Export failed")
                 )
-                outputChannel.send(json.encodeToString(Response.serializer(), errorResponse))
+                outputChannel.send(errFrame)
             } finally {
                 activeExports.remove(exportId)
             }
@@ -195,8 +180,11 @@ object ExportSubProcess {
         }
     }
 
-    private suspend fun sendError(id: String, message: String, outputChannel: Channel<String>) {
-        val response = Response(id = id, success = false, error = message)
-        outputChannel.send(json.encodeToString(Response.serializer(), response))
+    @OptIn(ExperimentalSerializationApi::class)
+    private suspend fun sendError(id: String, message: String, outputChannel: Channel<ByteArray>) {
+        val frame = proto.encodeToByteArray(
+            Response.serializer(), Response(id = id, success = false, error = message)
+        )
+        outputChannel.send(frame)
     }
 }

@@ -81,6 +81,13 @@ object DialectLoader {
             ?: throw UnsupportedOperationException("No dialect plugin loaded for driver: $driverName")
     }
 
+    /**
+     * 直接注册一个方言实例（用于测试 — 跳过 SPI 扫描）。
+     */
+    fun registerForTesting(driverName: String, dialect: DatabaseDialect) {
+        dialects[driverName] = dialect
+    }
+
     fun closeAll() {
         dialectClassLoader?.let {
             try { it.close() } catch (_: Exception) {}

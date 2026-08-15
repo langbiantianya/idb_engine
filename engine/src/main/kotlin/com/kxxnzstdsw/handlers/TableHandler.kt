@@ -28,32 +28,47 @@ object TableHandler {
             val columns = mutableListOf<JsonObject>()
             val metaData = conn.metaData
 
+            // H2 内存库：catalog 必须为 null；H2 unquoted 标识符默认大写，dialect quoteIdentifier 保留原大小写
+            // → 双重查找：原名 + 大写名，合并结果
+            val catalog = if (config.driver.equals("H2", ignoreCase = true)) null else config.database
+            val candidates = if (config.driver.equals("H2", ignoreCase = true)) {
+                listOf(tableName, tableName.uppercase()).distinct()
+            } else {
+                listOf(tableName)
+            }
+            val lookupSchema = if (config.driver.equals("H2", ignoreCase = true)) schema.ifBlank { "PUBLIC" } else schema
+
             // Get primary keys
             val primaryKeys = mutableSetOf<String>()
-            metaData.getPrimaryKeys(config.database, null, tableName).use { rs ->
-                while (rs.next()) {
-                    primaryKeys.add(rs.getString("COLUMN_NAME"))
+            for (candidate in candidates) {
+                metaData.getPrimaryKeys(catalog, lookupSchema, candidate).use { rs ->
+                    while (rs.next()) {
+                        primaryKeys.add(rs.getString("COLUMN_NAME"))
+                    }
                 }
             }
 
             // Get columns
-            metaData.getColumns(config.database, null, tableName, "%").use { rs ->
-                while (rs.next()) {
-                    val columnName = rs.getString("COLUMN_NAME")
-                    val defaultValue = rs.getString("COLUMN_DEF")
+            for (candidate in candidates) {
+                metaData.getColumns(catalog, lookupSchema, candidate, "%").use { rs ->
+                    while (rs.next()) {
+                        val columnName = rs.getString("COLUMN_NAME")
+                        val defaultValue = rs.getString("COLUMN_DEF")
+                        if (columns.any { it["name"]?.jsonPrimitive?.content == columnName }) continue
 
-                    columns.add(buildJsonObject {
-                        put("name", columnName)
-                        put("type", rs.getString("TYPE_NAME"))
-                        put("size", rs.getInt("COLUMN_SIZE"))
-                        put("nullable", rs.getInt("NULLABLE") == 1)
-                        put("isPrimaryKey", primaryKeys.contains(columnName))
-                        if (defaultValue != null) {
-                            put("defaultValue", defaultValue)
-                        } else {
-                            put("defaultValue", JsonNull)
-                        }
-                    })
+                        columns.add(buildJsonObject {
+                            put("name", columnName)
+                            put("type", rs.getString("TYPE_NAME"))
+                            put("size", rs.getInt("COLUMN_SIZE"))
+                            put("nullable", rs.getInt("NULLABLE") == 1)
+                            put("isPrimaryKey", primaryKeys.contains(columnName))
+                            if (defaultValue != null) {
+                                put("defaultValue", defaultValue)
+                            } else {
+                                put("defaultValue", JsonNull)
+                            }
+                        })
+                    }
                 }
             }
             Json.encodeToJsonElement(columns)
@@ -159,12 +174,16 @@ object TableHandler {
                         ?: throw IllegalArgumentException("Missing 'column' object")
                     val name = column["name"]?.jsonPrimitive?.content
                         ?: throw IllegalArgumentException("Column missing 'name'")
-                    val type = column["type"]?.jsonPrimitive?.content
-                        ?: throw IllegalArgumentException("Column missing 'type'")
+                    val type = column["type"]?.jsonPrimitive?.contentOrNull
                     val size = column["size"]?.jsonPrimitive?.intOrNull
                     val nullable = column["nullable"]?.jsonPrimitive?.booleanOrNull ?: true
                     val defaultValue = column["defaultValue"]?.jsonPrimitive?.contentOrNull
                     val newName = column["newName"]?.jsonPrimitive?.contentOrNull
+
+                    // type 与 newName 至少有其一：纯重命名时无 type；纯改类型时无 newName
+                    if (type == null && newName == null) {
+                        throw IllegalArgumentException("Column requires 'type' or 'newName'")
+                    }
 
                     dialect.buildModifyColumnSQL(tableName, name, type, size, nullable, defaultValue, newName)
                 }
@@ -202,6 +221,46 @@ object TableHandler {
             val sql = "DROP TABLE ${dialect.quoteIdentifier(tableName)}"
             conn.createStatement().use { it.execute(sql) }
             buildJsonObject { put("deleted", tableName) }
+        }
+    }
+
+    /**
+     * RENAME — 重命名表
+     * payload: { "oldName": "users", "newName": "users_new" }
+     */
+    suspend fun rename(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
+        val oldName = payload["oldName"]?.jsonPrimitive?.content
+            ?: payload["tableName"]?.jsonPrimitive?.content
+            ?: throw IllegalArgumentException("Missing 'oldName' (or 'tableName')")
+        val newName = payload["newName"]?.jsonPrimitive?.content
+            ?: throw IllegalArgumentException("Missing 'newName'")
+        val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
+
+        val connection = PoolManager.getConnection(config, schema)
+        val dialect = DialectLoader.getDialect(config.driver)
+        return@withContext connection.use { conn ->
+            dialect.renameTable(conn, oldName, newName)
+            buildJsonObject {
+                put("renamed", oldName)
+                put("newName", newName)
+            }
+        }
+    }
+
+    /**
+     * TRUNCATE — 清空表
+     * payload: { "tableName": "users" }
+     */
+    suspend fun truncate(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
+        val tableName = payload["tableName"]?.jsonPrimitive?.content
+            ?: throw IllegalArgumentException("Missing 'tableName'")
+        val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
+
+        val connection = PoolManager.getConnection(config, schema)
+        val dialect = DialectLoader.getDialect(config.driver)
+        return@withContext connection.use { conn ->
+            dialect.truncateTable(conn, tableName)
+            buildJsonObject { put("truncated", tableName) }
         }
     }
 }

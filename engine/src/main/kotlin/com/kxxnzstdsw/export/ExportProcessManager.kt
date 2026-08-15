@@ -1,50 +1,61 @@
 package com.kxxnzstdsw.export
 
+import com.kxxnzstdsw.models.ConnectionConfig
+import com.kxxnzstdsw.proto.PayloadValue
+import com.kxxnzstdsw.transport.Framing
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.serialization.json.*
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.protobuf.ProtoBuf
 import org.slf4j.LoggerFactory
-import java.io.BufferedReader
+import java.io.InputStream
+import java.io.OutputStream
 import java.io.File
-import java.io.InputStreamReader
-import java.io.OutputStreamWriter
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 导出子进程管理器
  *
  * 负责：
  * 1. 启动独立的导出子进程
- * 2. 通过 stdin/stdout 发送命令和接收响应
+ * 2. 通过 stdin/stdout 发送命令帧（protobuf + 长度前缀）和接收响应帧
  * 3. 子进程 stdout 输出通过 responseBuffer Channel 转发到主进程的 GlobalOutputChannel
  * 4. 支持停止指定导出任务
  * 5. 主进程关闭时自动停止子进程
+ *
+ * wire 格式：4 字节 BE 长度 + protobuf 编码字节（与主进程一致）
  */
 object ExportProcessManager {
 
     private val logger = LoggerFactory.getLogger(ExportProcessManager::class.java)
-    private val json = Json { ignoreUnknownKeys = true }
+
+    @OptIn(ExperimentalSerializationApi::class)
+    private val proto = ProtoBuf { encodeDefaults = true }
 
     // 子进程进程对象
     @Volatile
     private var process: Process? = null
 
-    // 子进程 stdin writer
+    // 子进程 stdin（写字节）
     @Volatile
-    private var stdinWriter: OutputStreamWriter? = null
+    private var stdinStream: OutputStream? = null
 
-    // 子进程 stdout reader
+    // 子进程 stdout（读字节）
     @Volatile
-    private var stdoutReader: BufferedReader? = null
+    private var stdoutStream: InputStream? = null
 
     // 子进程是否运行中
     private val _isRunning = MutableStateFlow(false)
     val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
 
+    // 子进程 stdin 互斥锁（writeFrame 不是线程安全，多个 startExport 调用需串行）
+    private val stdinLock = Any()
+
     // 内部缓冲 Channel：readOutputLoop 写入，forwardResponses 读取后发送到 GlobalOutputChannel
-    private val responseBuffer = Channel<String>(Channel.UNLIMITED)
+    private val responseBuffer = Channel<ByteArray>(Channel.UNLIMITED)
 
     /**
      * 启动导出子进程
@@ -102,10 +113,10 @@ object ExportProcessManager {
             }
 
             process = builder.start()
-            stdinWriter = OutputStreamWriter(process!!.outputStream, Charsets.UTF_8)
-            stdoutReader = BufferedReader(InputStreamReader(process!!.inputStream, Charsets.UTF_8))
+            stdinStream = process!!.outputStream
+            stdoutStream = process!!.inputStream
 
-            // 启动读取协程，读取子进程 stdout 写入 responseBuffer Channel
+            // 启动读取协程，读取子进程 stdout 帧写入 responseBuffer Channel
             CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
                 readOutputLoop()
             }
@@ -132,20 +143,17 @@ object ExportProcessManager {
     }
 
     /**
-     * 读取子进程 stdout，每行写入 responseBuffer Channel
+     * 读取子进程 stdout，每帧（4B length + protobuf bytes）写入 responseBuffer Channel
      */
     private suspend fun readOutputLoop() {
-        val reader = stdoutReader ?: return
+        val input = stdoutStream ?: return
         try {
-            var line: String?
-            while (withContext(Dispatchers.IO) {
-                    reader.readLine()
-                }.also { line = it } != null) {
-                line?.let {
-                    val len = it.length
-                    logger.debug("Subprocess stdout (len=$len): {}", it)
-                    responseBuffer.send(it)
-                }
+            while (true) {
+                val frame = withContext(Dispatchers.IO) {
+                    Framing.readFrame(input)
+                } ?: break  // EOF
+                logger.debug("Subprocess stdout frame received (${frame.size} bytes)")
+                responseBuffer.send(frame)
             }
         } catch (e: Exception) {
             logger.error("Error reading subprocess output", e)
@@ -161,13 +169,13 @@ object ExportProcessManager {
      */
     private suspend fun forwardResponses() {
         try {
-            for (response: String in responseBuffer) {
+            for (frame in responseBuffer) {
                 val ch = GlobalOutputChannel.channel
                 if (ch != null) {
-                    ch.send(response)
-                    logger.debug("Forwarded subprocess response to GlobalOutputChannel (len=${response.length})")
+                    ch.send(frame)
+                    logger.debug("Forwarded subprocess frame to GlobalOutputChannel (${frame.size} bytes)")
                 } else {
-                    logger.warn("GlobalOutputChannel is null, dropping subprocess response (len=${response.length})")
+                    logger.warn("GlobalOutputChannel is null, dropping subprocess frame (${frame.size} bytes)")
                 }
             }
         } catch (e: Exception) {
@@ -180,29 +188,30 @@ object ExportProcessManager {
      *
      * @param id 请求 ID
      * @param connection 数据库连接配置
-     * @param payload 导出参数
+     * @param payload 导出参数（proto payload：Map<String, PayloadValue>）
      */
-    fun startExport(id: String, connection: JsonObject, payload: JsonObject) {
-        val writer = stdinWriter
-        if (writer == null || !isRunning.value) {
+    @OptIn(ExperimentalSerializationApi::class)
+    fun startExport(id: String, connection: ConnectionConfig, payload: Map<String, PayloadValue>) {
+        val stream = stdinStream
+        if (stream == null || !isRunning.value) {
             logger.error("Cannot start export: subprocess not running")
             return
         }
 
-        val command = buildJsonObject {
-            put("CMD", "START_EXPORT")
-            put("id", id)
-            put("connection", connection)
-            put("payload", payload)
-        }
+        val cmd = ExportCommand(
+            kind = ExportCommandKind.START_EXPORT,
+            id = id,
+            connection = connection,
+            payload = payload
+        )
+        val frame = proto.encodeToByteArray(ExportCommand.serializer(), cmd)
 
         try {
-            synchronized(this) {
-                writer.write(json.encodeToString(JsonElement.serializer(), command))
-                writer.write("\n")
-                writer.flush()
+            synchronized(stdinLock) {
+                Framing.writeFrame(stream, frame)
+                stream.flush()
             }
-            logger.info("Sent START_EXPORT command: $id")
+            logger.info("Sent START_EXPORT command: $id (${frame.size} bytes)")
         } catch (e: Exception) {
             logger.error("Failed to send START_EXPORT command", e)
         }
@@ -213,23 +222,24 @@ object ExportProcessManager {
      *
      * @param exportId 导出任务 ID
      */
+    @OptIn(ExperimentalSerializationApi::class)
     fun stopExport(exportId: String) {
-        val writer = stdinWriter
-        if (writer == null || !isRunning.value) {
+        val stream = stdinStream
+        if (stream == null || !isRunning.value) {
             logger.warn("Cannot stop export: subprocess not running")
             return
         }
 
-        val command = buildJsonObject {
-            put("CMD", "STOP_EXPORT")
-            put("exportId", exportId)
-        }
+        val cmd = ExportCommand(
+            kind = ExportCommandKind.STOP_EXPORT,
+            exportId = exportId
+        )
+        val frame = proto.encodeToByteArray(ExportCommand.serializer(), cmd)
 
         try {
-            synchronized(this) {
-                writer.write(json.encodeToString(JsonElement.serializer(), command))
-                writer.write("\n")
-                writer.flush()
+            synchronized(stdinLock) {
+                Framing.writeFrame(stream, frame)
+                stream.flush()
             }
             logger.info("Sent STOP_EXPORT command: $exportId")
         } catch (e: Exception) {
@@ -240,6 +250,7 @@ object ExportProcessManager {
     /**
      * 停止子进程
      */
+    @OptIn(ExperimentalSerializationApi::class)
     fun stop() {
         logger.info("Stopping export subprocess...")
 
@@ -250,11 +261,14 @@ object ExportProcessManager {
 
         try {
             // 发送退出命令
-            stdinWriter?.let { writer ->
+            val stream = stdinStream
+            if (stream != null) {
                 try {
-                    synchronized(this) {
-                        writer.write("{\"CMD\":\"CMD_EXIT\"}\n")
-                        writer.flush()
+                    val cmd = ExportCommand(kind = ExportCommandKind.CMD_EXIT)
+                    val frame = proto.encodeToByteArray(ExportCommand.serializer(), cmd)
+                    synchronized(stdinLock) {
+                        Framing.writeFrame(stream, frame)
+                        stream.flush()
                     }
                 } catch (_: Exception) {
                     // ignore
@@ -265,10 +279,10 @@ object ExportProcessManager {
         }
 
         // 关闭流
-        try { stdinWriter?.close() } catch (_: Exception) { /* ignore */ }
-        try { stdoutReader?.close() } catch (_: Exception) { /* ignore */ }
-        stdinWriter = null
-        stdoutReader = null
+        try { stdinStream?.close() } catch (_: Exception) { /* ignore */ }
+        try { stdoutStream?.close() } catch (_: Exception) { /* ignore */ }
+        stdinStream = null
+        stdoutStream = null
 
         // 销毁进程
         process?.let { p ->

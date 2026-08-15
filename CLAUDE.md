@@ -6,7 +6,7 @@
 Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)** 的底层"数据库算力引擎"。它不暴露任何网络端口（如 HTTP/WebSocket），完全依附于 Wails 主进程的生命周期，通过标准输入输出流（StdIn/StdOut）接收指令并返回结果。
 
 **系统拓扑流：**
-`[前端 Webview]` ↔ `[Wails Go 主进程]` ↔ `(StdIn/StdOut JSON 管道)` ↔ `[Kotlin 独立子进程]` ↔ `[MySQL / PostgreSQL]`
+`[前端 Webview]` ↔ `[Wails Go 主进程]` ↔ `(StdIn/StdOut 长度前缀 Protobuf 帧)` ↔ `[Kotlin 独立子进程]` ↔ `[MySQL / PostgreSQL]`
 
 > **性能隔离**：数据导出模块运行在独立的子进程中，通过 `ExportProcessManager` 管理，防止大数据量导出时 OOM 影响主进程稳定性。
 
@@ -14,26 +14,38 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 
 - **核心语言**：Kotlin 2.4.0 / JDK 25
 - **异步框架**：kotlinx-coroutines 1.11.0 (协程实现非阻塞并发)
-- **数据库驱动**：原生 JDBC (MySQL Connector/J 9.7.0, PostgreSQL JDBC Driver 42.7.11)
+- **数据库驱动**：原生 JDBC (MySQL Connector/J 9.7.0, PostgreSQL JDBC Driver 42.7.11, H2 2.3.232 — 嵌入式进程内数据库，主要用于单元测试与无外部依赖的端到端验证)
 - **连接池管理**：HikariCP 7.0.2 (业界最高性能、资源占用低的连接池)
-- **数据序列化**：`kotlinx.serialization` 1.11.0 (无反射、轻量化、原生支持 Kotlin 协程与数据类)
+- **数据序列化**：`kotlinx.serialization` 1.11.0 — 同时支持 JSON（业务层）和 Protobuf（wire 层）
+- **Wire 协议**：`kotlinx-serialization-protobuf` 1.11.0 + 4-byte BE uint32 长度前缀（`kotlinx.serialization.protobuf.ProtoBuf` + 自定义 `Framing`）
 - **日志框架**：SLF4J 2.0.18 + Logback 1.5.13 (日志输出到本地滚动文件，不污染 stdout)
 - **构建与分发**：Gradle + ShadowJar 9.3.0+ (构建为瘦包 + 外部依赖，后续可通过 GraalVM Native Image 编译为无 JRE 依赖的二进制文件)
 - **脚本引擎**：LuaJIT 4.1.0 + Lua 5.1~5.5 via luajava (嵌入式 Lua 脚本引擎，用于造数功能中的数据生成规则定义，支持多版本切换)
 - **Excel 导出**：Apache POI 5.5.1 (poi-ooxml SXSSF 流式 API)
 - **Parquet 导出**：Apache Parquet 1.17.1 + Hadoop 3.5.0 (列式存储，文件系统抽象)
+- **测试框架**：JUnit 5 + kotlin.test — 189 测试全量通过（0 失败 / 0 错误），其中 H2 集成测试 41 项 + engine 集成测试 148 项
 
 ## 3. 核心机制设计 (Core Mechanisms)
 
 ### 3.1 管道通信协议 (Pipeline I/O Protocol)
 
+Kotlin 引擎与 Wails Go 主进程之间通过 stdin/stdout 传递**长度前缀 Protobuf 帧**（无 JSON 行）。
+
 - **交互介质**：标准输入 (`System.in`) 与 标准输出 (`System.out`)。
-- **数据格式**：单行压缩 JSON 字符串（Minified JSON）。
-- **边界标识**：使用换行符 `\n` 作为单次请求和响应的结束符。
-- **日志隔离**：Kotlin 内部的任何常规日志（如 `logger.info` 或异常堆栈）通过 Logback 写入本地滚动文件 (`~/.config/idb/logs/idb-engine.log`)，不输出到 stdout 或 stderr，绝对避免污染返回给 Go 进程的 JSON 结构。
+- **数据格式**：每帧结构 = `[4 字节 BE uint32 长度前缀][N 字节 protobuf payload]`
+  - `length`：大端序无符号 32 位整数，表示其后 payload 的字节数
+  - `payload`：由 `kotlinx-serialization-protobuf` 编码的 `Request` / `Response` / `ExportCommand` 字节流
+  - 单帧最大 256 MiB（`MAX_FRAME_SIZE`），超出抛错避免恶意输入耗尽内存
+- **帧边界**：由 4 字节长度前缀精确切分，**不再依赖换行符或 JSON 分隔符**；payload 内部允许出现任意字节（包括 `\n` / `\0` / UTF-8 多字节字符），不会破坏协议
+- **PayloadValue 类型**：`Request.payload` 和 `Response.data` 均为 `Map<String, PayloadValue>` 类型，模拟 `google.protobuf.Value` 的 `NULL` / `NUMBER` / `STRING` / `BOOL` / `STRUCT` / `LIST` 语义
+  - 业务层（Handler）继续使用 `JsonObject` / `JsonElement`；边界由 `com.kxxnzstdsw.proto.ProtoConverters` 双向转换（JsonElement ↔ PayloadValue）
+  - 数字统一为 `Double`（protobuf wire 不区分 int/long/double，handler 使用 `ProtoConverters.asIntOrNull` / `asLongOrNull` 安全提取）
+  - 字符串类型严格识别：JSON 字符串 `"42"` / `"true"` **不会被误判**为 NUMBER / BOOL（重要回归测试 `numeric string stays STRING`）
+- **日志隔离**：Kotlin 内部的任何常规日志（如 `logger.info` 或异常堆栈）通过 Logback 写入本地滚动文件 (`~/.config/idb/logs/idb-engine.log`)，**不输出到 stdout 或 stderr**，绝对避免污染返回给 Go 进程的 protobuf 字节流。
 - **异步处理**：使用 Kotlin 协程 (`kotlinx-coroutines`) 实现非阻塞并发处理，多个请求可同时执行互不阻塞。
-- **输出串行化**：通过 `Channel<String>` 确保所有响应按顺序输出到 stdout，一次只有一个输出，避免交错混乱。
-- **长驻运行**：主循环在 `runBlocking` 协程作用域中运行，使用 `BufferedReader.readLine()` 阻塞式读取输入，支持长期驻留运行，直到收到 `CMD_EXIT` 或 stdin 关闭（EOF）。
+- **输出串行化**：通过 `Channel<ByteArray>`（UNLIMITED）确保所有响应帧按顺序写出 stdout，一次只有一个输出，避免帧交错混乱。
+- **损坏输入容错**：主循环检测到截断 header / 损坏 payload 时发送 `id="unknown"` 的错误响应帧并退出（详见 `Main.kt`）；截断的输入流被视为不可恢复，调用方应停止发送并等待 EOF。
+- **长驻运行**：主循环在 `runBlocking` 协程作用域中运行，使用 `Framing.readFrame(System.in)` 阻塞式读取 4 字节 header + N 字节 payload，支持长期驻留运行，直到收到 `CMD_EXIT` 帧或 stdin 关闭（EOF）。
 
 ### 3.2 绝对无状态设计 (Stateless Design)
 
@@ -116,50 +128,76 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 - 子进程设置 `ExportEngine.isCancelled = true`，导出协程在下一次循环检查时抛出 `ExportCancelledException`
 - 被取消的导出任务返回 `{"success": false, "error": "Export cancelled by user"}`
 
-## 4. 数据交互契约 (JSON Protocol Spec)
+## 4. 数据交互契约 (Wire Protocol Spec)
+
+引擎与调用方（Wails Go 主进程）之间通过**长度前缀 Protobuf 帧**传递结构化数据。文档中所有 `Request.payload` / `Response.data` 的 JSON 示例均为 `PayloadValue` 在 `STRUCT` / `LIST` 嵌套下的逻辑表示，便于业务层理解字段含义；实际传输的字节由 `kotlinx-serialization-protobuf` 编码（**不包含 JSON 文本**，二进制紧凑格式）。
+
+### 4.0 Wire 帧格式 (Frame Format)
+
+```
+┌────────────────────────────────────────┬────────────────────────────────────────┐
+│  length: uint32 big-endian (4 bytes)   │  payload: protobuf-encoded bytes (N)  │
+└────────────────────────────────────────┴────────────────────────────────────────┘
+                                            ↑
+                              Request / Response / ExportCommand
+                                 (kotlinx-serialization-protobuf)
+```
+
+- **单帧最大长度**：`256 MiB`（`Framing.MAX_FRAME_SIZE`，超出抛 `IllegalArgumentException`）
+- **EOF 语义**：调用方关闭 stdin 后，引擎的 `readFrame` 返回 `null`，主循环优雅退出
+- **损坏语义**：调用方发送截断的 header（< 4 字节）或截断的 payload 时，引擎发送 `id="unknown"` 的错误响应帧并退出循环（流已损坏，无法恢复）
 
 ### 4.1 统一请求体 (Request Envelope)
 
-```json
-{
-  "id": "req-uuid-1234",
-  "category": "SCHEMA | USER | TABLE | DATA | SQL | SYSTEM | FUNCTION | EXPORT",
-  "action": "LIST | CREATE | UPDATE | DELETE | EXECUTE | GET_DDL | INFO | GRANTS | GENERATE | CALL | DEBUG | EXPORT",
-  "connection": {
-    "driver": "mysql | postgresql",
-    "host": "127.0.0.1",
-    "port": 3306,
-    "user": "root",
-    "password": "secret_password",
-    "database": "target_db"
-  },
-  "payload": {
-    // 具体的业务参数，详见功能模块
-  }
-}
-```
+`Request` 类的 protobuf schema（定义于 `models/Request.kt`）：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | `string` | 请求唯一 ID（UUID 或调用方自生成） |
+| `category` | `enum Category` | `SCHEMA` / `USER` / `TABLE` / `DATA` / `SQL` / `SYSTEM` / `FUNCTION` / `EXPORT` |
+| `action` | `enum Action` | `LIST` / `CREATE` / `UPDATE` / `DELETE` / `EXECUTE` / `GET_DDL` / `INFO` / `GRANTS` / `GENERATE` / `CALL` / `DEBUG` / `EXPORT` |
+| `connection` | `ConnectionConfig` | 见下表 |
+| `payload` | `map<string, PayloadValue>` | 业务参数，结构由 `category+action` 决定（详见第 5 章） |
+
+`ConnectionConfig`：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `driver` | `string` | `Mysql` / `Postgresql` / 其它方言插件声明的 driver 名 |
+| `host` | `string` | 数据库主机 |
+| `port` | `int32` | 数据库端口 |
+| `user` | `string` | 用户名 |
+| `password` | `string` | 密码（参与 `toHashKey()` 连接池缓存 key） |
+| `database` | `string` | 数据库名（PostgreSQL 二级模式下也可作为 schema 容器） |
+
+`payload` 中常见的字段类型示例（以 PayloadValue 表示）：
+- 字符串：`{"name": "users"}` → `{name: STRING}`
+- 整数 / 浮点：`{"page": 1, "pageSize": 50}` → `{page: NUMBER(1.0), pageSize: NUMBER(50.0)}`
+- 布尔：`{"isGrant": true}` → `{isGrant: BOOL(true)}`
+- 嵌套 struct：`{"options": {"charset": "utf8mb4"}}` → `{options: STRUCT{charset: STRING}}`
+- 数组：`{"privileges": ["SELECT", "INSERT"]}` → `{privileges: LIST[STRING, STRING]}`
+
+> **PayloadValue 严格区分**：`{"count": "42"}`（字符串）和 `{"count": 42}`（数字）编码为不同的 PayloadValue（STRING vs NUMBER），不会被自动转换。详见 `ProtoConvertersTest`。
 
 ### 4.2 统一响应体 (Response Envelope)
 
-```json
-{
-  "id": "req-uuid-1234",
-  "success": true,
-  "error": null,
-  "stream": false,
-  "end": false,
-  "data": {
-    // 根据 action 返回对应的结果 (如 List<Map> 或受影响行数)
-  }
-}
-```
+`Response` 类的 protobuf schema（定义于 `models/Response.kt`）：
 
-错误时 `success` 为 `false`，`error` 为异常信息字符串，`data` 为 null。
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `id` | `string` | — | 对应请求的 `id`（错误时也可能为 `"unknown"`） |
+| `success` | `bool` | `false` | 是否成功 |
+| `error` | `string` | `""` | 错误信息；`isError = error.isNotEmpty()`，非空即视为错误响应 |
+| `stream` | `bool` | `false` | 流式响应标记 |
+| `end` | `bool` | `false` | 流式结束标记 |
+| `data` | `PayloadValue` | `NULL` | 业务结果（NULL / NUMBER / STRING / BOOL / STRUCT / LIST） |
+
+> **注意**：`error` 在 protobuf schema 中为非空字符串（空串 `""` 表示无错误）。这是因为 `kotlinx-serialization-protobuf` 不支持 nullable 字段编码，`null` 会抛 `'null' is not supported for optional properties in ProtoBuf`。通过 `isError` 扩展属性便捷判断。
 
 **流式响应字段说明**：
-- `stream: true` — 表示当前响应属于流式序列（一条请求产生多行响应）
-- `end: true` — 流式序列的最后一行，`data` 为 null，Go 端收到后停止读取
-- 普通（非流式）响应中 `stream` 和 `end` 均为 `false`（默认值），Go 端无需特殊处理
+- `stream: true` — 表示当前响应属于流式序列（一条请求产生多帧响应）
+- `end: true` — 流式序列的最后一帧，`data` 为 `NULL`，调用方收到后停止读取
+- 普通（非流式）响应中 `stream` 和 `end` 均为 `false`（默认值），调用方无需特殊处理
 
 ## 5. 功能模块详细设计 (Feature Modules)
 
@@ -1019,43 +1057,81 @@ idb_engine/                          Gradle 多模块项目
 │       └── dialect/PostgreSQLDialect.kt
 │       + META-INF/services/com.kxxnzstdsw.dialect.DatabaseDialect
 │
+├── dialect-h2/                      H2 方言插件（嵌入式数据库，主要用于测试 + 无外部依赖场景）
+│   └── src/main/kotlin/
+│       └── dialect/H2Dialect.kt
+│       + META-INF/services/com.kxxnzstdsw.dialect.DatabaseDialect
+│   └── src/test/kotlin/
+│       └── dialect/H2DialectTest.kt           H2 方言 SPI 方法全量真机测试（41 测试）
+│
 └── engine/                          主引擎模块
     └── src/main/kotlin/
-        ├── Main.kt                    入口点，协程主循环、outputChannel 串行化输出、GlobalOutputChannel 注入
+        ├── Main.kt                    入口点，协程主循环、outputChannel 串行化输出、GlobalOutputChannel 注入；损坏 frame 容错
+        ├── proto/                     Protobuf wire 层
+        │   ├── PayloadValue.kt        PayloadValue / PayloadValueKind（仿 google.protobuf.Value）
+        │   └── ProtoConverters.kt     JsonElement ↔ PayloadValue 边界转换 + asIntOrNull/asLongOrNull 便捷提取
+        ├── transport/                 Wire 帧协议
+        │   └── Framing.kt             4-byte BE uint32 length prefix + N-byte payload；MAX_FRAME_SIZE = 256 MiB
         ├── dispatcher/
-        │   └── RequestDispatcher.kt   解析 JSON，分发请求路由
+        │   └── RequestDispatcher.kt   解析 protobuf Request，PayloadValue → JsonObject 转换，分发请求路由（含 VIEW/INDEX/FK/TRIGGER 新分类）
         ├── pool/
-        │   └── PoolManager.kt         HikariCP 动态管理与 SHA-256 缓存
+        │   └── PoolManager.kt         HikariCP 动态管理与 SHA-256 缓存（key 包含 password）
         ├── export/                    导出模块
         │   ├── ExportEngine.kt         导出引擎（核心逻辑）
         │   ├── ExportProcessManager.kt 导出子进程管理器（主进程端）
-        │   ├── ExportSubProcess.kt     导出子进程入口（子进程端）
+        │   ├── ExportSubProcess.kt     导出子进程入口（子进程端，protobuf 帧协议）
         │   └── GlobalOutputChannel.kt  全局输出 Channel（桥接子进程响应到主进程管线）
-        ├── handlers/                  业务处理层（通过 DialectLoader 获取方言）
+        ├── handlers/                  业务处理层（通过 DialectLoader 获取方言，内部使用 JsonObject）
         │   ├── SchemaHandler.kt
-        │   ├── TableHandler.kt
+        │   ├── TableHandler.kt        含 RENAME / TRUNCATE
         │   ├── DataHandler.kt
         │   ├── GenerateHandler.kt     造数引擎（LuaJIT 脚本 + 批量插入 + 事务）
         │   ├── FunctionHandler.kt     函数/存储过程管理（PostgreSQL 完整实现）
         │   ├── UserHandler.kt
-        │   ├── SqlEngineHandler.kt
-        │   └── SystemHandler.kt       JVM 系统信息采集
+        │   ├── SqlEngineHandler.kt    含 EXPLAIN
+        │   ├── SystemHandler.kt       JVM 系统信息 + SERVER_INFO + TEST_CONNECTION
+        │   ├── ViewHandler.kt         VIEW/LIST/CREATE/DELETE/GET_DDL
+        │   ├── IndexHandler.kt        INDEX/LIST/CREATE/DROP
+        │   ├── ForeignKeyHandler.kt   FOREIGN_KEY/LIST/CREATE/DROP
+        │   └── TriggerHandler.kt      TRIGGER/LIST/GET_DDL
         ├── loader/                    动态加载
         │   ├── DriverLoader.kt        扫描 drivers/ 目录，ServiceLoader 加载 JDBC 驱动
         │   └── DialectLoader.kt       扫描 dialects/ 目录，ServiceLoader 加载方言插件
-        └── models/                    数据契约
-            ├── Request.kt             Request / Category / Action / ConnectionConfig
-            ├── Response.kt             Response
-            └── GenerateModels.kt       GeneratePayload / TableGenerateConfig
+        └── models/                    数据契约（@Serializable protobuf）
+            ├── Request.kt             Request / Category（含 VIEW/INDEX/FK/TRIGGER） / Action（含 RENAME/TRUNCATE/EXPLAIN/TEST_CONNECTION/SERVER_INFO） / ConnectionConfig
+            ├── Response.kt            Response（error 为 "" + isError 扩展属性）
+            └── GenerateModels.kt      GeneratePayload / TableGenerateConfig
+
+    └── src/test/kotlin/                单元测试与端到端测试（JUnit 5 + kotlin.test，共 148 测试）
+        ├── testutil/H2Fixture.kt             共享 H2 内存库基类，每个测试独立 UUID 数据库 + tearDown
+        ├── transport/FramingTest.kt              帧协议 round-trip / BE 编码 / EOF / 大小限制（15 测试）
+        ├── proto/ProtoConvertersTest.kt          JsonElement ↔ PayloadValue 全路径双向（29 测试）
+        ├── pool/PoolManagerTest.kt               SHA-256 缓存 key 含 password / closeAll 释放（10 测试）
+        ├── loader/DialectLoaderTest.kt           SPI 自动发现注册 3 个方言（3 测试）
+        ├── WireFormatTest.kt                     Request/Response/ExportCommand protobuf round-trip（24 测试）
+        ├── WireProtocolSmokeTest.kt              真实子进程 stdin/stdout 端到端（5 测试）
+        └── integration/                          端到端 handler 测试（H2 内存库）
+            ├── SchemaHandlerIntegrationTest.kt   SCHEMA/LIST/CREATE/DELETE（5 测试）
+            ├── TableHandlerIntegrationTest.kt    TABLE/LIST/CREATE/UPDATE/DELETE/GET_DDL + RENAME/TRUNCATE（11 测试）
+            ├── DataHandlerIntegrationTest.kt     DATA/LIST 分页+流式 / CREATE/UPDATE/DELETE（11 测试）
+            ├── UserHandlerIntegrationTest.kt     USER/LIST/CREATE/DELETE/UPDATE/GRANTS（9 测试）
+            ├── FunctionHandlerIntegrationTest.kt FUNCTION/LIST/INFO/GET_DDL/CALL/DEBUG/UPDATE（VALIDATE）（7 测试）
+            ├── SqlEngineHandlerIntegrationTest.kt SQL/EXECUTE + EXPLAIN（9 测试）
+            ├── SystemHandlerIntegrationTest.kt   SYSTEM/INFO + TEST_CONNECTION + SERVER_INFO（3 测试）
+            ├── ViewHandlerIntegrationTest.kt     VIEW/LIST/CREATE/DELETE/GET_DDL（6 测试）
+            ├── IndexHandlerIntegrationTest.kt    INDEX/LIST/CREATE/DROP（含 UNIQUE）（6 测试）
+            ├── ForeignKeyHandlerIntegrationTest.kt FOREIGN_KEY/LIST/CREATE/DROP（含 CASCADE/SET NULL）（6 测试）
+            └── TriggerHandlerIntegrationTest.kt  TRIGGER/LIST/GET_DDL（H2 受限）（3 测试）
 
 构建产物结构：
 engine/build/libs/
 ├── idb-engine.jar       主引擎瘦包
 ├── libs/                运行时依赖（Kotlin、HikariCP、日志、api、LuaJIT）
-├── drivers/             JDBC 驱动（mysql-connector-j、postgresql）
+├── drivers/             JDBC 驱动（mysql-connector-j、postgresql、h2）
 └── dialects/            方言插件
     ├── idb-dialect-mysql.jar
-    └── idb-dialect-postgresql.jar
+    ├── idb-dialect-postgresql.jar
+    └── idb-dialect-h2.jar
 ```
 
 ## 8. 构建与部署 (Build & Deploy)
@@ -1104,50 +1180,98 @@ cd engine/build/libs && java -jar idb-engine.jar
 
 ### 8.3 与 Wails 集成
 
-Go 进程通过 `exec.Command` 启动 Kotlin 子进程，工作目录设为 `libs` 所在目录：
+Go 进程通过 `exec.Command` 启动 Kotlin 子进程，工作目录设为 `libs` 所在目录。**所有请求/响应均为长度前缀 Protobuf 帧，不再使用 JSON 行**：
 
 ```go
+import (
+    "encoding/binary"
+    "google.golang.org/protobuf/proto"
+    "your/proto/gen"  // 由 .proto 编译生成（或手写 message 结构）
+)
+
 cmd := exec.Command("java", "-jar", "idb-engine.jar")
 cmd.Dir = "/path/to/build/libs" // 确保 libs/ 目录可被找到
 stdin, _ := cmd.StdinPipe()
 stdout, _ := cmd.StdoutPipe()
 cmd.Start()
 
+// 编码 + 写帧
+func writeFrame(w io.Writer, payload []byte) error {
+    var header [4]byte
+    binary.BigEndian.PutUint32(header[:], uint32(len(payload)))
+    if _, err := w.Write(header[:]); err != nil {
+        return err
+    }
+    _, err := w.Write(payload)
+    return err
+}
+
+// 读帧
+func readFrame(r io.Reader) ([]byte, error) {
+    var header [4]byte
+    if _, err := io.ReadFull(r, header[:]); err != nil {
+        return nil, err
+    }
+    length := binary.BigEndian.Uint32(header[:])
+    payload := make([]byte, length)
+    _, err := io.ReadFull(r, payload)
+    return payload, err
+}
+
 // 发送请求
-stdin.Write([]byte(jsonRequest + "\n"))
+reqBytes, _ := proto.Marshal(&your_proto.Request{...})
+writeFrame(stdin, reqBytes)
 
 // 读取响应
-scanner := bufio.NewScanner(stdout)
-scanner.Scan()
-response := scanner.Text()
+respBytes, _ := readFrame(stdout)
+proto.Unmarshal(respBytes, &your_proto.Response{})
 ```
+
+> **流式响应读取**：连续调用 `readFrame(stdout)` 直到 `Response.end == true` 为止。每个帧都是独立的 protobuf 消息，调用方需按帧解析（不依赖换行符或 JSON 切分）。
 
 ## 9. 实现状态 (Implementation Status)
 
 ✅ 已完成：
-- 核心架构与通信协议（支持流式响应：stream/end 字段）
+- 核心架构与通信协议（**长度前缀 Protobuf 帧**，支持流式响应：stream/end 字段）
 - 异步非阻塞处理（Kotlin 协程 + Channel 输出串行化）
-- 数据库方言抽象层（DatabaseDialect SPI 接口 + MySQL/PostgreSQL 插件）
+- 数据库方言抽象层（DatabaseDialect SPI 接口 + MySQL/PostgreSQL/H2 插件）
 - 连接池管理（HikariCP + SHA-256 缓存）
 - 五大业务模块（Schema/Table/Data/User/SQL）全部改为 suspend 函数
 - 流式大数据输出（DATA LIST pageSize=0 / SQL SELECT，JDBC 游标模式防 OOM）
 - 动态 JDBC 驱动加载（扫描 drivers/ 目录，URLClassLoader + ServiceLoader）
 - 方言插件化动态加载（Gradle 多模块 + SPI，扫描 dialects/ 目录，DialectLoader 自动发现注册）
 - MODIFY_COLUMN 支持同时重命名（可选 newName）
-- 长驻运行机制（协程 + BufferedReader + Shutdown Hook）
+- 长驻运行机制（协程 + BlockingQueue 阻塞读 4-byte header + N-byte payload + Shutdown Hook）
 - 日志隔离（滚动文件，不污染 stdout/stderr）
 - 构建配置（Gradle 瘦包 + 外部依赖）
-- GET_DDL 返回建表语句（MySQL: SHOW CREATE TABLE / PG: information_schema 重建）
+- **Wire 协议重构**：从 JSON 行迁移到 **kotlinx-serialization-protobuf + 4-byte BE uint32 长度前缀帧**；自定义 `PayloadValue` 类型模拟 `google.protobuf.Value`（NULL/NUMBER/STRING/BOOL/STRUCT/LIST）；业务层继续用 `JsonObject`，边界由 `ProtoConverters` 双向转换；`Response.error` 改为 `String = ""` + `isError` 扩展属性（protobuf schema 不支持 nullable）；`ConnectionConfig.toHashKey()` 已包含 password
+- **主循环损坏 frame 容错**：截断 header / 损坏 payload → 发送 `id="unknown"` 错误响应帧并退出（流不可恢复）
+- **H2 嵌入式数据库支持**（dialect-h2 插件，in-memory + DB_CLOSE_DELAY=-1 + CASE_INSENSITIVE_IDENTIFIERS，35+ SPI 方法全实现）
+- **新分类与新操作**（DataGrip P0 对标）：
+  - `Category.VIEW/INDEX/FOREIGN_KEY/TRIGGER` 四个新对象分类，独立 handler 路由
+  - `Action.RENAME/TRUNCATE/EXPLAIN/TEST_CONNECTION/SERVER_INFO` 五个新操作
+  - 对应 Handler：ViewHandler / IndexHandler / ForeignKeyHandler / TriggerHandler + TableHandler/rename|truncate、SqlEngineHandler/explain、SystemHandler/testConnection|serverInfo
+- GET_DDL 返回建表语句（MySQL: SHOW CREATE TABLE / PG: information_schema 重建 / H2: 列重建 + TABLE_CONSTRAINTS 过滤掉同名系统表）
 - DATA LIST 支持 `where`/`orderBy` 原始 SQL 片段过滤与排序，方言级注入校验
 - SYSTEM INFO 返回 JVM 运行时信息（版本、内存、CPU、PID、运行时长等）
 - PostgreSQL 方言全面优化（listSchemas 支持两级查询：database 列表 + schema 列表、listTables 用 current_schemas(true)、所有 TABLE/DATA/SQL 操作支持 payload.schema 指定 search_path、listUsers 用 pg_roles、MODIFY_COLUMN 补齐 nullable/default、GET_DDL 含约束与索引、正则预编译）
 - 用户管理完整 CRUD（CREATE/DELETE 用户、修改密码、查询指定用户权限，MySQL 与 PostgreSQL 均已实现）
 - 造数引擎（LuaJIT 嵌入式脚本 + 多表按序造数 + 外键引用 `lastId()` + 批量插入 + 单事务 + Lua 沙箱 + 流式进度回报，`random_date`/`random_datetime`/`random_time` 返回 `LocalDate`/`LocalDateTime`/`LocalTime` 对象并按 JDBC 日期/时间类型绑定，避免 PG `varchar -> date/timestamp` 隐式转换报错）
-- 函数与存储过程管理模块（PostgreSQL: LIST（含触发器）/INFO/GET_DDL/CREATE/DELETE/CALL/DEBUG/VALIDATE，MySQL: 占位实现）
+- 函数与存储过程管理模块（PostgreSQL: LIST（含触发器）/INFO/GET_DDL/CREATE/DELETE/CALL/DEBUG/VALIDATE，MySQL/H2: 占位/受限实现）
 - **数据导出引擎（5 种格式：CSV/JSON Lines/SQL INSERT/Excel/Parquet，全链路 JDBC 游标流式逐行处理，POI SXSSF 支持百万行分 Sheet，导出子进程隔离防 OOM）**
+- **完整测试覆盖（189 测试全通过，0 失败 / 0 错误）**：
+  - `:dialect-h2:test` — H2 方言 41 测试（driverName / quoteIdentifier / buildColumnDefinition / buildAddColumnSQL / buildDropColumnSQL / listSchemas / listTables / getCreateTableDDL / listUsers / createUser / validateSqlFragment / listViews / listIndexes / listForeignKeys / listTriggers / renameTable / truncateTable / explainSQL / serverInfo / testConnection 等）
+  - `:engine:test` — 148 测试：
+    - `transport/FramingTest` (15) — 帧协议 round-trip / BE 编码 / EOF / 大小限制 / 截断检测
+    - `proto/ProtoConvertersTest` (29) — JsonElement ↔ PayloadValue 全路径
+    - `pool/PoolManagerTest` (10) — SHA-256 缓存 key 含 password / closeAll
+    - `loader/DialectLoaderTest` (3) — SPI 自动发现 3 个方言
+    - `WireFormatTest` (24) — Request/Response/ExportCommand protobuf round-trip
+    - `WireProtocolSmokeTest` (5) — 真实子进程 stdin/stdout 端到端
+    - `integration/*HandlerIntegrationTest` (62) — 11 个 handler 端到端覆盖（H2Fixture 共享基类 + 每个测试独立 UUID 内存库 + tearDown 自动 DROP ALL OBJECTS）
 
 ⏳ 待扩展：
-- MySQL 函数/存储过程管理完整实现
+- MySQL 函数/存储过程管理完整实现（H2 已支持基础 SPI；MySQL CREATE FUNCTION/PROCEDURE 待实现）
 - GraalVM Native Image 编译
 - 更多数据库方言插件（Oracle, SQL Server, SQLite — 只需实现 SPI 接口，放入 dialects/ 即可）
 - 性能监控与指标上报

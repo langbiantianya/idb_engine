@@ -188,7 +188,7 @@ interface DatabaseDialect {
     fun buildModifyColumnSQL(
         tableName: String,
         name: String,
-        type: String,
+        type: String?,
         size: Int?,
         nullable: Boolean,
         defaultValue: String?,
@@ -272,6 +272,179 @@ interface DatabaseDialect {
      * @param ddl 完整的 DDL 语句
      */
     suspend fun validateRoutineDDL(conn: Connection, ddl: String): Boolean
+
+    // endregion
+
+    // region Views (视图)
+
+    /**
+     * 列出 schema 下的所有视图
+     * @param schema Schema 名称（为空使用默认 schema）
+     */
+    suspend fun listViews(conn: Connection, schema: String): List<Map<String, String>> {
+        throw UnsupportedOperationException("$driverName 不支持视图列表")
+    }
+
+    /**
+     * 创建视图
+     * @param viewName 视图名称（未引用）
+     * @param definition 视图定义 SQL（如 "SELECT id, name FROM users"）
+     */
+    suspend fun createView(conn: Connection, viewName: String, definition: String): Boolean {
+        throw UnsupportedOperationException("$driverName 不支持创建视图")
+    }
+
+    /**
+     * 删除视图
+     */
+    suspend fun dropView(conn: Connection, viewName: String, ifExists: Boolean): Boolean {
+        throw UnsupportedOperationException("$driverName 不支持删除视图")
+    }
+
+    /**
+     * 获取视图完整 DDL
+     */
+    suspend fun getViewDDL(conn: Connection, viewName: String, schema: String): String {
+        throw UnsupportedOperationException("$driverName 不支持视图 DDL")
+    }
+
+    // endregion
+
+    // region Indexes (索引)
+
+    /**
+     * 列出表的所有索引
+     */
+    suspend fun listIndexes(conn: Connection, tableName: String): List<Map<String, String>> {
+        throw UnsupportedOperationException("$driverName 不支持索引列表")
+    }
+
+    /**
+     * 创建索引
+     * @param columns 要索引的列列表
+     * @param unique 是否唯一索引
+     */
+    suspend fun createIndex(
+        conn: Connection,
+        tableName: String,
+        indexName: String,
+        columns: List<String>,
+        unique: Boolean
+    ): Boolean {
+        throw UnsupportedOperationException("$driverName 不支持创建索引")
+    }
+
+    /**
+     * 删除索引
+     * @param tableName 部分方言需要（如 MySQL），可为空
+     */
+    suspend fun dropIndex(conn: Connection, indexName: String, tableName: String?): Boolean {
+        throw UnsupportedOperationException("$driverName 不支持删除索引")
+    }
+
+    // endregion
+
+    // region Foreign Keys (外键)
+
+    /**
+     * 列出表的所有外键
+     */
+    suspend fun listForeignKeys(conn: Connection, tableName: String): List<Map<String, String>> {
+        throw UnsupportedOperationException("$driverName 不支持外键列表")
+    }
+
+    /**
+     * 添加外键
+     */
+    suspend fun addForeignKey(
+        conn: Connection,
+        tableName: String,
+        fkName: String,
+        columns: List<String>,
+        refTable: String,
+        refColumns: List<String>,
+        onDelete: String?,
+        onUpdate: String?
+    ): Boolean {
+        throw UnsupportedOperationException("$driverName 不支持添加外键")
+    }
+
+    /**
+     * 删除外键
+     */
+    suspend fun dropForeignKey(conn: Connection, tableName: String, fkName: String): Boolean {
+        throw UnsupportedOperationException("$driverName 不支持删除外键")
+    }
+
+    // endregion
+
+    // region Triggers (触发器)
+
+    /**
+     * 列出 schema 下的所有触发器
+     */
+    suspend fun listTriggers(conn: Connection, schema: String): List<Map<String, String>> {
+        throw UnsupportedOperationException("$driverName 不支持触发器列表")
+    }
+
+    /**
+     * 获取触发器完整 DDL
+     */
+    suspend fun getTriggerDDL(conn: Connection, triggerName: String, schema: String): String {
+        throw UnsupportedOperationException("$driverName 不支持触发器 DDL")
+    }
+
+    // endregion
+
+    // region Table Operations (表操作)
+
+    /**
+     * 重命名表
+     */
+    suspend fun renameTable(conn: Connection, oldName: String, newName: String): Boolean {
+        throw UnsupportedOperationException("$driverName 不支持表重命名")
+    }
+
+    /**
+     * 清空表（TRUNCATE）
+     */
+    suspend fun truncateTable(conn: Connection, tableName: String): Boolean {
+        throw UnsupportedOperationException("$driverName 不支持清空表")
+    }
+
+    // endregion
+
+    // region SQL
+
+    /**
+     * 返回 SQL 的执行计划（每行一个 map，键为列名）
+     */
+    suspend fun explainSQL(conn: Connection, sql: String): List<Map<String, String>> {
+        throw UnsupportedOperationException("$driverName 不支持 EXPLAIN")
+    }
+
+    // endregion
+
+    // region Server
+
+    /**
+     * 测试连接是否有效
+     */
+    suspend fun testConnection(conn: Connection): Boolean {
+        return conn.isValid(5)
+    }
+
+    /**
+     * 获取数据库服务端信息（版本、模式等）
+     */
+    suspend fun getServerInfo(conn: Connection): Map<String, String> {
+        return mapOf(
+            "product" to (conn.metaData.databaseProductName ?: ""),
+            "version" to (conn.metaData.databaseProductVersion ?: ""),
+            "driver" to (conn.metaData.driverName ?: ""),
+            "driverVersion" to (conn.metaData.driverVersion ?: "")
+        )
+    }
 
     // endregion
 }

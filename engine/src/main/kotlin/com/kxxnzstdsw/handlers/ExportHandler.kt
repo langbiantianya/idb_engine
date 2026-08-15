@@ -1,17 +1,26 @@
+@file:OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+
 package com.kxxnzstdsw.handlers
 
+import com.kxxnzstdsw.export.ExportEngine
 import com.kxxnzstdsw.export.ExportFormat
 import com.kxxnzstdsw.export.ExportProcessManager
 import com.kxxnzstdsw.export.ExportRequest
-import com.kxxnzstdsw.export.ExportEngine
 import com.kxxnzstdsw.export.GlobalOutputChannel
 import com.kxxnzstdsw.models.ConnectionConfig
 import com.kxxnzstdsw.models.Response
+import com.kxxnzstdsw.proto.PayloadValue
+import com.kxxnzstdsw.proto.PayloadValueKind
+import com.kxxnzstdsw.proto.ProtoConverters
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.*
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.protobuf.ProtoBuf
 import java.io.File
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -25,10 +34,14 @@ import kotlin.time.Duration.Companion.milliseconds
  *   - 子进程模式：直接调用 ExportEngine.export 并把进度写入 outputChannel
  * - 进度响应在子进程模式下走 outputChannel；在主进程模式下由子进程通过
  *   GlobalOutputChannel 流入主进程统一的 stdout 管线
+ *
+ * 输出元素类型为 ByteArray（protobuf 编码的 Response 帧），
+ * 与 RequestDispatcher / Main.kt 的输出管线兼容。
  */
 object ExportHandler {
 
-    private val json = Json { ignoreUnknownKeys = true }
+    @OptIn(ExperimentalSerializationApi::class)
+    private val proto = ProtoBuf { encodeDefaults = true }
 
     /**
      * 执行导出（业务编排）
@@ -39,14 +52,14 @@ object ExportHandler {
      *
      * @param id 请求 ID（用于响应匹配）
      * @param config 数据库连接配置
-     * @param payload 导出参数
+     * @param payload 导出参数（JsonObject — Handler 内部使用的统一格式）
      * @param outputChannel 输出 Channel（仅子进程场景使用，主进程调用时传 null 即可）
      */
     suspend fun execute(
         id: String,
         config: ConnectionConfig,
         payload: JsonObject,
-        outputChannel: Channel<String>?
+        outputChannel: Channel<ByteArray>?
     ) {
         // 主进程模式：编排子进程（优先处理 stopExportId 分支，避免对其余字段的解析失败）
         if (isMainProcessMode()) {
@@ -59,21 +72,22 @@ object ExportHandler {
             val exportRequest = parseExportRequest(payload)
             withContext(Dispatchers.IO) {
                 ExportEngine.export(config, exportRequest) { progress ->
-                    val progressJson = buildJsonObject {
-                        put("exportedRows", progress.exportedRows)
-                        put("columnCount", progress.columnCount)
-                        put("completed", progress.completed)
-                        progress.filePath?.let { put("filePath", it) }
-                        progress.error?.let { put("error", it) }
-                    }
-                    val response = Response(
+                    val progressMap = mapOf(
+                        "exportedRows" to PayloadValue(kind = PayloadValueKind.NUMBER, numberValue = progress.exportedRows.toDouble()),
+                        "columnCount" to PayloadValue(kind = PayloadValueKind.NUMBER, numberValue = progress.columnCount.toDouble()),
+                        "completed" to PayloadValue(kind = PayloadValueKind.BOOL, boolValue = progress.completed),
+                        "filePath" to (progress.filePath?.let { PayloadValue(kind = PayloadValueKind.STRING, stringValue = it) } ?: PayloadValue.NULL),
+                        "error" to (progress.error?.let { PayloadValue(kind = PayloadValueKind.STRING, stringValue = it) } ?: PayloadValue.NULL)
+                    )
+                    val resp = Response(
                         id = id,
                         success = true,
                         stream = true,
                         end = progress.completed,
-                        data = progressJson
+                        data = PayloadValue(kind = PayloadValueKind.STRUCT, structValue = progressMap)
                     )
-                    outputChannel.send(json.encodeToString(Response.serializer(), response))
+                    val frame = proto.encodeToByteArray(Response.serializer(), resp)
+                    outputChannel.send(frame)
                 }
             }
         }
@@ -86,7 +100,7 @@ object ExportHandler {
         id: String,
         config: ConnectionConfig,
         payload: JsonObject,
-        outputChannel: Channel<String>?
+        outputChannel: Channel<ByteArray>?
     ) {
         val jarPath = findEngineJarPath()
         if (jarPath == null) {
@@ -99,18 +113,21 @@ object ExportHandler {
         if (stopExportId != null) {
             ensureSubprocessRunning(jarPath)
             ExportProcessManager.stopExport(stopExportId)
-            val response = Response(
+            val resp = Response(
                 id = id,
                 success = true,
-                data = buildJsonObject { put("stopped", stopExportId) }
+                data = PayloadValue(
+                    kind = PayloadValueKind.STRUCT,
+                    structValue = mapOf("stopped" to PayloadValue(kind = PayloadValueKind.STRING, stringValue = stopExportId))
+                )
             )
-            sendResponse(id, response, outputChannel)
+            sendResponse(id, resp, outputChannel)
             return
         }
 
-        // 启动导出分支
+        // 启动导出分支：把 JsonObject 转回 Map<String, PayloadValue> 投递到子进程
         ensureSubprocessRunning(jarPath)
-        ExportProcessManager.startExport(id, config.toJson(), payload)
+        ExportProcessManager.startExport(id, config, ProtoConverters.toPayloadMap(payload))
     }
 
     /**
@@ -183,12 +200,13 @@ object ExportHandler {
     /**
      * 发送响应（优先使用调用方的 outputChannel，回退到 GlobalOutputChannel）
      */
+    @OptIn(ExperimentalSerializationApi::class)
     private suspend fun sendResponse(
         id: String,
         response: Response,
-        outputChannel: Channel<String>?
+        outputChannel: Channel<ByteArray>?
     ) {
-        val encoded = json.encodeToString(Response.serializer(), response)
+        val encoded = proto.encodeToByteArray(Response.serializer(), response)
         val target = outputChannel ?: GlobalOutputChannel.channel
         target?.send(encoded)
     }
@@ -199,7 +217,7 @@ object ExportHandler {
     private suspend fun sendError(
         id: String,
         message: String,
-        outputChannel: Channel<String>?
+        outputChannel: Channel<ByteArray>?
     ) {
         sendResponse(id, Response(id = id, success = false, error = message), outputChannel)
     }

@@ -9,6 +9,7 @@ version = "1.0-SNAPSHOT"
 dependencies {
     implementation(project(":api"))
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.kotlinx.serialization.protobuf)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.hikari)
     implementation(libs.slf4j.api)
@@ -110,8 +111,19 @@ dependencies {
     }
     jdbcDrivers(libs.mysql.connector)
     jdbcDrivers(libs.postgresql)
+    jdbcDrivers(libs.h2)
 
     testImplementation(kotlin("test"))
+    testImplementation("org.junit.jupiter:junit-jupiter:5.11.4")
+    testImplementation(libs.h2)
+    // 集成测试需要引用方言 SPI 接口
+    testImplementation(project(":dialect-h2"))
+    testImplementation(project(":dialect-mysql"))
+    testImplementation(project(":dialect-postgresql"))
+}
+
+tasks.test {
+    useJUnitPlatform()
 }
 
 // 瘦 JAR：只打包 engine 代码和资源，不含依赖
@@ -131,7 +143,7 @@ tasks.jar {
 val jdbcDriverNames = configurations.named("jdbcDrivers").map { deps ->
     deps.files.map { it.name }.toSet()
 }
-val dialectProjectNames = setOf("idb-dialect-mysql", "idb-dialect-postgresql")
+val dialectProjectNames = setOf("idb-dialect-mysql", "idb-dialect-postgresql", "idb-dialect-h2")
 val copyDeps by tasks.registering(Copy::class) {
     from(configurations.runtimeClasspath) {
         exclude { element ->
@@ -152,6 +164,7 @@ val copyDrivers by tasks.registering(Copy::class) {
 val copyDialects by tasks.registering(Copy::class) {
     from(project(":dialect-mysql").tasks.named("jar"))
     from(project(":dialect-postgresql").tasks.named("jar"))
+    from(project(":dialect-h2").tasks.named("jar"))
     into(layout.buildDirectory.dir("libs/dialects"))
 }
 

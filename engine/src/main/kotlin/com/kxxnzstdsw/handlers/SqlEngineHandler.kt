@@ -89,4 +89,19 @@ object SqlEngineHandler {
     private fun rowToJson(rs: ResultSet): JsonElement {
         return Json.encodeToJsonElement(rowToMap(rs))
     }
+
+    /**
+     * EXPLAIN — 返回 SQL 的执行计划（行集合）
+     * payload: { "sql": "SELECT * FROM users" }
+     */
+    suspend fun explain(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
+        val sql = payload["sql"]?.jsonPrimitive?.content
+            ?: throw IllegalArgumentException("Missing 'sql' in payload")
+        val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
+        val connection = PoolManager.getConnection(config, schema)
+        val dialect = DialectLoader.getDialect(config.driver)
+        return@withContext connection.use { conn ->
+            Json.encodeToJsonElement(dialect.explainSQL(conn, sql))
+        }
+    }
 }

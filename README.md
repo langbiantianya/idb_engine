@@ -1,6 +1,6 @@
 # IDB Engine - Database Management Backend
 
-基于 Kotlin + JDBC 的无头数据库管理引擎，通过 stdin/stdout 与 Wails 前端通信。方言层采用 SPI 插件化架构，支持动态加载。
+基于 Kotlin + JDBC 的无头数据库管理引擎，通过 **stdin/stdout 上的长度前缀 Protobuf 帧** 与 Wails 前端通信（**无 JSON 行**）。方言层采用 SPI 插件化架构，支持动态加载。
 
 ## 项目结构
 
@@ -11,7 +11,10 @@ idb_engine/
 ├── api/                        公共 SPI 接口（DatabaseDialect + Driver 枚举）
 ├── dialect-mysql/              MySQL 方言插件 JAR
 ├── dialect-postgresql/         PostgreSQL 方言插件 JAR
-└── engine/                     主引擎（业务逻辑 + 动态加载）
+└── engine/                     主引擎（业务逻辑 + 动态加载 + Protobuf wire 协议）
+    ├── proto/                  Protobuf payload 类型（PayloadValue + ProtoConverters）
+    ├── transport/              帧协议（4-byte BE length prefix）
+    └── models/                 Request / Response / ExportCommand（@Serializable protobuf）
 ```
 
 引擎启动时通过 `ServiceLoader` 自动扫描 `dialects/` 目录，发现并注册所有方言插件，无需硬编码。
@@ -39,7 +42,7 @@ engine/build/libs/
 cd engine/build/libs && java -jar idb-engine.jar
 ```
 
-程序启动后自动加载 `dialects/` 目录中的方言插件和 `drivers/` 目录中的 JDBC 驱动，然后监听标准输入等待 JSON 请求。
+程序启动后自动加载 `dialects/` 目录中的方言插件和 `drivers/` 目录中的 JDBC 驱动，然后监听标准输入等待**长度前缀 Protobuf 帧**请求。
 
 ## 添加新方言
 
@@ -51,43 +54,107 @@ cd engine/build/libs && java -jar idb-engine.jar
 
 ## 通信协议
 
-### 请求格式
+引擎与调用方（Wails Go 主进程 / 任何客户端）通过 **stdin/stdout 上的长度前缀 Protobuf 帧** 传递结构化数据。**不使用 JSON 行**——每帧是紧凑的二进制 protobuf 消息。
 
-```json
-{
-  "id": "req-uuid-1234",
-  "category": "SCHEMA|USER|TABLE|DATA|SQL|SYSTEM|FUNCTION|EXPORT",
-  "action": "LIST|CREATE|UPDATE|DELETE|EXECUTE|GET_DDL|INFO|GRANTS|GENERATE|CALL|DEBUG|EXPORT",
-  "connection": {
-    "driver": "mysql|postgresql",
-    "host": "127.0.0.1",
-    "port": 3306,
-    "user": "root",
-    "password": "password",
-    "database": "test_db"
-  },
-  "payload": {}
+### Wire 帧格式
+
+```
+┌────────────────────────────────────────┬────────────────────────────────────────┐
+│  length: uint32 big-endian (4 bytes)   │  payload: protobuf-encoded bytes (N)  │
+└────────────────────────────────────────┴────────────────────────────────────────┘
+```
+
+- **length**：大端序无符号 32 位整数，表示其后 payload 的字节数
+- **payload**：由 `kotlinx-serialization-protobuf` 编码的 `Request` / `Response` / `ExportCommand` 字节流
+- **单帧最大**：256 MiB（`Framing.MAX_FRAME_SIZE`，超出抛错避免恶意输入耗尽内存）
+- **EOF 语义**：调用方关闭 stdin 后，引擎优雅退出
+- **损坏语义**：调用方发送截断 header 或损坏 payload 时，引擎发送 `id="unknown"` 的错误响应帧并退出
+
+**Go 端读写示例**：
+
+```go
+import (
+    "encoding/binary"
+    "io"
+    "google.golang.org/protobuf/proto"
+)
+
+func writeFrame(w io.Writer, payload []byte) error {
+    var header [4]byte
+    binary.BigEndian.PutUint32(header[:], uint32(len(payload)))
+    if _, err := w.Write(header[:]); err != nil { return err }
+    _, err := w.Write(payload)
+    return err
+}
+
+func readFrame(r io.Reader) ([]byte, error) {
+    var header [4]byte
+    if _, err := io.ReadFull(r, header[:]); err != nil { return nil, err }
+    payload := make([]byte, binary.BigEndian.Uint32(header[:]))
+    _, err := io.ReadFull(r, payload)
+    return payload, err
 }
 ```
 
-### 响应格式
+### 请求格式（Request）
 
-```json
-{
-  "id": "req-uuid-1234",
-  "success": true,
-  "error": null,
-  "stream": false,
-  "end": false,
-  "data": {}
-}
-```
+`Request` 的 protobuf schema：
 
-- `stream` / `end`：流式响应专用字段，普通响应中为 `false`（可忽略）。详见下方「流式全量查询」。
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | `string` | 请求唯一 ID |
+| `category` | `enum` | `SCHEMA` / `USER` / `TABLE` / `DATA` / `SQL` / `SYSTEM` / `FUNCTION` / `EXPORT` |
+| `action` | `enum` | `LIST` / `CREATE` / `UPDATE` / `DELETE` / `EXECUTE` / `GET_DDL` / `INFO` / `GRANTS` / `GENERATE` / `CALL` / `DEBUG` / `EXPORT` |
+| `connection` | `ConnectionConfig` | 见下表 |
+| `payload` | `map<string, PayloadValue>` | 业务参数，结构由 `category+action` 决定 |
+
+`ConnectionConfig`：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `driver` | `string` | `Mysql` / `Postgresql` |
+| `host` | `string` | 数据库主机 |
+| `port` | `int32` | 数据库端口 |
+| `user` | `string` | 用户名 |
+| `password` | `string` | 密码（参与连接池缓存 key） |
+| `database` | `string` | 数据库名 |
+
+### PayloadValue 类型
+
+`Request.payload` 和 `Response.data` 都是 `PayloadValue` 类型，模拟 `google.protobuf.Value` 的语义：
+
+| Kind | wire 字段 | 业务含义 | 示例 |
+|---|---|---|---|
+| `NULL` | — | 空值 | `null` |
+| `NUMBER` | `numberValue: double` | 数字（整数/浮点统一为 Double） | `42`, `3.14` |
+| `STRING` | `stringValue: string` | 字符串 | `"hello"`, `"42"` (严格区分于数字) |
+| `BOOL` | `boolValue: bool` | 布尔 | `true`, `false` |
+| `STRUCT` | `structValue: map<string, PayloadValue>` | 嵌套对象 | `{"name": "alice", "age": 30}` |
+| `LIST` | `listValue: list<PayloadValue>` | 数组 | `[1, "two", true, null]` |
+
+> **重要**：JSON 字符串 `"42"` / `"true"` 会被严格识别为 STRING，不会被自动转换为 NUMBER / BOOL。所有数字统一为 Double（protobuf wire 协议不区分 int/long/double）。
+
+为方便阅读，下方业务示例以 JSON 形式给出 `PayloadValue` 的逻辑结构（实际传输为二进制 protobuf）：
+
+### 响应格式（Response）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `id` | `string` | — | 对应请求的 `id`（错误时也可能为 `"unknown"`） |
+| `success` | `bool` | `false` | 是否成功 |
+| `error` | `string` | `""` | 错误信息；空串表示无错误，使用 `isError` 扩展属性判断 |
+| `stream` | `bool` | `false` | 流式响应标记 |
+| `end` | `bool` | `false` | 流式结束标记 |
+| `data` | `PayloadValue` | `NULL` | 业务结果 |
+
+**流式响应字段说明**：
+- `stream: true` — 当前响应属于流式序列（一条请求产生多帧响应）
+- `end: true` — 流式序列的最后一帧，`data` 为 `NULL`，调用方收到后停止读取
+- 普通（非流式）响应中 `stream` 和 `end` 均为 `false`（默认值），调用方无需特殊处理
 
 ## 功能示例
 
-> 所有请求均为单行压缩 JSON，以 `\n` 结尾发送到 stdin；响应从 stdout 读取一行。
+> 以下示例以 JSON 形式给出 `PayloadValue` 的逻辑结构，便于阅读。实际传输为长度前缀 Protobuf 帧，**不包含 JSON 文本**。所有响应帧均为单条 protobuf 消息。
 
 ### SCHEMA — 架构管理
 
@@ -1047,29 +1114,51 @@ PostgreSQL 函数、存储过程和触发器管理模块，支持创建、查询
 
 ### 退出程序
 
-发送 `CMD_EXIT` 或关闭 stdin 流（EOF），进程将清理所有连接池后正常退出。
+发送 `CMD_EXIT` 帧或关闭 stdin 流（EOF），进程将清理所有连接池后正常退出。
+
+## 测试
+
+项目包含 **73 个测试，全部通过（0 失败，0 错误）**：
+
+```bash
+./gradlew engine:test
+```
+
+测试报告：`engine/build/reports/tests/test/index.html`
+
+| 测试套件 | 测试数 | 范围 |
+|---|---|---|
+| `proto/FramingTest` | 15 | 帧协议 round-trip / BE 编码 / EOF / 大小限制 / 截断检测 |
+| `proto/ProtoConvertersTest` | 29 | JsonElement ↔ PayloadValue 全路径（含 `numeric string stays STRING` 回归：字符串 `"42"` 不被误判为 NUMBER） |
+| `WireFormatTest` | 24 | Request / Response / ExportCommand protobuf round-trip + `toHashKey` 6 字段独立性回归 |
+| `WireProtocolSmokeTest` | 5 | 真实子进程 stdin/stdout 端到端（SYSTEM INFO / 截断 header / 损坏 protobuf / 嵌套 payload / 流式响应） |
 
 ## 架构特性
 
+- **Protobuf Wire 协议**：所有 stdin/stdout 数据均为**长度前缀 protobuf 帧**（4-byte BE uint32 + N-byte payload），无 JSON 行；payload 内部允许任意字节（含 `\n` / `\0` / UTF-8 多字节）不破坏协议
+- **PayloadValue 类型系统**：`Request.payload` 和 `Response.data` 均为 `PayloadValue`（仿 `google.protobuf.Value`），业务层继续用 `JsonObject`，边界由 `ProtoConverters` 双向转换；字符串严格识别（`"42"` 不被误判为 NUMBER）
 - **方言插件化**：方言以独立 JAR 通过 SPI 动态加载，新增数据库无需改主引擎
 - **异步非阻塞**：基于 Kotlin 协程实现高并发请求处理
-- **输出串行化**：通过 Channel 确保标准输出不会交错混乱
+- **输出串行化**：通过 `Channel<ByteArray>` 确保所有响应帧按顺序写出 stdout，不会交错
+- **损坏输入容错**：主循环检测到截断 header / 损坏 payload 时发送错误帧并退出（流不可恢复）
 - **无状态设计**：每次请求携带完整连接信息
-- **连接池复用**：基于 SHA-256 Hash 缓存 HikariCP 实例
+- **连接池复用**：基于 SHA-256 Hash（包含 password）缓存 HikariCP 实例
 - **自动资源回收**：10 分钟空闲自动释放连接池
 - **安全防护**：强制使用 PreparedStatement 防止 SQL 注入
 - **JDBC 游标流式**：大结果集通过服务端游标逐行拉取，避免客户端内存溢出
-- **日志隔离**：所有日志输出到滚动文件 (`~/.config/idb/logs/idb-engine.log`)，不污染 stdout JSON 流
+- **日志隔离**：所有日志输出到滚动文件 (`~/.config/idb/logs/idb-engine.log`)，不污染 stdout protobuf 流
 - **嵌入式造数引擎**：LuaJIT 脚本驱动，支持多表按序造数、外键引用、沙箱隔离、流式进度回报；日期/时间列直接传 `LocalDate`/`LocalDateTime`/`LocalTime`，按 JDBC `DATE`/`TIMESTAMP`/`TIME` 类型绑定
 - **函数与存储过程管理**：PostgreSQL 完整实现（创建/查询/调用/调试/删除/详情自动解析类型，含触发器支持），MySQL 占位
 - **数据导出**：5 种格式（CSV / JSON Lines / SQL INSERT / Excel / Parquet），**独立子进程运行**，JDBC 游标流式逐行处理，支持超大数据量防 OOM
+- **完整测试**：73 个单元测试 + 端到端冒烟测试（详见「测试」章节）
 
 ## 技术栈
 
 - Kotlin 2.4.0
 - JDK 25
 - kotlinx-coroutines 1.11.0
-- kotlinx-serialization 1.11.0
+- kotlinx-serialization 1.11.0（JSON — 业务层）
+- **kotlinx-serialization-protobuf 1.11.0（wire 层）**
 - HikariCP 7.0.2
 - MySQL Connector/J 9.7.0
 - PostgreSQL JDBC 42.7.11
