@@ -1,10 +1,11 @@
 package com.kxxnzstdsw.server
 
+import com.kxxnzstdsw.ipc.IpcConfig
+import com.kxxnzstdsw.ipc.IpcTransportRegistry
 import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.loader.DriverLoader
 import com.kxxnzstdsw.pool.PoolManager
 import io.grpc.ServerBuilder
-import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder
 import org.slf4j.LoggerFactory
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -13,10 +14,10 @@ import kotlin.system.exitProcess
 /**
  * gRPC 服务端入口
  *
- * 替代历史 stdin/stdout 长度前缀 Protobuf 帧协议：
- * - HTTP/2 (Netty) over TCP loopback
- * - 默认端口 50051，可通过环境变量 IDB_ENGINE_PORT 覆盖
- * - 单帧最大 256 MiB（与历史 MAX_FRAME_SIZE 对齐）
+ * 通信层：gRPC over HTTP/2 + protobuf；传输层由 [com.kxxnzstdsw.ipc.IpcTransport] SPI 抽象，
+ * 支持 TCP（默认 :50051）/ UDS（Linux/macOS/BSD）/ Windows 命名管道（pipe:<name>）。
+ *
+ * 默认传输由 OS 自动检测（Windows=pipe, POSIX=unix），可通过环境变量 IDB_ENGINE_IPC 覆盖。
  */
 object IdbEngineServer {
     private val logger = LoggerFactory.getLogger(IdbEngineServer::class.java)
@@ -30,8 +31,11 @@ object IdbEngineServer {
      * 启动 gRPC 服务并阻塞至收到终止信号
      */
     fun run() {
-        val port = System.getenv("IDB_ENGINE_PORT")?.toIntOrNull() ?: 50051
-        logger.info("IDB Engine starting (gRPC mode), listening on :$port")
+        // 解析 IPC 配置 + 选择传输层实现
+        val cfg = IpcConfig.fromEnv()
+        val transport = IpcTransportRegistry.resolve(cfg)
+        transport.prepare()
+        logger.info("IDB Engine starting (gRPC mode), transport=${transport.describe()}")
 
         // 动态加载 drivers/ 目录下的 JDBC 驱动
         DriverLoader.loadFromDir(File("drivers"))
@@ -39,7 +43,8 @@ object IdbEngineServer {
         // 动态加载 dialects/ 目录下的方言插件
         DialectLoader.loadFromDir(File("dialects"))
 
-        // Add shutdown hook for graceful cleanup
+        // 关闭钩子 — 释放连接池 / 驱动 / 方言资源；transport.cleanup() 在 finally 块中
+        // 在 server.shutdown() 之后调用，避免删除 UDS 文件时仍有 in-flight RPC。
         Runtime.getRuntime().addShutdownHook(Thread {
             logger.info("Shutdown hook triggered")
             PoolManager.closeAll()
@@ -47,26 +52,17 @@ object IdbEngineServer {
             DialectLoader.closeAll()
         })
 
-        // 256 MiB 上限，与历史 MAX_FRAME_SIZE 一致
+        // 单帧最大 256 MiB（与历史 MAX_FRAME_SIZE 对齐）
         val maxMsgBytes = 256L * 1024L * 1024L
 
-        // 优先使用 Netty（更可控的性能参数），回退到 JDK ServerBuilder
-        val server = try {
-            (NettyServerBuilder.forPort(port)
-                .addService(IdbEngineImpl())
-                .maxInboundMessageSize(maxMsgBytes.toInt())
-                .build())
-        } catch (e: Throwable) {
-            logger.warn("Failed to build Netty server, falling back to default builder", e)
-            ServerBuilder.forPort(port)
-                .addService(IdbEngineImpl())
-                .maxInboundMessageSize(maxMsgBytes.toInt())
-                .build()
-        }
+        val server = transport.serverBuilder()
+            .addService(IdbEngineImpl())
+            .maxInboundMessageSize(maxMsgBytes.toInt())
+            .build()
 
         try {
             server.start()
-            logger.info("IDB Engine gRPC server started on :$port")
+            logger.info("IDB Engine gRPC server started, ${transport.describe()}")
             server.awaitTermination()
         } catch (e: InterruptedException) {
             logger.info("Server interrupted, shutting down")
@@ -81,8 +77,13 @@ object IdbEngineServer {
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
             }
+            transport.cleanup()
             logger.info("IDB Engine stopped")
             exitProcess(0)
         }
     }
+
+    @Suppress("unused")
+    private fun serverBuilderForCompatibility(port: Int): ServerBuilder<*> =
+        ServerBuilder.forPort(port)
 }
