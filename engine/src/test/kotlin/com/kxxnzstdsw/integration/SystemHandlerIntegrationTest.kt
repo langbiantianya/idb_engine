@@ -3,7 +3,6 @@ package com.kxxnzstdsw.integration
 import com.kxxnzstdsw.handlers.SystemHandler
 import com.kxxnzstdsw.testutil.H2Fixture
 import kotlinx.coroutines.runBlocking
-import kotlinx.serialization.json.*
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -14,32 +13,38 @@ class SystemHandlerIntegrationTest : H2Fixture() {
     @Test
     fun `info returns JVM stats without database connection`() {
         val info = SystemHandler.info()
-        val obj = info.jsonObject
-        assertNotNull(obj["jvmVersion"]?.jsonPrimitive?.content)
-        assertNotNull(obj["jvmName"]?.jsonPrimitive?.content)
-        assertNotNull(obj["osName"]?.jsonPrimitive?.content)
-        assertTrue(obj["availableProcessors"]!!.jsonPrimitive.intOrNull!! >= 1)
-        assertNotNull(obj["memory"]?.jsonObject?.get("max"))
+        assertNotNull(info.jvmVersion)
+        assertTrue(info.jvmVersion.isNotEmpty())
+        assertNotNull(info.jvmName)
+        assertTrue(info.availableProcessors >= 1)
+        assertTrue(info.memory.max > 0L, "max memory must be > 0")
+        assertTrue(info.memory.total >= 0L)
+        assertTrue(info.memory.used >= 0L)
+        assertTrue(info.memory.free >= 0L)
+        assertTrue(info.uptime > 0L)
+        assertTrue(info.pid > 0L)
     }
 
     @Test
     fun `testConnection returns ok=true for valid H2 connection`() = runBlocking {
         val result = SystemHandler.testConnection(config)
-        val obj = result.jsonObject
-        assertEquals(true, obj["ok"]?.jsonPrimitive?.booleanOrNull)
-        assertEquals("H2", obj["driver"]?.jsonPrimitive?.content)
+        assertTrue(result.ok)
+        assertEquals("H2", result.driver)
+        assertEquals("", result.error, "no error on success")
     }
 
     @Test
     fun `serverInfo returns H2 product name and version`() = runBlocking {
         val result = SystemHandler.serverInfo(config)
-        val obj = result.jsonObject
-        // H2 JDBC 返回 product = "H2 JDBC Driver"
-        assertTrue(obj["product"]?.jsonPrimitive?.content!!.contains("H2"))
-        assertNotNull(obj["version"]?.jsonPrimitive?.content)
-        // driver 是 JDBC 驱动名 "H2 JDBC Driver"（不是方言名）
-        assertTrue(obj["driver"]?.jsonPrimitive?.content!!.contains("H2"))
-        // url 应包含 jdbc:h2
-        assertTrue(obj["url"]?.jsonPrimitive?.content!!.startsWith("jdbc:h2"))
+        // H2 dialect returns: product, version, driver, url, ... (dialect-specific keys)
+        // version is on the typed field; extras holds the rest
+        assertNotNull(result.version)
+        assertTrue(result.version.isNotEmpty())
+        assertTrue(result.hasExtras(), "dialect-specific keys packed into extras")
+        val extrasObj = result.extras
+        assertEquals(com.google.protobuf.Value.KindCase.STRUCT_VALUE, extrasObj.kindCase)
+        val struct = extrasObj.structValue.fieldsMap
+        assertTrue(struct["product"]?.stringValue?.contains("H2") == true)
+        assertTrue(struct["url"]?.stringValue?.startsWith("jdbc:h2") == true)
     }
 }

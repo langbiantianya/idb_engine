@@ -1,9 +1,11 @@
 package com.kxxnzstdsw.integration
 
+import com.kxxnzstdsw.grpc.ForeignKeyCreateRequest
+import com.kxxnzstdsw.grpc.ForeignKeyDeleteRequest
+import com.kxxnzstdsw.grpc.ForeignKeyListRequest
 import com.kxxnzstdsw.handlers.ForeignKeyHandler
 import com.kxxnzstdsw.testutil.H2Fixture
 import kotlinx.coroutines.runBlocking
-import kotlinx.serialization.json.*
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -15,9 +17,11 @@ class ForeignKeyHandlerIntegrationTest : H2Fixture() {
     fun `LIST returns no foreign keys initially`() = runBlocking {
         executeUpdate("CREATE TABLE users (id INT PRIMARY KEY)")
         executeUpdate("CREATE TABLE orders (id INT PRIMARY KEY)")
-        val result = ForeignKeyHandler.list(config, buildJsonObject { put("tableName", "orders") })
-        // 一些 H2 元数据视图可能也返回带 FK 性质的默认值，但实际未创建 FK 时应为空
-        assertEquals(0, result.jsonArray.size)
+        val result = ForeignKeyHandler.list(
+            config,
+            ForeignKeyListRequest.newBuilder().setTableName("orders").build()
+        )
+        assertEquals(0, result.itemsCount)
     }
 
     @Test
@@ -25,29 +29,37 @@ class ForeignKeyHandlerIntegrationTest : H2Fixture() {
         executeUpdate("CREATE TABLE users (id INT PRIMARY KEY)")
         executeUpdate("CREATE TABLE orders (id INT PRIMARY KEY, user_id INT)")
 
-        ForeignKeyHandler.create(config, buildJsonObject {
-            put("tableName", "orders")
-            put("fkName", "fk_orders_user")
-            putJsonArray("columns") { add(JsonPrimitive("user_id")) }
-            put("refTable", "users")
-            putJsonArray("refColumns") { add(JsonPrimitive("id")) }
-            put("onDelete", "CASCADE")
-        })
+        ForeignKeyHandler.create(
+            config,
+            ForeignKeyCreateRequest.newBuilder()
+                .setTableName("orders")
+                .setFkName("fk_orders_user")
+                .addColumns("user_id")
+                .setRefTable("users")
+                .addRefColumns("id")
+                .setOnDelete("CASCADE")
+                .build()
+        )
 
-        var fks = ForeignKeyHandler.list(config, buildJsonObject { put("tableName", "orders") })
-        assertTrue(fks.jsonArray.any {
-            it.jsonObject["name"]?.jsonPrimitive?.content?.equals("fk_orders_user", ignoreCase = true) == true
-        }, "FK 应在列表中：$fks")
+        var fks = ForeignKeyHandler.list(
+            config,
+            ForeignKeyListRequest.newBuilder().setTableName("orders").build()
+        )
+        assertTrue(fks.itemsList.any { it.name.equals("fk_orders_user", ignoreCase = true) }, "FK 应在列表中")
 
-        ForeignKeyHandler.delete(config, buildJsonObject {
-            put("tableName", "orders")
-            put("fkName", "fk_orders_user")
-        })
+        ForeignKeyHandler.delete(
+            config,
+            ForeignKeyDeleteRequest.newBuilder()
+                .setTableName("orders")
+                .setFkName("fk_orders_user")
+                .build()
+        )
 
-        fks = ForeignKeyHandler.list(config, buildJsonObject { put("tableName", "orders") })
-        assertFalse(fks.jsonArray.any {
-            it.jsonObject["name"]?.jsonPrimitive?.content?.equals("fk_orders_user", ignoreCase = true) == true
-        })
+        fks = ForeignKeyHandler.list(
+            config,
+            ForeignKeyListRequest.newBuilder().setTableName("orders").build()
+        )
+        assertFalse(fks.itemsList.any { it.name.equals("fk_orders_user", ignoreCase = true) })
     }
 
     @Test
@@ -55,19 +67,23 @@ class ForeignKeyHandlerIntegrationTest : H2Fixture() {
         executeUpdate("CREATE TABLE users (id INT PRIMARY KEY)")
         executeUpdate("CREATE TABLE orders (id INT PRIMARY KEY, user_id INT)")
 
-        ForeignKeyHandler.create(config, buildJsonObject {
-            put("tableName", "orders")
-            put("fkName", "fk_orders_user")
-            putJsonArray("columns") { add(JsonPrimitive("user_id")) }
-            put("refTable", "users")
-            putJsonArray("refColumns") { add(JsonPrimitive("id")) }
-            put("onDelete", "CASCADE")
-        })
+        ForeignKeyHandler.create(
+            config,
+            ForeignKeyCreateRequest.newBuilder()
+                .setTableName("orders")
+                .setFkName("fk_orders_user")
+                .addColumns("user_id")
+                .setRefTable("users")
+                .addRefColumns("id")
+                .setOnDelete("CASCADE")
+                .build()
+        )
 
-        val fks = ForeignKeyHandler.list(config, buildJsonObject { put("tableName", "orders") })
-        val fk = fks.jsonArray.first {
-            it.jsonObject["name"]?.jsonPrimitive?.content?.equals("fk_orders_user", ignoreCase = true) == true
-        }
-        assertEquals("CASCADE", fk.jsonObject["on_delete"]?.jsonPrimitive?.content)
+        val fks = ForeignKeyHandler.list(
+            config,
+            ForeignKeyListRequest.newBuilder().setTableName("orders").build()
+        )
+        val fk = fks.itemsList.first { it.name.equals("fk_orders_user", ignoreCase = true) }
+        assertEquals("CASCADE", fk.onDelete)
     }
 }

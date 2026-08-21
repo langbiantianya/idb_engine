@@ -1,14 +1,18 @@
 package com.kxxnzstdsw.handlers
 
 import com.kxxnzstdsw.dialect.DatabaseDialect
-import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.grpc.ConnectionConfig
-import com.kxxnzstdsw.models.GeneratePayload
+import com.kxxnzstdsw.grpc.DataGenerateRequest
+import com.kxxnzstdsw.grpc.GenerateProgressFrame
+import com.kxxnzstdsw.grpc.PayloadAdapter
+import com.kxxnzstdsw.grpc.Row
+import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.*
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
 import org.slf4j.LoggerFactory
 import party.iroiro.luajava.JFunction
 import party.iroiro.luajava.Lua
@@ -30,7 +34,6 @@ import kotlin.random.Random
 
 object GenerateHandler {
     private val logger = LoggerFactory.getLogger(GenerateHandler::class.java)
-    private val json = Json { ignoreUnknownKeys = true }
 
     private val NAMES = listOf(
         "张三", "李四", "王五", "赵六", "孙七", "周八", "吴九", "郑十",
@@ -46,7 +49,7 @@ object GenerateHandler {
         val dialect: DatabaseDialect,
         val scriptIndex: Int,
         val totalScripts: Int,
-        val onProgress: (suspend (JsonElement) -> Unit)?,
+        val onProgress: (suspend (GenerateProgressFrame) -> Unit)?,
         var currentTable: String = "",
         var currentStmt: PreparedStatement? = null,
         var currentColumns: List<String>? = null,
@@ -61,46 +64,38 @@ object GenerateHandler {
         }
     }
 
+    /**
+     * 流式造数：每条 INSERT 实时通过 [onProgress] 回调一帧 [GenerateProgressFrame]。
+     */
     suspend fun execute(
         config: ConnectionConfig,
-        payload: JsonObject,
-        onProgress: (suspend (JsonElement) -> Unit)? = null
-    ): JsonElement = withContext(Dispatchers.IO) {
-        val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
-        val generatePayload = json.decodeFromJsonElement<GeneratePayload>(payload)
-        if (generatePayload.tables.isEmpty()) {
+        req: DataGenerateRequest,
+        onProgress: (suspend (GenerateProgressFrame) -> Unit)? = null
+    ): Unit = withContext(Dispatchers.IO) {
+        if (req.tablesList.isEmpty()) {
             throw IllegalArgumentException("'tables' must not be empty")
         }
 
-        val connection = PoolManager.getConnection(config, schema)
+        val connection = PoolManager.getConnection(config, req.schema)
         val dialect = DialectLoader.getDialect(config.driver)
 
         connection.use { conn ->
-            try {
-                for ((index, tableConfig) in generatePayload.tables.withIndex()) {
-                    val state = GenerateState(
-                        conn = conn, dialect = dialect,
-                        scriptIndex = index, totalScripts = generatePayload.tables.size,
-                        onProgress = onProgress
-                    )
+            for ((index, tableConfig) in req.tablesList.withIndex()) {
+                val state = GenerateState(
+                    conn = conn, dialect = dialect,
+                    scriptIndex = index, totalScripts = req.tablesList.size,
+                    onProgress = onProgress
+                )
 
-                    createLuaEngine(generatePayload.luaVersion).use { L ->
-                        L.openLibraries()
-                        applySandbox(L)
-                        registerHelpers(L, state)
-                        L.run(tableConfig.script)
-                    }
-
-                    state.closeStmt()
+                createLuaEngine(req.luaVersion.ifBlank { "luajit" }).use { L ->
+                    L.openLibraries()
+                    applySandbox(L)
+                    registerHelpers(L, state)
+                    L.run(tableConfig.script)
                 }
-            } catch (e: Exception) {
-                throw e
-            }
-        }
 
-        buildJsonObject {
-            put("success", true)
-            put("tablesProcessed", generatePayload.tables.size)
+                state.closeStmt()
+            }
         }
     }
 
@@ -206,25 +201,28 @@ object GenerateHandler {
             // 实时流式回报（包含 SQL 和实际插入的数据）
             state.onProgress?.let { cb ->
                 runBlocking {
-                    cb(buildJsonObject {
-                        put("table", state.currentTable)
-                        put("inserted", state.totalInserted)
-                        put("scriptInserted", state.scriptInserted)
-                        put("scriptIndex", state.scriptIndex + 1)
-                        put("totalScripts", state.totalScripts)
-                        put("sql", state.currentSql)
-                        put("data", buildJsonObject {
-                            row.forEach { (k, v) ->
-                                when (v) {
-                                    is Long -> put(k, v)
-                                    is Double -> put(k, v)
-                                    is Boolean -> put(k, v)
-                                    null -> put(k, JsonNull)
-                                    else -> put(k, v.toString())
-                                }
-                            }
-                        })
-                    })
+                    val rowProto = Row.newBuilder()
+                    row.forEach { (k, v) ->
+                        val value = when (v) {
+                            null -> PayloadAdapter.toValue(JsonNull)
+                            is Long -> PayloadAdapter.toValue(JsonPrimitive(v))
+                            is Double -> PayloadAdapter.toValue(JsonPrimitive(v))
+                            is Boolean -> PayloadAdapter.toValue(JsonPrimitive(v))
+                            else -> PayloadAdapter.toValue(JsonPrimitive(v.toString()))
+                        }
+                        rowProto.putValues(k, value)
+                    }
+                    cb(
+                        GenerateProgressFrame.newBuilder()
+                            .setTable(state.currentTable)
+                            .setInserted(state.totalInserted)
+                            .setScriptInserted(state.scriptInserted)
+                            .setScriptIndex(state.scriptIndex + 1)
+                            .setTotalScripts(state.totalScripts)
+                            .setSql(state.currentSql)
+                            .setData(rowProto.build())
+                            .build()
+                    )
                 }
             }
             0
@@ -266,9 +264,6 @@ object GenerateHandler {
             val end   = LocalDate.parse(lua.toString(2) ?: "2025-12-31", DateTimeFormatter.ISO_LOCAL_DATE)
             val days  = java.time.temporal.ChronoUnit.DAYS.between(start, end).toInt()
             val date = start.plusDays((if (days > 0) Random.nextInt(0, days + 1) else 0).toLong())
-            // 以 Java 对象形式入栈；Lua 侧 tostring()/.. 拼接时走 Lua 默认 tostring 返回类名，
-            // 但因为我们在 insert 前会通过 readLuaTable 用 isJavaObject 还原为 LocalDate，
-            // 拼字符串的场景请使用 random_date_str / random_datetime_str。
             lua.pushJavaObject(date)
             1
         })

@@ -41,7 +41,7 @@ class NamedPipeIpcTransport(private val cfg: IpcConfig) : IpcTransport {
         throw UnsupportedOperationException(
             "grpc-Java does not expose a public API for binding a gRPC server to a Windows " +
             "named pipe (pipe:<name>). Internal NettyTransportFactory supports it but is not " +
-            "in the public surface. Use IDB_ENGINE_IPC=tcp on Windows, or implement raw Netty " +
+            "in the public surface. Pass --ipc=tcp on Windows, or implement raw Netty " +
             "piping via JNA + CreateNamedPipe."
         )
     }

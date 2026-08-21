@@ -1,12 +1,14 @@
 # IDB Engine — Database Management Backend
 
-A headless, cross-platform database management engine written in Kotlin. Exposes a **gRPC** API (HTTP/2 + `google.protobuf.Value` payloads) over a configurable **IPC transport** (TCP loopback / Unix Domain Socket / Windows Named Pipe). Designed to be embedded in a Wails (Go) host with three pluggable dialects: MySQL, PostgreSQL, H2.
+A headless, cross-platform database management engine written in Kotlin. Exposes a **gRPC** API (HTTP/2 + strongly-typed per-Category protobuf messages) over a configurable **IPC transport** (TCP loopback / Unix Domain Socket / Windows Named Pipe). Designed to be embedded in a Wails (Go) host with three pluggable dialects: MySQL, PostgreSQL, H2.
 
-> **Current version: v2.1**
-> - gRPC server on `:50051` by default (`IDB_ENGINE_PORT` override)
-> - IPC transport selected via `IDB_ENGINE_IPC` (`tcp` / `unix` / `pipe`)
+> **Current version: v2.4**
+> - gRPC server on `:50051` by default (`--port <int>` override)
+> - IPC transport selected via `--ipc <tcp|unix|pipe>` CLI flag (default auto-detected per OS)
 > - Pluggable dialect architecture (add a new DB by implementing `DatabaseDialect` and dropping a JAR in `dialects/`)
-> - 159 tests passing across engine + H2 dialect modules
+> - **Handlers are strongly-typed end-to-end** — no `JsonObject` round-trip; dispatcher routes typed per-Category proto to typed handler methods returning typed `<Category><Action>Response` messages
+> - **Typed list-item envelopes** — `TableListItem` / `ViewListItem` / `IndexListItem` / `ForeignKeyListItem` / `TriggerListItem` / `FunctionListItem` / `FunctionDebugItem` / `UserGrantItem` / typed `Row` for dynamic rows; only genuinely dialect-specific shapes (USER.LIST overloaded, FUNCTION.CALL/INFO, SYSTEM.SERVER_INFO extras) keep `google.protobuf.Value`
+> - 179 tests passing across engine + H2 dialect modules (116 engine + 63 H2 dialect)
 
 ---
 
@@ -50,14 +52,20 @@ dialects/               方言插件（idb-dialect-{mysql,postgresql,h2}.jar）
 ### 运行
 
 ```bash
-# TCP loopback（默认 :50051）
+# TCP loopback（默认 :50051，POSIX 上自动 fallback 到 unix）
 cd engine/build/libs && java -jar idb-engine.jar
 
-# Unix Domain Socket（POSIX 自动检测）
-IDB_ENGINE_IPC=unix java -jar idb-engine.jar
+# 显式指定 TCP 端口
+java -jar idb-engine.jar --ipc tcp --port 60000
 
-# 自定义 TCP 端口
-IDB_ENGINE_PORT=60000 java -jar idb-engine.jar
+# 显式指定 Unix Domain Socket（路径可换）
+java -jar idb-engine.jar --ipc unix --uds-path /run/idb/engine.sock
+
+# Windows 命名管道（客户端需 --ipc=pipe；服务端在 Windows 上 grpc-java 暂未开放公共 API，详见 CLAUDE.md §3.6）
+java -jar idb-engine.jar --ipc pipe --pipe-name idb-engine
+
+# 打印完整 CLI 帮助
+java -jar idb-engine.jar --help
 ```
 
 ---
@@ -76,19 +84,24 @@ service IdbEngine {
 
 ### IPC 传输方式
 
-| `IDB_ENGINE_IPC` | 传输 | 平台 | 说明 |
+| `--ipc` | 传输 | 平台 | 说明 |
 |---|---|---|---|
-| `tcp`（默认） | TCP loopback `localhost:<port>` | 全平台 | 生产路径；`IDB_ENGINE_PORT` 控制端口 |
-| `unix` | Unix Domain Socket | Linux / macOS / BSD | Linux 用 epoll native，macOS/BSD 用 NIO；UDS 文件权限 `rw-------` |
-| `pipe` | Windows 命名管道 | Windows | 客户端可用；grpc-java 1.68 无 server-side API，`serverBuilder()` 抛 `UnsupportedOperationException` |
+| `tcp`（默认） | TCP loopback `localhost:<port>` | 全平台 | 生产路径；`--port` 控制端口（默认 50051） |
+| `unix` | Unix Domain Socket | Linux / macOS / BSD | Linux 用 epoll native，macOS/BSD 用 NIO；UDS 文件权限 `rw-------`；默认路径 `/tmp/idb-engine.sock` |
+| `pipe` | Windows 命名管道 | Windows | 客户端可用；grpc-java 1.68 无 server-side API，`serverBuilder()` 抛 `UnsupportedOperationException`；管道名默认 `idb-engine` |
 
-**自动检测**：未设置 `IDB_ENGINE_IPC` 时，Windows → `pipe`，POSIX → `unix`。
+**自动检测**：`--ipc` 缺省时，Windows → `pipe`，POSIX → `unix`。
 
-**环境变量**：
-- `IDB_ENGINE_IPC` — `tcp` / `unix` / `pipe`
-- `IDB_ENGINE_PORT` — TCP 端口（默认 `50051`）
-- `IDB_ENGINE_UDS_PATH` — UDS 文件路径（默认 `${XDG_RUNTIME_DIR:-/tmp}/idb-engine.sock`）
-- `IDB_ENGINE_PIPE_NAME` — 命名管道名称（默认 `idb-engine`）
+**所有 CLI 选项**：
+```
+--ipc <tcp|unix|pipe>     IPC 传输（默认自动检测）
+--port <int>              TCP 端口（默认 50051，仅 tcp 模式生效）
+--uds-path <path>         UDS 文件路径（默认 /tmp/idb-engine.sock）
+--pipe-name <name>        命名管道名称（默认 idb-engine；需匹配 ^[A-Za-z0-9_.-]{1,64}$）
+--help / -h               打印 CLI 用法并退出
+```
+
+解析失败抛 `IllegalStateException`（启动入口打印到 stderr，`exitProcess(2)`）。
 
 ### Go 端连接示例
 
@@ -120,23 +133,35 @@ stream, _ := client.Handle(ctx, &pb.Request{
         Driver: "Mysql", Host: "127.0.0.1", Port: 3306,
         User: "root", Password: "secret", Database: "test",
     },
+    Body: &pb.Request_TableRequest{
+        TableRequest: &pb.TableRequest{
+            Body: &pb.TableRequest_List{
+                List: &pb.TableListRequest{Schema: "public"},
+            },
+        },
+    },
 })
 for {
     resp, err := stream.Recv()
     if err == io.EOF { break }
     // 处理 resp — 流式响应检查 resp.End
+    // typed body 用 switch resp.GetBody().(type) 分发到 12 个 Category
 }
 ```
 
 ### 请求格式
 
+`Request` envelope（`id` / `category` / `action` / `connection` + `oneof body` 路由到 12 个 Category 强类型消息）：
+
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `id` | string | 请求唯一 ID |
-| `category` | enum | 13 个分类（详见下表） |
+| `category` | enum | 12 个分类（详见下表） |
 | `action` | enum | 17 个操作（详见下表） |
 | `connection` | ConnectionConfig | 连接凭证（`driver`/`host`/`port`/`user`/`password`/`database`/`schema`/`use_ssl`/`properties`） |
-| `payload` | `map<string, Value>` | 业务参数（`google.protobuf.Value`） |
+| `body` | `oneof` | 12 个 Category 强类型 message（`system_request` / `schema_request` / `user_request` / `table_request` / `data_request` / `sql_request` / `function_request` / `view_request` / `index_request` / `foreign_key_request` / `trigger_request` / `export_request`） |
+
+每个 Category 消息内部也用 `oneof` 按 Action 派发（如 `TableRequest` → `list` / `column_list` / `create` / `update` / `get_ddl` / `rename` / `delete` / `truncate`）。每个 Action 子消息字段为 snake_case（protobuf 生成 camelCase getter）。`ColumnDef`、`GenerateTable` 等跨 Action 共享类型在顶层定义。
 
 **Category 枚举**：`SCHEMA` / `USER` / `TABLE` / `DATA` / `SQL` / `SYSTEM` / `FUNCTION` / `EXPORT` / `VIEW` / `INDEX` / `FOREIGN_KEY` / `TRIGGER`
 
@@ -146,6 +171,8 @@ for {
 
 ### 响应格式
 
+`Response` envelope（`id` / `success` / `error` / `stream` / `end` + `oneof body` 路由到 12 个 Category 强类型消息 + 4 个流式帧类型）：
+
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `id` | string | 对应请求 ID |
@@ -153,9 +180,11 @@ for {
 | `error` | string | 错误信息；空串表示无错误 |
 | `stream` | bool | 流式响应标记 |
 | `end` | bool | 流式结束标记 |
-| `data` | Value | 业务结果（NULL / NUMBER / STRING / BOOL / STRUCT / LIST） |
+| `body` | `oneof` | 12 个 Category 强类型 message（`schema` / `user` / `table` / `data` / `sql` / `system` / `function` / `view` / `index` / `foreign_key` / `trigger` / `export`） + 4 个流式帧（`data_row_frame` / `sql_row_frame` / `gen_progress_frame`） + `generate_terminal` |
 
-**PayloadValue（`google.protobuf.Value`）**：业务层的字符串 `"42"` 严格识别为 STRING，不会被自动转为 NUMBER。
+每个 Category 消息内部也用 `oneof` 按 Action 派发。**v2.4 起**，列表项已用强类型 per-item proto 替代 `repeated google.protobuf.Value`（`TableListItem` / `ViewListItem` / `IndexListItem` / `ForeignKeyListItem` / `TriggerListItem` / `FunctionListItem` / `FunctionDebugItem` / `UserGrantItem`），动态行使用 typed `Row { map<string, Value> values }` wrapper；仅确实按方言变化的 item shape（USER.LIST 在 MySQL 是 `{user, host}`、PG 是 `{user}`）与 dialect-specific extras（如 SYSTEM.SERVER_INFO 方言扩展、FUNCTION.CALL/INFO 返回）保留 `Value`。
+
+**Handler 调用契约**：13 个业务 handler 全部直接接收 typed per-Category proto 消息、返回 typed per-Action proto 消息；`RequestDispatcher` 是 (Category, Action) → handler 的薄路由层，handler 返回的 typed 消息被装入 `Response.body` 对应 oneof 分支。**无 `JsonObject` 边界映射**。
 
 ---
 
@@ -684,7 +713,7 @@ SYSTEM 还支持 `TEST_CONNECTION` 和 `SERVER_INFO`（表中未列出）。
 
 ## 测试
 
-**159 个测试全通过（0 失败，0 错误）**：
+**179 个测试全通过（0 失败，0 错误）**：
 
 ```bash
 ./gradlew test
@@ -697,15 +726,16 @@ SYSTEM 还支持 `TEST_CONNECTION` 和 `SERVER_INFO`（表中未列出）。
 | 模块 / 套件 | 测试数 | 范围 |
 |---|---|---|
 | `dialect-h2:test` | 63 | H2 方言 SPI 方法全量 |
-| `engine:test` | 96 | — |
-| └ `ipc/IpcConfigTest` | 9 | 环境变量解析 + 自动平台检测 |
+| `engine:test` | 116 | — |
+| └ `ipc/IpcConfigTest` | 20 | CLI 参数解析 + 自动平台检测 + 错误路径 |
 | └ `ipc/IpcTransportTest` | 7 | SPI 各实现构造 |
 | └ `ipc/TcpIpcTransportIntegrationTest` | 1 | TCP loopback + gRPC round-trip |
 | └ `ipc/UnixSocketIpcTransportIntegrationTest` | 2 | UDS + gRPC round-trip（`@EnabledOnOs(LINUX, MAC, FREEBSD)`） |
 | └ `ipc/NamedPipeIpcTransportIntegrationTest` | 2 | 客户端 channel + serverBuilder 限制 |
 | └ `pool/PoolManagerTest` | 11 | SHA-256 key + closeAll |
 | └ `loader/DialectLoaderTest` | 5 | SPI 自动发现 |
-| └ `integration/*HandlerIntegrationTest` | 60 | 11 个 handler × H2Fixture |
+| └ `integration/*HandlerIntegrationTest` | 60 | 11 个 handler × H2Fixture（typed proto builders 直接调 handler） |
+| └ `integration/TypedRequestEnvelopeIntegrationTest` | 7 | 端到端 typed Request → dispatcher → typed Response |
 
 ---
 
@@ -721,8 +751,8 @@ SYSTEM 还支持 `TEST_CONNECTION` 和 `SERVER_INFO`（表中未列出）。
 
 ## 架构特性
 
-- **gRPC + `google.protobuf.Value`**：所有 wire 上是标准 protobuf，payload 内部允许任意字节（含 `\n` / `\0` / UTF-8 多字节字符）
-- **跨平台 IPC Transport**：TCP / UDS / Named Pipe 三实现，env var 选择，业务层零感知
+- **gRPC + 强类型 per-Category 消息**：12 个 Category 各有自己的 `oneof body` 消息，wire 上是标准 protobuf，无 stringly-typed payload；`repeated google.protobuf.Value` 承载方言差异化的 item 形状
+- **跨平台 IPC Transport**：TCP / UDS / Named Pipe 三实现，CLI `--ipc` 参数选择，业务层零感知
 - **方言插件化**：方言以独立 JAR 通过 SPI 动态加载
 - **绝对无状态**：每次请求携带完整连接凭证
 - **连接池复用**：基于 SHA-256 Hash（包含 password）缓存 HikariCP 实例，10 分钟空闲自动释放
@@ -733,6 +763,7 @@ SYSTEM 还支持 `TEST_CONNECTION` 和 `SERVER_INFO`（表中未列出）。
 - **导出子进程隔离**：防止大数据量导出时 OOM 主进程
 - **LuaJIT 造数引擎**：LuaJIT + Lua 5.1~5.5 多版本切换、沙箱隔离、流式进度
 - **完整 Routine / View / Index / FK / Trigger 管理**
+- **Typed handlers end-to-end**：13 个 handler 全部接收 typed per-Category proto 消息、返回 typed `<Category><Action>Response` 消息；无 `JsonObject` payload 解析；`RequestDispatcher` 是 (Category, Action) → handler 的薄路由层
 
 ---
 

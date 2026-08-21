@@ -1,6 +1,6 @@
 // IDB Engine — 导出子进程 RPC
 // 设计：主进程在端口 P0 上托管 IdbEngine 服务；同进程同时托管一个 ExportHub gRPC 服务（端口 P1）。
-// 导出子进程以 gRPC client 形式连接到 ExportHub，发送 ExportCommand 流，接收流式 ExportResponse。
+// 导出子进程以 gRPC client 形式连接到 ExportHub，发送 ExportCommand 流，接收流式 ExportHubResponse。
 // 与历史 stdin/stdout 管道不同：现在统一走 gRPC/HTTP2，子进程可同时复用同一 channel 处理多个导出。
 
 syntax = "proto3";
@@ -27,7 +27,9 @@ message ExportCommand {
 }
 
 // 子进程响应 — 由子进程 → 主进程（与 IdbEngine 响应体同构，方便主进程直接转发给原始调用方）
-message ExportResponse {
+// 注：与 idb_engine.proto 中的 ExportResponse 不同类型 — 后者是 typed oneof body，
+// 此处保留旧的 envelope 形态以维持子进程兼容性。
+message ExportHubResponse {
   string id = 1;          // 业务请求 ID（与 ExportCommand.id 对应）
   bool   success = 2;
   string error   = 3;
@@ -38,5 +40,5 @@ message ExportResponse {
 
 // 导出服务 — 双向流：主进程可并发推送多个 START_EXPORT，子进程返回流式进度
 service ExportHub {
-  rpc Stream(stream ExportCommand) returns (stream ExportResponse);
+  rpc Stream(stream ExportCommand) returns (stream ExportHubResponse);
 }

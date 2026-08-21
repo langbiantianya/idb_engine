@@ -2,17 +2,19 @@ package com.kxxnzstdsw.ipc
 
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
+import org.junit.jupiter.api.condition.EnabledOnOs
+import org.junit.jupiter.api.condition.OS
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * [IpcConfig] 环境变量解析测试 — 使用注入的 env 函数避免污染系统环境。
+ * [IpcConfig] CLI 参数解析测试。
  */
 class IpcConfigTest {
 
     @Test
-    fun `default OS detection chooses pipe on Windows`() {
-        val cfg = IpcConfig.fromEnv { null }
+    fun `default OS detection chooses pipe on Windows when --ipc omitted`() {
+        val cfg = IpcConfig.fromArgs(emptyArray())
         val os = System.getProperty("os.name", "").lowercase()
         if (os.contains("win")) {
             assertEquals(IpcKind.PIPE, cfg.kind)
@@ -22,85 +24,140 @@ class IpcConfigTest {
     }
 
     @Test
-    fun `explicit tcp overrides OS detection`() {
-        val cfg = IpcConfig.fromEnv {
-            if (it == "IDB_ENGINE_IPC") "tcp"
-            else null
-        }
-        assertEquals(IpcKind.TCP, cfg.kind)
+    fun `empty args keeps default port and uds path and pipe name`() {
+        val cfg = IpcConfig.fromArgs(emptyArray())
         assertEquals(50051, cfg.tcpPort)
+        assertEquals("/tmp/idb-engine.sock", cfg.udsPath)
+        assertEquals("idb-engine", cfg.pipeName)
     }
 
     @Test
-    fun `explicit unix overrides OS detection`() {
-        val cfg = IpcConfig.fromEnv {
-            if (it == "IDB_ENGINE_IPC") "unix" else null
-        }
+    fun `--ipc tcp overrides auto-detect`() {
+        val cfg = IpcConfig.fromArgs(arrayOf("--ipc", "tcp"))
+        assertEquals(IpcKind.TCP, cfg.kind)
+    }
+
+    @Test
+    fun `--ipc unix overrides auto-detect`() {
+        val cfg = IpcConfig.fromArgs(arrayOf("--ipc", "unix"))
         assertEquals(IpcKind.UNIX, cfg.kind)
     }
 
     @Test
-    fun `explicit pipe overrides OS detection`() {
-        val cfg = IpcConfig.fromEnv {
-            if (it == "IDB_ENGINE_IPC") "pipe" else null
-        }
+    fun `--ipc pipe overrides auto-detect`() {
+        val cfg = IpcConfig.fromArgs(arrayOf("--ipc", "pipe"))
         assertEquals(IpcKind.PIPE, cfg.kind)
     }
 
     @Test
-    fun `IDB_ENGINE_PORT overrides default tcp port`() {
-        val cfg = IpcConfig.fromEnv {
-            when (it) {
-                "IDB_ENGINE_IPC" -> "tcp"
-                "IDB_ENGINE_PORT" -> "60000"
-                else -> null
-            }
-        }
+    fun `--ipc value is case-insensitive`() {
+        val cfg = IpcConfig.fromArgs(arrayOf("--ipc", "TCP"))
+        assertEquals(IpcKind.TCP, cfg.kind)
+    }
+
+    @Test
+    fun `--port 60000 is honored`() {
+        val cfg = IpcConfig.fromArgs(arrayOf("--ipc", "tcp", "--port", "60000"))
         assertEquals(60000, cfg.tcpPort)
     }
 
     @Test
-    fun `IDB_ENGINE_UDS_PATH overrides default uds path`() {
-        val cfg = IpcConfig.fromEnv {
-            when (it) {
-                "IDB_ENGINE_IPC" -> "unix"
-                "IDB_ENGINE_UDS_PATH" -> "/var/run/idb.sock"
-                else -> null
-            }
+    fun `--port 0 is accepted for ephemeral binding`() {
+        val cfg = IpcConfig.fromArgs(arrayOf("--ipc", "tcp", "--port", "0"))
+        assertEquals(0, cfg.tcpPort)
+    }
+
+    @Test
+    fun `--port out-of-range is rejected`() {
+        val ex = assertThrows<IllegalStateException> {
+            IpcConfig.fromArgs(arrayOf("--ipc", "tcp", "--port", "70000"))
         }
+        assertTrue(ex.message!!.contains("0..65535"))
+    }
+
+    @Test
+    fun `--port non-integer is rejected`() {
+        val ex = assertThrows<IllegalStateException> {
+            IpcConfig.fromArgs(arrayOf("--ipc", "tcp", "--port", "notanumber"))
+        }
+        assertTrue(ex.message!!.contains("integer"))
+    }
+
+    @Test
+    fun `--uds-path overrides default uds path`() {
+        val cfg = IpcConfig.fromArgs(arrayOf("--ipc", "unix", "--uds-path", "/var/run/idb.sock"))
         assertEquals("/var/run/idb.sock", cfg.udsPath)
     }
 
     @Test
-    fun `IDB_ENGINE_PIPE_NAME overrides default pipe name`() {
-        val cfg = IpcConfig.fromEnv {
-            when (it) {
-                "IDB_ENGINE_IPC" -> "pipe"
-                "IDB_ENGINE_PIPE_NAME" -> "my-app"
-                else -> null
-            }
-        }
+    fun `--pipe-name overrides default pipe name`() {
+        val cfg = IpcConfig.fromArgs(arrayOf("--ipc", "pipe", "--pipe-name", "my-app"))
         assertEquals("my-app", cfg.pipeName)
     }
 
     @Test
-    fun `invalid IDB_ENGINE_IPC throws with clear message`() {
+    fun `--ipc with no value is rejected`() {
         val ex = assertThrows<IllegalStateException> {
-            IpcConfig.fromEnv { if (it == "IDB_ENGINE_IPC") "websocket" else null }
+            IpcConfig.fromArgs(arrayOf("--ipc"))
         }
-        assertTrue(ex.message!!.contains("Invalid IDB_ENGINE_IPC"))
+        assertTrue(ex.message!!.contains("requires a value"))
     }
 
     @Test
-    fun `default uds path uses XDG_RUNTIME_DIR when available on POSIX`() {
-        val cfg = IpcConfig.fromEnv {
-            if (it == "XDG_RUNTIME_DIR") "/run/user/1000" else null
+    fun `--ipc invalid value is rejected with clear message`() {
+        val ex = assertThrows<IllegalStateException> {
+            IpcConfig.fromArgs(arrayOf("--ipc", "websocket"))
         }
-        val os = System.getProperty("os.name", "").lowercase()
-        if (!os.contains("win")) {
-            assertEquals("/run/user/1000/idb-engine.sock", cfg.udsPath)
-        } else {
-            assertEquals("/tmp/idb-engine.sock", cfg.udsPath)
+        assertTrue(ex.message!!.contains("Invalid --ipc"))
+        assertTrue(ex.message!!.contains("tcp | unix | pipe"))
+    }
+
+    @Test
+    fun `unknown flag is rejected with hint to --help`() {
+        val ex = assertThrows<IllegalStateException> {
+            IpcConfig.fromArgs(arrayOf("--foo-bar"))
         }
+        assertTrue(ex.message!!.contains("Unknown argument"))
+        assertTrue(ex.message!!.contains("--help"))
+    }
+
+    @Test
+    fun `multiple flags all parse correctly`() {
+        val cfg = IpcConfig.fromArgs(
+            arrayOf("--ipc", "tcp", "--port", "12345")
+        )
+        assertEquals(IpcKind.TCP, cfg.kind)
+        assertEquals(12345, cfg.tcpPort)
+        assertEquals("/tmp/idb-engine.sock", cfg.udsPath) // default preserved
+        assertEquals("idb-engine", cfg.pipeName) // default preserved
+    }
+
+    @Test
+    fun `USAGE string documents every flag`() {
+        assertTrue(IpcConfig.USAGE.contains("--ipc"))
+        assertTrue(IpcConfig.USAGE.contains("--port"))
+        assertTrue(IpcConfig.USAGE.contains("--uds-path"))
+        assertTrue(IpcConfig.USAGE.contains("--pipe-name"))
+        assertTrue(IpcConfig.USAGE.contains("--help"))
+    }
+
+    @Test
+    fun `USAGE string does not reference legacy env vars`() {
+        assertTrue(!IpcConfig.USAGE.contains("IDB_ENGINE_IPC"))
+        assertTrue(!IpcConfig.USAGE.contains("IDB_ENGINE_PORT"))
+    }
+
+    @Test
+    @EnabledOnOs(OS.WINDOWS)
+    fun `--ipc omitted on Windows yields pipe`() {
+        val cfg = IpcConfig.fromArgs(emptyArray())
+        assertEquals(IpcKind.PIPE, cfg.kind)
+    }
+
+    @Test
+    @EnabledOnOs(OS.LINUX, OS.MAC, OS.FREEBSD)
+    fun `--ipc omitted on POSIX yields unix`() {
+        val cfg = IpcConfig.fromArgs(emptyArray())
+        assertEquals(IpcKind.UNIX, cfg.kind)
     }
 }

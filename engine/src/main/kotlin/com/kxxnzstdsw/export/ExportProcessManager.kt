@@ -5,8 +5,11 @@ import com.kxxnzstdsw.grpc.ConnectionConfig
 import com.kxxnzstdsw.grpc.ExportCommand
 import com.kxxnzstdsw.grpc.ExportCommand.Kind
 import com.kxxnzstdsw.grpc.ExportHubGrpc
-import com.kxxnzstdsw.grpc.ExportResponse
+import com.kxxnzstdsw.grpc.ExportHubResponse
+import com.kxxnzstdsw.grpc.PayloadAdapter
 import com.kxxnzstdsw.grpc.Response
+import com.kxxnzstdsw.grpc.ExportProgressFrame
+import com.kxxnzstdsw.grpc.ExportResponse
 import io.grpc.ManagedChannel
 import io.grpc.ManagedChannelBuilder
 import io.grpc.stub.StreamObserver
@@ -19,6 +22,10 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import org.slf4j.LoggerFactory
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -35,7 +42,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *       │                                              ▲
  *   ExportHubCoroutineStub ──── bidi stream ────► ExportHubImpl
  *       │  sends: ExportCommand (START/STOP/SHUTDOWN)    │
- *       │  receives: ExportResponse (progress)           │
+ *       │  receives: ExportHubResponse (progress)           │
  * ```
  *
  * 子进程监听在固定端口（默认 50099），由父进程通过命令行参数告知端口号。
@@ -144,8 +151,8 @@ object ExportProcessManager {
             channel = ch
 
             val stub = ExportHubGrpc.newStub(ch)
-            val responseObserver = object : StreamObserver<ExportResponse> {
-                override fun onNext(value: ExportResponse) {
+            val responseObserver = object : StreamObserver<ExportHubResponse> {
+                override fun onNext(value: ExportHubResponse) {
                     publishResponse(value)
                 }
 
@@ -172,9 +179,12 @@ object ExportProcessManager {
     }
 
     /**
-     * 将子进程返回的 ExportResponse 转发到对应 exportId 的 SharedFlow
+     * 将子进程返回的 ExportHubResponse 转发到对应 exportId 的 SharedFlow
+     *
+     * 子进程返回的是 subprocess wire 形态（ExportHubResponse with Value data），
+     * 我们在主进程边界把它转换为对外的 typed Response（ExportProgressFrame body）。
      */
-    private fun publishResponse(exportResp: ExportResponse) {
+    private fun publishResponse(exportResp: ExportHubResponse) {
         val flow = responseFlows.computeIfAbsent(exportResp.id) {
             MutableSharedFlow<Response>(
                 replay = 0,
@@ -182,15 +192,31 @@ object ExportProcessManager {
                 onBufferOverflow = BufferOverflow.DROP_OLDEST
             )
         }
-        // 转换为对外暴露的 gRPC Response
-        val response = Response.newBuilder()
-            .setId(exportResp.id)
-            .setSuccess(exportResp.success)
-            .setError(exportResp.error)
-            .setStream(exportResp.stream)
-            .setEnd(exportResp.end)
-            .setData(exportResp.data)
-            .build()
+        // 转换为对外暴露的 typed gRPC Response
+        val response = if (exportResp.success && exportResp.hasData() && exportResp.data.kindCase == Value.KindCase.STRUCT_VALUE) {
+            // progress frame — 解 Value → JsonObject → typed ExportProgressFrame
+            val progress = PayloadAdapter.toJsonElement(exportResp.data) as? kotlinx.serialization.json.JsonObject
+            if (progress != null) {
+                val pb = ExportProgressFrame.newBuilder()
+                    .setExportedRows(progress["exportedRows"]?.jsonPrimitive?.longOrNull ?: 0L)
+                    .setColumnCount(progress["columnCount"]?.jsonPrimitive?.intOrNull ?: 0)
+                    .setCompleted(progress["completed"]?.jsonPrimitive?.booleanOrNull ?: false)
+                progress["filePath"]?.jsonPrimitive?.let { if (it.content.isNotEmpty()) pb.setFilePath(it.content) }
+                progress["error"]?.jsonPrimitive?.let { if (it.content.isNotEmpty()) pb.setError(it.content) }
+                val exportRespMsg = ExportResponse.newBuilder().setProgress(pb).build()
+                Response.newBuilder()
+                    .setId(exportResp.id)
+                    .setSuccess(true)
+                    .setStream(true)
+                    .setEnd(exportResp.end)
+                    .setExport(exportRespMsg)
+                    .build()
+            } else {
+                errorResponse(exportResp)
+            }
+        } else {
+            errorResponse(exportResp)
+        }
         scope.launch { flow.emit(response) }
         if (exportResp.end) {
             scope.launch {
@@ -199,6 +225,15 @@ object ExportProcessManager {
             }
         }
     }
+
+    private fun errorResponse(exportResp: ExportHubResponse): Response =
+        Response.newBuilder()
+            .setId(exportResp.id)
+            .setSuccess(exportResp.success)
+            .setError(exportResp.error)
+            .setStream(exportResp.stream)
+            .setEnd(exportResp.end)
+            .build()
 
     /**
      * 获取指定 exportId 的响应流（供 ExportHandler.collectResponses 调用）

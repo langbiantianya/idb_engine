@@ -4,7 +4,7 @@ import com.kxxnzstdsw.handlers.ExportHandler
 import com.kxxnzstdsw.grpc.ExportCommand
 import com.kxxnzstdsw.grpc.ExportCommand.Kind
 import com.kxxnzstdsw.grpc.ExportHubGrpc
-import com.kxxnzstdsw.grpc.ExportResponse
+import com.kxxnzstdsw.grpc.ExportHubResponse
 import io.grpc.ServerBuilder
 import io.grpc.stub.StreamObserver
 import kotlinx.coroutines.CoroutineScope
@@ -22,7 +22,7 @@ import kotlin.system.exitProcess
  * 监听端口从 -Didb.export.hub.port 读取（默认 50099）。
  * 每个父进程连接对应一个 bidi stream：
  * - 接收 ExportCommand 流（START_EXPORT / STOP_EXPORT / SHUTDOWN）
- * - 推送 ExportResponse 流（每条命令的执行进度）
+ * - 推送 ExportHubResponse 流（每条命令的执行进度）
  */
 object ExportSubProcess {
 
@@ -90,7 +90,7 @@ object ExportSubProcess {
      * gRPC 服务实现
      */
     private class ExportHubImpl : ExportHubGrpc.ExportHubImplBase() {
-        override fun stream(responseObserver: StreamObserver<ExportResponse>): StreamObserver<ExportCommand> {
+        override fun stream(responseObserver: StreamObserver<ExportHubResponse>): StreamObserver<ExportCommand> {
             logger.info("Parent connected to ExportHub")
 
             return object : StreamObserver<ExportCommand> {
@@ -128,11 +128,11 @@ object ExportSubProcess {
     /**
      * 处理 START_EXPORT — 启动独立协程调用 ExportHandler.executeAsSubprocess
      */
-    private fun handleStartExport(cmd: ExportCommand, responseObserver: StreamObserver<ExportResponse>) {
+    private fun handleStartExport(cmd: ExportCommand, responseObserver: StreamObserver<ExportHubResponse>) {
         val id = cmd.id
         if (id.isBlank()) {
             responseObserver.onNext(
-                ExportResponse.newBuilder()
+                ExportHubResponse.newBuilder()
                     .setId("unknown")
                     .setSuccess(false)
                     .setError("Missing export id")
@@ -143,7 +143,7 @@ object ExportSubProcess {
         }
         if (activeExports.containsKey(id)) {
             responseObserver.onNext(
-                ExportResponse.newBuilder()
+                ExportHubResponse.newBuilder()
                     .setId(id)
                     .setSuccess(false)
                     .setError("Export $id already running")
@@ -155,32 +155,30 @@ object ExportSubProcess {
 
         val job = scope.launch {
             try {
-                // 构造 Request 对象（ExportHandler.executeAsSubprocess 需要）
+                // 构造 typed Request 对象（ExportHandler.executeAsSubprocess 需要）。
+                // 注：子进程 wire 上的 ExportCommand 仍使用 map<string,Value> payload；
+                // 我们在内部把它填进 typed ExportRequest.run_export 中。
                 val request = com.kxxnzstdsw.grpc.Request.newBuilder()
                     .setId(id)
                     .setCategory(com.kxxnzstdsw.grpc.Category.EXPORT)
                     .setAction(com.kxxnzstdsw.grpc.Action.RUN_EXPORT)
                     .setConnection(cmd.connection)
-                    .putAllPayload(cmd.payloadMap)
+                    .setExportRequest(
+                        com.kxxnzstdsw.grpc.ExportRequest.newBuilder().setRunExport(
+                            buildExportRunFromPayload(cmd.payloadMap)
+                        )
+                    )
                     .build()
 
-                // 在子进程中直接执行：把 Flow<Response> 转成 ExportResponse 流
-                ExportHandler.executeAsSubprocess(request).collect { resp ->
-                    responseObserver.onNext(
-                        ExportResponse.newBuilder()
-                            .setId(resp.id)
-                            .setSuccess(resp.success)
-                            .setError(resp.error)
-                            .setStream(resp.stream)
-                            .setEnd(resp.end)
-                            .setData(resp.data)
-                            .build()
-                    )
+                // executeAsSubprocess 直接返回 Flow<ExportHubResponse>（subprocess wire shape），
+                // 省去 typed Response ↔ Value 的来回转换
+                ExportHandler.executeAsSubprocess(request).collect { hubResp ->
+                    responseObserver.onNext(hubResp)
                 }
             } catch (e: Exception) {
                 logger.error("Export failed: $id", e)
                 responseObserver.onNext(
-                    ExportResponse.newBuilder()
+                    ExportHubResponse.newBuilder()
                         .setId(id)
                         .setSuccess(false)
                         .setError(e.message ?: "Export failed")
@@ -221,5 +219,35 @@ object ExportSubProcess {
         val parent = currentDir.parentFile
         if (parent != null && File(parent, "libs").exists()) return parent
         return currentDir
+    }
+
+    /**
+     * 从子进程 wire 上的 map<string,Value> payload 构造 typed ExportRunRequest。
+     * Value → string 通过 com.google.protobuf.Value 的 stringValue / numberValue 字段读取。
+     */
+    private fun buildExportRunFromPayload(
+        payload: Map<String, com.google.protobuf.Value>
+    ): com.kxxnzstdsw.grpc.ExportRunRequest {
+        val b = com.kxxnzstdsw.grpc.ExportRunRequest.newBuilder()
+        payload["sql"]?.takeIf { it.kindCase == com.google.protobuf.Value.KindCase.STRING_VALUE }
+            ?.let { b.sql = it.stringValue }
+        payload["outputDir"]?.takeIf { it.kindCase == com.google.protobuf.Value.KindCase.STRING_VALUE }
+            ?.let { b.outputDir = it.stringValue }
+        payload["fileName"]?.takeIf { it.kindCase == com.google.protobuf.Value.KindCase.STRING_VALUE }
+            ?.let { b.fileName = it.stringValue }
+        payload["format"]?.takeIf { it.kindCase == com.google.protobuf.Value.KindCase.STRING_VALUE }
+            ?.let { b.format = it.stringValue }
+        payload["tableName"]?.takeIf { it.kindCase == com.google.protobuf.Value.KindCase.STRING_VALUE }
+            ?.let { b.tableName = it.stringValue }
+        payload["fetchSize"]?.let {
+            when (it.kindCase) {
+                com.google.protobuf.Value.KindCase.NUMBER_VALUE -> b.fetchSize = it.numberValue.toInt()
+                com.google.protobuf.Value.KindCase.STRING_VALUE -> b.fetchSize = it.stringValue.toIntOrNull() ?: 0
+                else -> {}
+            }
+        }
+        payload["stopExportId"]?.takeIf { it.kindCase == com.google.protobuf.Value.KindCase.STRING_VALUE }
+            ?.let { b.stopExportId = it.stringValue }
+        return b.build()
     }
 }

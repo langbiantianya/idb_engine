@@ -191,7 +191,7 @@ tasks.jar {
     archiveClassifier.set("")
     archiveVersion.set("")
     manifest {
-        attributes["Main-Class"] = "com.kxxnzstdsw.server.IdbEngineServerKt"
+        attributes["Main-Class"] = "com.kxxnzstdsw.server.IdbEngineServer"
         attributes["Class-Path"] = configurations.runtimeClasspath.get().joinToString(" ") {
             "libs/${it.name}"
         }

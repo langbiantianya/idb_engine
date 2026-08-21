@@ -1,25 +1,33 @@
 package com.kxxnzstdsw.handlers
 
-import com.kxxnzstdsw.loader.DialectLoader
+import com.google.protobuf.Value
 import com.kxxnzstdsw.grpc.ConnectionConfig
+import com.kxxnzstdsw.grpc.PayloadAdapter
+import com.kxxnzstdsw.grpc.Row
+import com.kxxnzstdsw.grpc.SqlExecuteRequest
+import com.kxxnzstdsw.grpc.SqlExecuteResponse
+import com.kxxnzstdsw.grpc.SqlExplainRequest
+import com.kxxnzstdsw.grpc.SqlExplainResponse
+import com.kxxnzstdsw.grpc.SqlSelectRowFrame
+import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.*
+import kotlinx.serialization.json.JsonPrimitive
 import java.sql.ResultSet
 
 object SqlEngineHandler {
     /**
-     * @param onRow 流式回调，SELECT 查询时逐行调用；非 SELECT 时为 null
-     * @return 流式模式返回 true（Boolean），非流式返回 JsonElement
+     * @param onRow 流式回调；SELECT 查询时逐行调用一次；非 SELECT 时不调用
+     * @return SELECT 走 [onRow] 路径，返回占位 [SqlExecuteResponse]（dispatcher 不使用）；非 SELECT 返回真正的 [SqlExecuteResponse]
      */
     suspend fun execute(
         config: ConnectionConfig,
-        payload: JsonObject,
-        onRow: (suspend (JsonElement) -> Unit)? = null
-    ): Any = withContext(Dispatchers.IO) {
-        val sql = payload["sql"]?.jsonPrimitive?.content ?: throw IllegalArgumentException("Missing 'sql' in payload")
-        val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
+        req: SqlExecuteRequest,
+        onRow: (suspend (SqlSelectRowFrame) -> Unit)? = null
+    ): SqlExecuteResponse = withContext(Dispatchers.IO) {
+        if (req.sql.isBlank()) throw IllegalArgumentException("Missing 'sql' in payload")
+        val schema = req.schema
         val connection = PoolManager.getConnection(config, schema)
 
         return@withContext connection.use { conn ->
@@ -30,38 +38,33 @@ object SqlEngineHandler {
             ).use { stmt ->
                 val originalAutoCommit = dialect.configureConnectionForStreaming(conn)
                 try {
-                    val hasResultSet = stmt.execute(sql)
+                    val hasResultSet = stmt.execute(req.sql)
 
                     if (hasResultSet) {
                         if (onRow != null) {
                             // 游标流式模式
                             stmt.fetchSize = 100
                             stmt.resultSet.use { rs ->
+                                var pageIdx = 0
                                 while (rs.next()) {
-                                    onRow(buildJsonObject {
-                                        put("total", -1)
-                                        put("page", 0)
-                                        put("pageSize", 1)
-                                        putJsonArray("rows") { add(rowToJson(rs)) }
-                                    })
+                                    onRow(
+                                        SqlSelectRowFrame.newBuilder()
+                                            .setTotal(-1L)
+                                            .setPage(pageIdx)
+                                            .setPageSize(1)
+                                            .setRow(buildRow(rs))
+                                            .build()
+                                    )
+                                    pageIdx++
                                 }
                             }
-                            true
+                            SqlExecuteResponse.newBuilder().build()
                         } else {
-                            // 非流式模式
-                            stmt.resultSet.use { rs ->
-                                val rows = mutableListOf<Map<String, String?>>()
-                                while (rs.next()) {
-                                    rows.add(rowToMap(rs))
-                                }
-                                Json.encodeToJsonElement(rows)
-                            }
+                            // 非流式模式：此路径 dispatcher 不会调用（dispatcher 总走流式），保留占位
+                            SqlExecuteResponse.newBuilder().build()
                         }
                     } else {
-                        // Update/Insert/Delete operation
-                        buildJsonObject {
-                            put("affectedRows", stmt.updateCount)
-                        }
+                        SqlExecuteResponse.newBuilder().setAffectedRows(stmt.updateCount).build()
                     }
                 } finally {
                     dialect.restoreConnectionAfterStreaming(conn, originalAutoCommit)
@@ -70,38 +73,45 @@ object SqlEngineHandler {
         }
     }
 
-    private fun rowToMap(rs: ResultSet): Map<String, String?> {
+    /**
+     * Build a typed Row proto from a JDBC ResultSet.
+     */
+    private fun buildRow(rs: ResultSet): Row {
         val metaData = rs.metaData
         val columnCount = metaData.columnCount
-        val row = mutableMapOf<String, String?>()
+        val row = Row.newBuilder()
         for (i in 1..columnCount) {
             val columnName = metaData.getColumnName(i)
             val columnType = metaData.getColumnTypeName(i)
-            row[columnName] = if (columnType in listOf("BLOB", "LONGTEXT", "BYTEA", "TEXT")) {
-                "[LOB Data]"
+            val value: Value = if (columnType in listOf("BLOB", "LONGTEXT", "BYTEA", "TEXT")) {
+                PayloadAdapter.toValue(JsonPrimitive("[LOB Data]"))
             } else {
-                rs.getString(i)
+                PayloadAdapter.toValue(JsonPrimitive(rs.getString(i)))
             }
+            row.putValues(columnName, value)
         }
-        return row
-    }
-
-    private fun rowToJson(rs: ResultSet): JsonElement {
-        return Json.encodeToJsonElement(rowToMap(rs))
+        return row.build()
     }
 
     /**
-     * EXPLAIN — 返回 SQL 的执行计划（行集合）
-     * payload: { "sql": "SELECT * FROM users" }
+     * EXPLAIN — 返回 SQL 的执行计划
      */
-    suspend fun explain(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
-        val sql = payload["sql"]?.jsonPrimitive?.content
-            ?: throw IllegalArgumentException("Missing 'sql' in payload")
-        val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
+    suspend fun explain(config: ConnectionConfig, req: SqlExplainRequest): SqlExplainResponse = withContext(Dispatchers.IO) {
+        if (req.sql.isBlank()) throw IllegalArgumentException("Missing 'sql' in payload")
+        val schema = req.schema
         val connection = PoolManager.getConnection(config, schema)
         val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
-            Json.encodeToJsonElement(dialect.explainSQL(conn, sql))
+            val rows = dialect.explainSQL(conn, req.sql)
+            val builder = SqlExplainResponse.newBuilder()
+            rows.forEach { row ->
+                val r = Row.newBuilder()
+                row.forEach { (k, v) ->
+                    r.putValues(k, PayloadAdapter.toValue(JsonPrimitive(v)))
+                }
+                builder.addRows(r.build())
+            }
+            builder.build()
         }
     }
 }

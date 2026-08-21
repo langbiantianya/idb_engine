@@ -1,7 +1,3 @@
-// IDB Engine — 统一 gRPC 服务定义
-// 所有 payload 字段使用 google.protobuf.Value，兼容 JSON 中的 string/number/bool/null/object/array
-// proto3 字段默认零值不可与 null 区分，与历史 wire 协议中 Response.error = "" 等约定保持一致
-
 syntax = "proto3";
 
 option java_package = "com.kxxnzstdsw.grpc";
@@ -9,81 +5,760 @@ option java_multiple_files = true;
 
 import "google/protobuf/struct.proto";
 
-// 业务对象类别 — 与历史 Request.Category 一一对应（保留扩展能力）
+// ============================================================================
+// Enums
+// ============================================================================
+
 enum Category {
   CATEGORY_UNSPECIFIED = 0;
-  SCHEMA = 1;
-  USER = 2;
-  TABLE = 3;
-  DATA = 4;
-  SQL = 5;
-  SYSTEM = 6;
-  FUNCTION = 7;
-  EXPORT = 8;
-  VIEW = 9;
-  INDEX = 10;
-  FOREIGN_KEY = 11;
-  TRIGGER = 12;
+  SCHEMA       = 1;
+  USER         = 2;
+  TABLE        = 3;
+  DATA         = 4;
+  SQL          = 5;
+  SYSTEM       = 6;
+  FUNCTION     = 7;
+  EXPORT       = 8;
+  VIEW         = 9;
+  INDEX        = 10;
+  FOREIGN_KEY  = 11;
+  TRIGGER      = 12;
 }
 
-// 操作类型 — 与历史 Request.Action 一一对应
-// 注意：RUN_EXPORT 用于 Category=EXPORT 的导出执行（原 Action.EXPORT，proto3 enum 全局唯一故重命名）
 enum Action {
   ACTION_UNSPECIFIED = 0;
-  LIST = 1;
-  CREATE = 2;
-  UPDATE = 3;
-  DELETE = 4;
-  EXECUTE = 5;
-  GET_DDL = 6;
-  INFO = 7;
-  GRANTS = 8;
-  GENERATE = 9;
-  DEBUG = 10;
-  CALL = 11;
-  RUN_EXPORT = 12;
-  RENAME = 13;
-  TRUNCATE = 14;
-  EXPLAIN = 15;
+  LIST            = 1;
+  CREATE          = 2;
+  UPDATE          = 3;
+  DELETE          = 4;
+  EXECUTE         = 5;
+  GET_DDL         = 6;
+  INFO            = 7;
+  GRANTS          = 8;
+  GENERATE        = 9;
+  DEBUG           = 10;
+  CALL            = 11;
+  RUN_EXPORT      = 12;  // proto3 enum global uniqueness — EXPORT conflicts with Category.EXPORT
+  RENAME          = 13;
+  TRUNCATE        = 14;
+  EXPLAIN         = 15;  // defined but not routed in dispatcher
   TEST_CONNECTION = 16;
-  SERVER_INFO = 17;
+  SERVER_INFO     = 17;
 }
 
-// 数据库连接凭证 — 完全无状态设计的核心载体
-// 注意：每次请求都需携带完整凭证；password 参与 SHA-256 哈希缓存键
+// ============================================================================
+// Shared types
+// ============================================================================
+
 message ConnectionConfig {
-  string driver = 1;   // Mysql / Postgresql / H2
-  string host = 2;
-  int32  port = 3;
-  string user = 4;
-  string password = 5;
-  string database = 6; // MySQL/H2 为数据库名；PG 为数据库容器（postgres/template1/...）
-  string schema = 7;   // 可选：PG 专用 search_path 上下文；H2 视为 schema 名称
-  bool   use_ssl = 8;
-  map<string, string> properties = 9; // JDBC 扩展参数 / SSH 配置
+  string driver    = 1;
+  string host      = 2;
+  int32  port      = 3;
+  string user      = 4;
+  string password  = 5;
+  string database  = 6;
+  string schema    = 7;
+  bool   use_ssl   = 8;
+  map<string, string> properties = 9;
 }
 
-// 统一请求体 — 业务参数全部走 payload map
+// Column definition used by TABLE.CREATE and TABLE.UPDATE.
+message ColumnDef {
+  string name           = 1;
+  string type           = 2;
+  int32  size           = 3;   // 0 == unspecified
+  optional bool nullable = 4;   // default true; `optional` gives presence semantics so mapper can omit default-true
+  bool   is_primary_key = 5;
+  string default_value  = 6;
+  bool   auto_increment = 7;
+  string new_name       = 8;   // used by MODIFY_COLUMN rename
+}
+
+// Lua造数脚本定义 (used by DATA.GENERATE).
+message GenerateTable { string script = 1; }
+
+// ============================================================================
+// Per-Category REQUEST bodies
+// ============================================================================
+
+// ---------- SYSTEM ----------
+message SystemRequest {}  // no payload fields; INFO / TEST_CONNECTION / SERVER_INFO are no-arg
+
+// ---------- SCHEMA ----------
+message SchemaListRequest {
+  string level    = 1;   // "database" (default) | "schema"
+  string database = 2;   // required when level == "schema"
+}
+message SchemaCreateRequest {
+  string name = 1;
+  map<string, string> options = 2;  // MySQL charset/collate
+}
+message SchemaDeleteRequest { string name = 1; }
+message SchemaRequest {
+  oneof body {
+    SchemaListRequest   list   = 1;
+    SchemaCreateRequest create = 2;
+    SchemaDeleteRequest delete = 3;
+  }
+}
+
+// ---------- USER ----------
+message UserListRequest {
+  string user = 1;   // optional; when set, returns privileges instead of users
+  string host = 2;   // default "%"
+}
+message UserCreateRequest {
+  string user     = 1;
+  string password = 2;
+  string host     = 3;   // default "%"
+}
+message UserUpdateRequest {
+  string user     = 1;
+  // Path A: change password
+  string password = 2;
+  string host     = 3;   // default "%"
+  // Path B: change privileges
+  string schema               = 4;
+  repeated string privileges  = 5;
+  bool is_grant               = 6;
+  string table_name           = 7;
+  bool with_grant_option      = 8;
+}
+message UserDeleteRequest {
+  string user = 1;
+  string host = 2;   // default "%"
+}
+message UserGrantsRequest {
+  string user = 1;
+  string host = 2;   // default "%"
+}
+message UserRequest {
+  oneof body {
+    UserListRequest   list   = 1;
+    UserCreateRequest create = 2;
+    UserUpdateRequest update = 3;
+    UserDeleteRequest delete = 4;
+    UserGrantsRequest grants = 5;
+  }
+}
+
+// ---------- TABLE ----------
+message TableListRequest       { string schema = 1; }
+message TableColumnListRequest {
+  string table_name = 1;
+  string schema     = 2;
+}
+message TableCreateRequest {
+  string table_name = 1;
+  repeated ColumnDef columns = 2;
+  map<string, string> options = 3;
+  string schema = 4;
+}
+message TableUpdateRequest {
+  string table_name = 1;
+  string operation = 2;        // ADD_COLUMN | DROP_COLUMN | MODIFY_COLUMN
+  ColumnDef column = 3;        // for ADD_COLUMN / MODIFY_COLUMN
+  string column_name = 4;      // for DROP_COLUMN
+  string schema = 5;
+}
+message TableGetDdlRequest    { string table_name = 1; string schema = 2; }
+message TableRenameRequest {
+  string old_name   = 1;       // primary; accepts either old_name or table_name
+  string table_name = 2;       // alias for old_name
+  string new_name   = 3;
+  string schema     = 4;
+}
+message TableDeleteRequest    { string table_name = 1; string schema = 2; }
+message TableTruncateRequest  { string table_name = 1; string schema = 2; }
+message TableRequest {
+  oneof body {
+    TableListRequest       list        = 1;
+    TableColumnListRequest column_list = 2;
+    TableCreateRequest     create      = 3;
+    TableUpdateRequest     update      = 4;
+    TableGetDdlRequest     get_ddl     = 5;
+    TableRenameRequest     rename      = 6;
+    TableDeleteRequest     delete      = 7;
+    TableTruncateRequest   truncate    = 8;
+  }
+}
+
+// ---------- DATA ----------
+message DataListRequest {
+  string table_name = 1;
+  int32  page       = 2;          // default 1
+  optional int32 page_size = 3;   // default 50; 0 == streaming sentinel; `optional` lets us preserve 0
+  string where      = 4;
+  string order_by   = 5;
+  string schema     = 6;
+}
+message DataCreateRequest {
+  string table_name = 1;
+  map<string, string> values = 2;   // column name -> stringified value
+  string schema = 3;
+}
+message DataUpdateRequest {
+  string table_name = 1;
+  map<string, string> changes = 2;
+  map<string, string> where   = 3;
+  string schema = 4;
+}
+message DataDeleteRequest {
+  string table_name = 1;
+  map<string, string> where = 2;
+  string schema = 3;
+}
+message DataGenerateRequest {
+  string schema      = 1;
+  repeated GenerateTable tables = 2;
+  string lua_version  = 3;
+}
+message DataRequest {
+  oneof body {
+    DataListRequest    list     = 1;
+    DataCreateRequest  create   = 2;
+    DataUpdateRequest  update   = 3;
+    DataDeleteRequest  delete   = 4;
+    DataGenerateRequest generate = 5;
+  }
+}
+
+// ---------- SQL ----------
+message SqlExecuteRequest { string sql = 1; string schema = 2; }
+message SqlExplainRequest { string sql = 1; string schema = 2; }
+message SqlRequest {
+  oneof body {
+    SqlExecuteRequest execute = 1;
+    SqlExplainRequest explain = 2;
+  }
+}
+
+// ---------- FUNCTION ----------
+message FunctionListRequest    { string schema = 1; }
+message FunctionInfoRequest    { string name = 1; string schema = 2; }
+message FunctionGetDdlRequest  { string name = 1; string schema = 2; }
+message FunctionCreateRequest  { string ddl = 1; }
+message FunctionDeleteRequest {
+  string name = 1;
+  string routine_type = 2;   // FUNCTION | PROCEDURE
+  string schema = 3;
+  bool   if_exists = 4;
+  bool   cascade   = 5;
+}
+message FunctionCallRequest {
+  string name = 1;
+  string routine_type = 2;
+  string schema = 3;
+  repeated string args = 4;
+}
+message FunctionDebugRequest   { string name = 1; string schema = 2; }
+message FunctionValidateRequest { string ddl = 1; }
+message FunctionRequest {
+  oneof body {
+    FunctionListRequest    list    = 1;
+    FunctionInfoRequest    info    = 2;
+    FunctionGetDdlRequest  get_ddl = 3;
+    FunctionCreateRequest  create  = 4;
+    FunctionDeleteRequest  delete  = 5;
+    FunctionCallRequest    call    = 6;
+    FunctionDebugRequest   debug   = 7;
+    FunctionValidateRequest update = 8;   // Action.UPDATE maps to validate
+  }
+}
+
+// ---------- VIEW ----------
+message ViewListRequest   { string schema = 1; }
+message ViewCreateRequest { string name = 1; string definition = 2; string schema = 3; }
+message ViewDeleteRequest { string name = 1; bool if_exists = 2; string schema = 3; }
+message ViewGetDdlRequest { string name = 1; string schema = 2; }
+message ViewRequest {
+  oneof body {
+    ViewListRequest   list    = 1;
+    ViewCreateRequest create  = 2;
+    ViewDeleteRequest delete  = 3;
+    ViewGetDdlRequest get_ddl = 4;
+  }
+}
+
+// ---------- INDEX ----------
+message IndexListRequest   { string table_name = 1; string schema = 2; }
+message IndexCreateRequest {
+  string table_name = 1;
+  string index_name = 2;
+  repeated string columns = 3;
+  bool   unique = 4;
+  string schema = 5;
+}
+message IndexDeleteRequest {
+  string index_name = 1;
+  string table_name = 2;
+  string schema = 3;
+}
+message IndexRequest {
+  oneof body {
+    IndexListRequest   list   = 1;
+    IndexCreateRequest create = 2;
+    IndexDeleteRequest delete = 3;
+  }
+}
+
+// ---------- FOREIGN_KEY ----------
+message ForeignKeyListRequest   { string table_name = 1; string schema = 2; }
+message ForeignKeyCreateRequest {
+  string table_name = 1;
+  string fk_name    = 2;
+  repeated string columns     = 3;
+  string ref_table            = 4;
+  repeated string ref_columns = 5;
+  string on_delete = 6;
+  string on_update = 7;
+  string schema = 8;
+}
+message ForeignKeyDeleteRequest {
+  string table_name = 1;
+  string fk_name    = 2;
+  string schema     = 3;
+}
+message ForeignKeyRequest {
+  oneof body {
+    ForeignKeyListRequest   list   = 1;
+    ForeignKeyCreateRequest create = 2;
+    ForeignKeyDeleteRequest delete = 3;
+  }
+}
+
+// ---------- TRIGGER ----------
+message TriggerListRequest   { string schema = 1; }
+message TriggerGetDdlRequest { string name = 1; string schema = 2; }
+message TriggerRequest {
+  oneof body {
+    TriggerListRequest   list    = 1;
+    TriggerGetDdlRequest get_ddl = 2;
+  }
+}
+
+// ---------- EXPORT ----------
+message ExportRunRequest {
+  string sql        = 1;
+  string output_dir = 2;
+  string file_name  = 3;
+  string format     = 4;   // CSV | JSON_LINES | SQL_INSERT | EXCEL | PARQUET
+  string table_name = 5;   // required when format=SQL_INSERT
+  int32  fetch_size = 6;   // default 1000
+  string stop_export_id = 7; // when set, cancels that task
+}
+message ExportRequest {
+  ExportRunRequest run_export = 1;
+}
+
+// ============================================================================
+// Request envelope
+// ============================================================================
+
 message Request {
   string id = 1;
   Category category = 2;
   Action   action   = 3;
   ConnectionConfig connection = 4;
-  map<string, google.protobuf.Value> payload = 5;
+
+  oneof body {
+    SystemRequest    system_request    = 10;
+    SchemaRequest    schema_request    = 11;
+    UserRequest      user_request      = 12;
+    TableRequest     table_request     = 13;
+    DataRequest      data_request      = 14;
+    SqlRequest       sql_request       = 15;
+    FunctionRequest  function_request  = 16;
+    ViewRequest      view_request      = 17;
+    IndexRequest     index_request     = 18;
+    ForeignKeyRequest foreign_key_request = 19;
+    TriggerRequest   trigger_request   = 20;
+    ExportRequest    export_request    = 21;
+  }
 }
 
-// 统一响应体 — 支持流式（stream/end 字段）
-// error 为空字符串表示无错误；非空即视为错误响应（历史 isError 扩展语义）
+// ============================================================================
+// Per-Category RESPONSE bodies
+// ============================================================================
+
+// List items below are typed per-message (replacing `repeated google.protobuf.Value`).
+// A `Row` wraps a dynamic `map<string, Value>` so individual cell values stay as `Value`
+// (cells are scalar / LOB-typed) while the row envelope itself is typed.
+
+// ---------- SCHEMA ----------
+message SchemaListResponse {
+  string level    = 1;
+  string database = 2;
+  repeated string items = 3;   // database names or schema names
+}
+message SchemaCreateResponse { string created = 1; }
+message SchemaDeleteResponse { string deleted = 1; }
+message SchemaResponse {
+  oneof body {
+    SchemaListResponse   list   = 1;
+    SchemaCreateResponse create = 2;
+    SchemaDeleteResponse delete = 3;
+  }
+}
+
+// ---------- USER ----------
+// UserListItem is used by GRANTS (single, structured shape across dialects).
+message UserGrantItem {
+  string schema    = 1;
+  string table     = 2;
+  string privilege = 3;   // comma-separated for aggregated grants
+}
+// UserListResponse is overloaded: returns either user list (USER.LIST w/o `user`)
+// or privileges list (USER.LIST with `user`). Shapes vary by dialect, so keep Value.
+message UserListResponse       { repeated google.protobuf.Value items = 1; }
+message UserCreateResponse     { string created = 1; }
+message UserDeleteResponse     { string deleted = 1; }
+message UserUpdateResponse {
+  string user    = 1;
+  string schema  = 2;
+  string table   = 3;
+  string action  = 4;
+  bool with_grant_option = 5;
+}
+message UserGrantsResponse     { repeated UserGrantItem items = 1; }
+message UserResponse {
+  oneof body {
+    UserListResponse   list   = 1;
+    UserCreateResponse create = 2;
+    UserUpdateResponse update = 3;
+    UserDeleteResponse delete = 4;
+    UserGrantsResponse grants = 5;
+  }
+}
+
+// ---------- TABLE ----------
+message TableListItem {
+  string name = 1;
+  string type = 2;   // TABLE | VIEW | ...
+}
+message TableListResponse       { repeated TableListItem items = 1; }
+message TableColumnListResponse { repeated ColumnDef items = 1; }
+message TableCreateResponse     { string created = 1; }
+message TableUpdateResponse {
+  string table_name = 1;
+  string operation  = 2;
+}
+message TableDeleteResponse     { string deleted = 1; }
+message TableGetDdlResponse     { string ddl = 1; }
+message TableRenameResponse {
+  string renamed = 1;
+  string new_name = 2;
+}
+message TableTruncateResponse   { string truncated = 1; }
+message TableResponse {
+  oneof body {
+    TableListResponse       list     = 1;
+    TableColumnListResponse columns  = 2;
+    TableCreateResponse     create   = 3;
+    TableUpdateResponse     update   = 4;
+    TableDeleteResponse     delete   = 5;
+    TableGetDdlResponse     get_ddl  = 6;
+    TableRenameResponse     rename   = 7;
+    TableTruncateResponse   truncate = 8;
+  }
+}
+
+// ---------- DATA ----------
+// A typed wrapper around a dynamic column → value map.
+message Row {
+  map<string, google.protobuf.Value> values = 1;
+}
+message DataListPagedResponse {
+  int64 total = 1;
+  int32 page = 2;
+  int32 page_size = 3;
+  repeated Row rows = 4;
+}
+message DataCreateResponse { int32 affected_rows = 1; }
+message DataUpdateResponse { int32 affected_rows = 1; }
+message DataDeleteResponse { int32 affected_rows = 1; }
+message DataResponse {
+  oneof body {
+    DataListPagedResponse list   = 1;
+    DataCreateResponse    create = 2;
+    DataUpdateResponse    update = 3;
+    DataDeleteResponse    delete = 4;
+  }
+}
+
+// Streaming frame for DATA.LIST (pageSize=0) — one frame per row.
+message DataRowFrame {
+  int64 total = 1;
+  int32 page = 2;     // always 0 for streaming
+  int32 page_size = 3; // always 1 for streaming
+  Row row = 4;
+}
+
+// ---------- SQL ----------
+message SqlSelectRowFrame {
+  int64 total = 1;     // always -1 for SELECT streaming
+  int32 page = 2;
+  int32 page_size = 3;
+  Row row = 4;
+}
+message SqlExecuteResponse {
+  int32 affected_rows = 1;
+}
+message SqlExplainResponse {
+  repeated Row rows = 1;
+}
+message SqlResponse {
+  oneof body {
+    SqlExecuteResponse execute = 1;
+    SqlExplainResponse explain = 2;
+  }
+}
+
+// ---------- SYSTEM ----------
+message SystemInfoResponse {
+  string jvm_version = 1;
+  string jvm_vendor  = 2;
+  string jvm_name    = 3;
+  string os_name     = 4;
+  string os_arch     = 5;
+  string os_version  = 6;
+  int32  available_processors = 7;
+  MemoryInfo memory = 8;
+  int64 uptime = 9;     // milliseconds
+  int64 pid    = 10;
+}
+message MemoryInfo {
+  int64 max   = 1;     // bytes
+  int64 total = 2;
+  int64 used  = 3;
+  int64 free  = 4;
+}
+message SystemTestConnectionResponse {
+  bool   ok       = 1;
+  string driver   = 2;
+  string host     = 3;
+  int32  port     = 4;
+  string database = 5;
+  string error    = 6;   // populated when ok=false
+}
+message SystemServerInfoResponse {
+  string version = 1;
+  string catalog = 2;   // MySQL
+  string current_database = 3;  // PG
+  string mode    = 4;   // H2
+  // dialect-specific extras packed as Value
+  google.protobuf.Value extras = 10;
+}
+message SystemResponse {
+  oneof body {
+    SystemInfoResponse           info            = 1;
+    SystemTestConnectionResponse test_connection = 2;
+    SystemServerInfoResponse     server_info     = 3;
+  }
+}
+
+// ---------- FUNCTION ----------
+message FunctionListItem {
+  string name             = 1;
+  string routine_type     = 2;   // FUNCTION | PROCEDURE | TRIGGER
+  string return_type      = 3;
+  string language         = 4;
+  string security_definer = 5;
+  string volatility       = 6;
+  string arg_count        = 7;
+  string arg_names        = 8;
+  string schema           = 9;
+  string description      = 10;
+  string trigger_table    = 11;
+}
+message FunctionListResponse    { repeated FunctionListItem items = 1; }
+message FunctionInfoResponse    { google.protobuf.Value info = 1; }   // dialect-specific shape
+message FunctionGetDdlResponse  { string ddl = 1; }
+message FunctionCreateResponse  {
+  bool success = 1;
+  string message = 2;
+}
+message FunctionDeleteResponse {
+  bool success = 1;
+  string message = 2;
+  string name = 3;
+  string routine_type = 4;
+}
+message FunctionCallResponse    { google.protobuf.Value result = 1; }   // dialect-specific
+message FunctionDebugItem {
+  string type   = 1;   // EXPLAIN | INFO | DEPENDENCIES
+  string output = 2;
+}
+message FunctionDebugResponse   { repeated FunctionDebugItem items = 1; }
+message FunctionValidateResponse {
+  bool valid = 1;
+  string message = 2;
+}
+message FunctionResponse {
+  oneof body {
+    FunctionListResponse    list    = 1;
+    FunctionInfoResponse    info    = 2;
+    FunctionGetDdlResponse  get_ddl = 3;
+    FunctionCreateResponse  create  = 4;
+    FunctionDeleteResponse  delete  = 5;
+    FunctionCallResponse    call    = 6;
+    FunctionDebugResponse   debug   = 7;
+    FunctionValidateResponse update = 8;
+  }
+}
+
+// ---------- VIEW ----------
+message ViewListItem {
+  string name       = 1;
+  string type       = 2;
+  string definition = 3;
+}
+message ViewListResponse   { repeated ViewListItem items = 1; }
+message ViewCreateResponse { string created = 1; }
+message ViewDeleteResponse { string deleted = 1; }
+message ViewGetDdlResponse { string ddl = 1; }
+message ViewResponse {
+  oneof body {
+    ViewListResponse   list    = 1;
+    ViewCreateResponse create  = 2;
+    ViewDeleteResponse delete  = 3;
+    ViewGetDdlResponse get_ddl = 4;
+  }
+}
+
+// ---------- INDEX ----------
+message IndexListItem {
+  string             name       = 1;
+  string             table      = 2;
+  repeated string    columns    = 3;
+  bool               unique     = 4;
+  string             type       = 5;   // BTREE | HASH | ...
+  string             definition = 6;   // dialect-specific fallback (PG/H2 use this instead of columns)
+}
+message IndexListResponse   { repeated IndexListItem items = 1; }
+message IndexCreateResponse {
+  string created = 1;
+  string table_name = 2;
+}
+message IndexDeleteResponse { string deleted = 1; }
+message IndexResponse {
+  oneof body {
+    IndexListResponse   list   = 1;
+    IndexCreateResponse create = 2;
+    IndexDeleteResponse delete = 3;
+  }
+}
+
+// ---------- FOREIGN_KEY ----------
+message ForeignKeyListItem {
+  string             name        = 1;
+  string             table       = 2;
+  repeated string    columns     = 3;
+  string             ref_table   = 4;
+  repeated string    ref_columns = 5;
+  string             on_delete   = 6;
+  string             on_update   = 7;
+}
+message ForeignKeyListResponse   { repeated ForeignKeyListItem items = 1; }
+message ForeignKeyCreateResponse {
+  string created = 1;
+  string table_name = 2;
+}
+message ForeignKeyDeleteResponse { string deleted = 1; }
+message ForeignKeyResponse {
+  oneof body {
+    ForeignKeyListResponse   list   = 1;
+    ForeignKeyCreateResponse create = 2;
+    ForeignKeyDeleteResponse delete = 3;
+  }
+}
+
+// ---------- TRIGGER ----------
+message TriggerListItem {
+  string name      = 1;
+  string table     = 2;
+  string event     = 3;
+  string timing    = 4;
+  string statement = 5;
+}
+message TriggerListResponse   { repeated TriggerListItem items = 1; }
+message TriggerGetDdlResponse { string ddl = 1; }
+message TriggerResponse {
+  oneof body {
+    TriggerListResponse   list    = 1;
+    TriggerGetDdlResponse get_ddl = 2;
+  }
+}
+
+// ---------- EXPORT ----------
+message ExportProgressFrame {
+  int64  exported_rows = 1;
+  int32  column_count  = 2;
+  bool   completed     = 3;
+  string file_path     = 4;  // populated on terminal frame
+  string error         = 5;  // populated on terminal frame if cancelled
+}
+message ExportStopResponse { string stopped = 1; }
+message ExportResponse {
+  oneof body {
+    ExportProgressFrame progress = 1;
+    ExportStopResponse  stop     = 2;
+  }
+}
+
+// Streaming frame for DATA.GENERATE — one frame per INSERT.
+message GenerateProgressFrame {
+  string table             = 1;
+  int64  inserted          = 2;
+  int64  script_inserted   = 3;
+  int32  script_index      = 4;
+  int32  total_scripts     = 5;
+  string sql               = 6;
+  Row data = 7;            // the inserted row payload (typed wrapper)
+}
+message GenerateTerminalResponse {
+  bool success = 1;
+  int32 tables_processed = 2;
+}
+
+// ============================================================================
+// Response envelope
+// ============================================================================
+
 message Response {
   string id = 1;
   bool   success = 2;
   string error   = 3;
   bool   stream  = 4;
   bool   end     = 5;
-  google.protobuf.Value data = 6;
+
+  oneof body {
+    // Per-Category single-shot responses
+    SchemaResponse     schema     = 10;
+    UserResponse       user       = 11;
+    TableResponse      table      = 12;
+    DataResponse       data       = 13;
+    SqlResponse        sql        = 14;
+    SystemResponse     system     = 15;
+    FunctionResponse   function   = 16;
+    ViewResponse       view       = 17;
+    IndexResponse      index      = 18;
+    ForeignKeyResponse foreign_key = 19;
+    TriggerResponse    trigger    = 20;
+    ExportResponse     export     = 21;
+    GenerateTerminalResponse generate_terminal = 22;
+
+    // Streaming frames (one per row / progress event)
+    DataRowFrame          data_row_frame  = 30;
+    SqlSelectRowFrame     sql_row_frame   = 31;
+    GenerateProgressFrame gen_progress_frame = 32;
+  }
 }
 
-// 主服务 — 服务端流式 RPC（一次请求可产生多帧响应：DATA LIST 流式、SQL SELECT、EXPORT 进度、Lua 造数进度）
+// ============================================================================
+// Service
+// ============================================================================
+
 service IdbEngine {
   rpc Handle(Request) returns (stream Response);
 }

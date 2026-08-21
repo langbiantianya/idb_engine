@@ -8,12 +8,12 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 **系统拓扑流（gRPC 模式）：**
 `[前端 Webview]` ↔ `[Wails Go 主进程]` ↔ `(gRPC HTTP/2 + Protobuf)` ↔ `[Kotlin 引擎进程]` ↔ `[MySQL / PostgreSQL / H2]`
 
-**IPC 传输抽象**（v2.1 起新增，详见 §3.6）：引擎与 Wails 主进程之间的 gRPC 通信可通过 `IDB_ENGINE_IPC` 环境变量在三种传输间切换：
+**IPC 传输抽象**（v2.1 起新增，详见 §3.6）：引擎与 Wails 主进程之间的 gRPC 通信可通过 CLI 参数 `--ipc` 在三种传输间切换：
 - `tcp`（默认） — TCP loopback `localhost:<port>`，跨平台
 - `unix` — Unix Domain Socket，Linux/macOS/BSD，Linux 使用 epoll native，macOS/BSD 走 NIO
 - `pipe` — Windows 命名管道（grpc-java 1.68 客户端支持；服务端暂未开放公共 API，抛 `UnsupportedOperationException`）
 
-> **架构升级**：自 v2.0 起，引擎以 gRPC 服务端方式运行（默认 `:50051`，可通过 `IDB_ENGINE_PORT` 覆盖）。客户端通过 gRPC streaming 调用 `IdbEngine.Handle(Request)`，接收 `stream<Response>`（流式响应使用 `stream`/`end` 字段分帧）。旧的 stdin/stdout 长度前缀 Protobuf 帧协议已彻底移除。
+> **架构升级**：自 v2.0 起，引擎以 gRPC 服务端方式运行（默认 `:50051`，可通过 `--port` 覆盖）。客户端通过 gRPC streaming 调用 `IdbEngine.Handle(Request)`，接收 `stream<Response>`（流式响应使用 `stream`/`end` 字段分帧）。自 v2.2 起，所有 `Request.payload` / `Response.data` 字段都已替换为强类型 per-Category protobuf 消息（`oneof body`）。自 v2.3 起，13 个业务 handler 全部接收 typed per-Category proto 消息、返回 typed `<Category><Action>Response` 消息；`TypedRequestMapper` / `TypedResponseMapper` 已删除，业务层不再经过 `JsonObject` 转换。自 v2.4 起，列表项 envelope 也已 typed（per-list `*ListItem` 消息 + typed `Row` wrapper）；仅方言差异显著的 item shape（`USER.LIST` overloaded、FUNCTION.CALL/INFO、SYSTEM.SERVER_INFO extras）保留 `google.protobuf.Value`。旧的 stdin/stdout 长度前缀 Protobuf 帧协议已彻底移除。
 >
 > **性能隔离**：数据导出模块运行在独立的子进程中，通过 `ExportProcessManager` 管理（同样通过 gRPC 连接到主进程的 side server），防止大数据量导出时 OOM 影响主进程稳定性。
 
@@ -22,7 +22,7 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 - **核心语言**：Kotlin 2.4.0 / JDK 25
 - **异步框架**：kotlinx-coroutines 1.11.0
 - **gRPC**：grpc-netty-shaded 1.68.0 + grpc-stub + grpc-protobuf + grpc-kotlin-stub（Kotlin 协程集成）
-- **Protobuf**：com.google.protobuf:protobuf-kotlin 4.28.2（proto3 + `google.protobuf.Value`）
+- **Protobuf**：com.google.protobuf:protobuf-kotlin 4.28.2（proto3 + 强类型 per-Category 消息 + 强类型 per-list-item 消息（v2.4）；少量遗留字段如 `MemoryInfo.extras` 仍使用 `google.protobuf.Value` 包装方言特定扩展）
 - **数据库驱动**：MySQL Connector/J 9.7.0、PostgreSQL JDBC Driver 42.7.11、H2 2.3.232
 - **连接池管理**：HikariCP 7.0.2
 - **数据序列化**：kotlinx-serialization-json 1.11.0（业务层）
@@ -37,7 +37,7 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 
 ### 3.1 通信协议（gRPC）
 
-Kotlin 引擎以 **gRPC 服务端** 方式运行（端口默认 `:50051`，可通过 `IDB_ENGINE_PORT` 覆盖），调用方通过标准 gRPC stub 与引擎通信。
+Kotlin 引擎以 **gRPC 服务端** 方式运行（端口默认 `:50051`，可通过 `--port` 覆盖），调用方通过标准 gRPC stub 与引擎通信。
 
 - **服务定义**（`engine/src/main/proto/idb_engine.proto`）：
   ```proto
@@ -45,10 +45,10 @@ Kotlin 引擎以 **gRPC 服务端** 方式运行（端口默认 `:50051`，可�
     rpc Handle(Request) returns (stream Response);
   }
   ```
-- **传输**：HTTP/2 + 标准 protobuf（`google.protobuf.Value` 类型），由 `grpc-netty-shaded` 驱动
+- **传输**：HTTP/2 + 标准 protobuf（强类型 per-Category 消息），由 `grpc-netty-shaded` 驱动
 - **消息边界**：gRPC 自动处理帧切分，无需手动 length-prefix
-- **PayloadValue 类型**：`Request.payload` 和 `Response.data` 均使用原生 `google.protobuf.Value` 类型（NULL / NUMBER / STRING / BOOL / STRUCT / LIST）
-- **业务层**：Handler 内部继续使用 `JsonObject` / `JsonElement`；边界由 `com.kxxnzstdsw.grpc.PayloadAdapter` 双向转换（`google.protobuf.Value` ↔ `JsonElement`）
+- **Wire 类型**：自 v2.2 起，`Request` 与 `Response` 均为强类型 — `Request` 使用 `oneof body { schema_request, user_request, ... }` 路由到 per-Category 消息（共 12 个：`SystemRequest`/`SchemaRequest`/`UserRequest`/`TableRequest`/`DataRequest`/`SqlRequest`/`FunctionRequest`/`ViewRequest`/`IndexRequest`/`ForeignKeyRequest`/`TriggerRequest`/`ExportRequest`）；`Response` 同样使用 `oneof body` 镜像 12 个 per-Category 响应消息 + 3 个流式帧类型（`DataRowFrame`/`SqlSelectRowFrame`/`GenerateProgressFrame`）+ `GenerateTerminalResponse`
+- **业务层**：13 个 handler 全部直接接收 typed per-Category proto 消息（`ConnectionConfig` + `<Category><Action>Request`），返回 typed per-Action proto 消息（`<Category><Action>Response`）；`RequestDispatcher` 是按 (Category, Action) 路由的薄层，把 typed handler 返回值装入 `Response.body` 对应 oneof 分支。**无 `JsonObject` 边界映射**
 - **最大消息大小**：`maxInboundMessageSize = 256 MiB`
 - **异步处理**：使用 Kotlin 协程 (`kotlinx-coroutines`) + gRPC 服务端异步响应
 - **错误响应**：业务异常被 `RequestDispatcher` 拦截，提取 `e.message` 包装入 `Response.error`，`success` 置为 `false`，`id` 保持请求的 id
@@ -94,24 +94,25 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 ### 3.6 跨平台 IPC 传输抽象 (Cross-Platform IPC Transport Abstraction)
 
-引擎在 gRPC 之上抽象了一层 **IPC Transport SPI**（`com.kxxnzstdsw.ipc.IpcTransport`），允许通过环境变量在三种传输方式之间切换，无需修改业务代码。`IdbEngineServer` 在启动时调用 `IpcTransportRegistry.resolve(IpcConfig.fromEnv())` 获取传输实例，再通过 `transport.serverBuilder()` + `transport.channelBuilder()` 拿到 `ServerBuilder<*>` / `ManagedChannelBuilder<*>`，业务层完全不感知底层传输。
+引擎在 gRPC 之上抽象了一层 **IPC Transport SPI**（`com.kxxnzstdsw.ipc.IpcTransport`），允许通过 CLI 参数在三种传输方式之间切换，无需修改业务代码。`IdbEngineServer` 在启动时调用 `IpcConfig.fromArgs(args)` 解析配置，再通过 `IpcTransportRegistry.resolve(cfg)` 获取传输实例，进而拿到 `ServerBuilder<*>` / `ManagedChannelBuilder<*>`，业务层完全不感知底层传输。
 
 **三种传输方式**：
 
-| `IDB_ENGINE_IPC` | 传输方式 | 适用平台 | 服务端实现 | 客户端实现 |
+| `--ipc` | 传输方式 | 适用平台 | 服务端实现 | 客户端实现 |
 |---|---|---|---|---|
 | `tcp`（默认） | TCP loopback | 全平台 | `NettyServerBuilder.forPort(port)`（生产路径，失败回退 `ServerBuilder.forPort`） | `ManagedChannelBuilder.forAddress("localhost", port).usePlaintext()` |
 | `unix` | Unix Domain Socket（filesystem namespace） | Linux / macOS / BSD | Linux + epoll native 可用：`EpollServerDomainSocketChannel` + `EpollEventLoopGroup`；其它：`NioServerDomainSocketChannel` + `NioEventLoopGroup` | `NettyChannelBuilder.forAddress(DomainSocketAddress(path))` + 对应 channelType + eventLoopGroup |
 | `pipe` | Windows 命名管道 | Windows | grpc-java 1.68（及最新 1.83）**无公开 server-side API**，`serverBuilder()` 抛 `UnsupportedOperationException` | `Grpc.newChannelBuilder("pipe:<name>", InsecureChannelCredentials.create())` |
 
-**环境变量**：
+**CLI 参数**：
 
-| 变量 | 默认值 | 说明 |
+| 参数 | 默认值 | 说明 |
 |---|---|---|
-| `IDB_ENGINE_IPC` | 自动检测 | `tcp` / `unix` / `pipe`；未设置时 Windows → `pipe`，POSIX → `unix` |
-| `IDB_ENGINE_PORT` | `50051` | TCP 端口（仅 `tcp` 模式生效） |
-| `IDB_ENGINE_UDS_PATH` | `${XDG_RUNTIME_DIR:-/tmp}/idb-engine.sock` | UDS 文件路径（POSIX） |
-| `IDB_ENGINE_PIPE_NAME` | `idb-engine` | 命名管道名称（Windows） |
+| `--ipc <kind>` | OS 自动检测 | `tcp` / `unix` / `pipe`；未传时 Windows → `pipe`，POSIX → `unix` |
+| `--port <int>` | `50051` | TCP 端口（仅 `tcp` 模式生效） |
+| `--uds-path <path>` | `/tmp/idb-engine.sock` | UDS 文件路径（POSIX） |
+| `--pipe-name <name>` | `idb-engine` | 命名管道名称（Windows） |
+| `--help` / `-h` | — | 打印用法到 stdout 并退出 0 |
 
 **SPI 接口**（`engine/.../ipc/IpcTransport.kt`）：
 
@@ -131,16 +132,16 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 **为什么不用 Linux abstract namespace UDS**：macOS / BSD 不支持 abstract namespace。
 
-**Windows 服务端限制**：grpc-java 1.68.0（当前依赖版本，最新 1.83.0 亦未公开）未暴露用于 Windows Named Pipes 的 server-side API。`NamedPipeIpcTransport.serverBuilder()` 抛 `UnsupportedOperationException`，提示需 JNA + Win32 `CreateNamedPipe` 自实现（标记为未来工作）；客户端 `channelBuilder()` 可用。Engine 在 Windows 上仍可通过切换到 `tcp` 模式运行（`set IDB_ENGINE_IPC=tcp`）。
+**Windows 服务端限制**：grpc-java 1.68.0（当前依赖版本，最新 1.83.0 亦未公开）未暴露用于 Windows Named Pipes 的 server-side API。`NamedPipeIpcTransport.serverBuilder()` 抛 `UnsupportedOperationException`，提示需 JNA + Win32 `CreateNamedPipe` 自实现（标记为未来工作）；客户端 `channelBuilder()` 可用。Engine 在 Windows 上仍可通过切换到 `tcp` 模式运行（`--ipc tcp`）。
 
 ## 4. 数据交互契约 (gRPC Wire Contract)
 
-引擎与调用方之间通过标准 gRPC 传递结构化数据。所有 `Request.payload` / `Response.data` 的字段含义通过 proto3 schema 定义；下文中的 JSON 示例仅为业务层理解用的逻辑表示，**实际 wire 上是 `google.protobuf.Value` 的二进制紧凑编码**。
+引擎与调用方之间通过标准 gRPC 传递强类型结构化数据。所有 `Request` / `Response` 的字段含义通过 proto3 schema 定义；下文中的 JSON 示例仅为业务层理解用的逻辑表示，**实际 wire 上是 typed protobuf 的二进制紧凑编码**（不再使用 `map<string, Value>`）。
 
 ### 4.0 Wire 传输 (Wire Transport)
 
 - **传输层**：gRPC over HTTP/2（`grpc-netty-shaded`）
-- **消息类型**：`google.protobuf.Value`（NULL / NUMBER / STRING / BOOL / STRUCT / LIST）
+- **消息类型**：强类型 per-Category protobuf 消息（`oneof body` 路由）
 - **最大消息大小**：`maxInboundMessageSize = 256 MiB`
 - **消息边界**：由 gRPC HTTP/2 帧头管理
 - **流式响应**：客户端调用 `Handle(req)` 后持续 `stream.Recv()`，直到收到 `end: true` 的最后一帧 `Response`
@@ -155,9 +156,33 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 | `category` | `enum Category` | `SCHEMA` / `USER` / `TABLE` / `DATA` / `SQL` / `SYSTEM` / `FUNCTION` / `EXPORT` / `VIEW` / `INDEX` / `FOREIGN_KEY` / `TRIGGER` |
 | `action` | `enum Action` | `LIST` / `CREATE` / `UPDATE` / `DELETE` / `EXECUTE` / `GET_DDL` / `INFO` / `GRANTS` / `GENERATE` / `DEBUG` / `CALL` / `RUN_EXPORT` / `RENAME` / `TRUNCATE` / `TEST_CONNECTION` / `SERVER_INFO` |
 | `connection` | `ConnectionConfig` | 见下表 |
-| `payload` | `map<string, google.protobuf.Value>` | 业务参数 |
+| `body` | `oneof` | per-Category typed 消息（`schema_request`/`user_request`/.../`export_request`），见下方表格 |
 
 > **注意**：`Action.EXPORT` 在 proto3 中与 `EXPORT` category 命名冲突，因此历史 wire 协议中的 `EXPORT` action 在新协议中重命名为 **`RUN_EXPORT`**（12），仍是 `EXPORT` category 的唯一合法 action。
+
+**Per-Category Request 消息**（`Request.body` 选择项）：
+
+| Category | Request body | 关键字段 |
+|---|---|---|
+| `SYSTEM` | `SystemRequest` | （无字段；INFO/TEST_CONNECTION/SERVER_INFO 均无 payload） |
+| `SCHEMA` | `SchemaRequest` | `list { level, database }` / `create { name, options }` / `delete { name }` |
+| `USER` | `UserRequest` | `list { user, host }` / `create { user, password, host }` / `update { user, password, host, schema, privileges[], is_grant, table_name, with_grant_option }` / `delete { user, host }` / `grants { user, host }` |
+| `TABLE` | `TableRequest` | `list { schema }` / `column_list { table_name, schema }` / `create { table_name, columns[], options, schema }` / `update { table_name, operation, column, column_name, schema }` / `get_ddl { table_name, schema }` / `rename { old_name, table_name, new_name, schema }` / `delete { table_name, schema }` / `truncate { table_name, schema }` |
+| `DATA` | `DataRequest` | `list { table_name, page, page_size, where, order_by, schema }` / `create { table_name, values, schema }` / `update { table_name, changes, where, schema }` / `delete { table_name, where, schema }` / `generate { schema, tables[], lua_version }` |
+| `SQL` | `SqlRequest` | `execute { sql, schema }` / `explain { sql, schema }` |
+| `FUNCTION` | `FunctionRequest` | `list { schema }` / `info { name, schema }` / `get_ddl { name, schema }` / `create { ddl }` / `delete { name, routine_type, schema, if_exists, cascade }` / `call { name, routine_type, schema, args[] }` / `debug { name, schema }` / `update { ddl }` |
+| `VIEW` | `ViewRequest` | `list { schema }` / `create { name, definition, schema }` / `delete { name, if_exists, schema }` / `get_ddl { name, schema }` |
+| `INDEX` | `IndexRequest` | `list { table_name, schema }` / `create { table_name, index_name, columns[], unique, schema }` / `delete { index_name, table_name, schema }` |
+| `FOREIGN_KEY` | `ForeignKeyRequest` | `list { table_name, schema }` / `create { table_name, fk_name, columns[], ref_table, ref_columns[], on_delete, on_update, schema }` / `delete { table_name, fk_name, schema }` |
+| `TRIGGER` | `TriggerRequest` | `list { schema }` / `get_ddl { name, schema }` |
+| `EXPORT` | `ExportRequest` | `run_export { sql, output_dir, file_name, format, table_name, fetch_size, stop_export_id }` |
+
+**共享子消息**：
+
+| 消息 | 字段 |
+|---|---|
+| `ColumnDef` | `name, type, size, nullable (optional, default true), is_primary_key, default_value, auto_increment, new_name` |
+| `GenerateTable` | `script` |
 
 `ConnectionConfig`：
 
@@ -182,11 +207,38 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 | `error` | `string` | `""` | 错误信息；非空即视为错误响应 |
 | `stream` | `bool` | `false` | 流式响应标记 |
 | `end` | `bool` | `false` | 流式结束标记 |
-| `data` | `google.protobuf.Value` | `NULL` | 业务结果 |
+| `body` | `oneof` | （空） | 业务结果 — per-Category typed 消息（`schema`/`user`/...） + 3 个流式帧（`data_row_frame`/`sql_row_frame`/`gen_progress_frame`） + `generate_terminal` |
+
+**Per-Category Response 消息**（`Response.body` 单次响应选项）：
+
+| Category | Response body | 关键字段 |
+|---|---|---|
+| `SCHEMA` | `SchemaResponse` | `list { level, database, items[] }` / `create { created }` / `delete { deleted }` |
+| `USER` | `UserResponse` | `list { items[] }` / `create { created }` / `update { user, schema, table, action, with_grant_option }` / `delete { deleted }` / `grants { items[] }` |
+| `TABLE` | `TableResponse` | `list { items[] }` / `columns { items[] }` / `create { created }` / `update { table_name, operation }` / `get_ddl { ddl }` / `rename { renamed, new_name }` / `delete { deleted }` / `truncate { truncated }` |
+| `DATA` | `DataResponse` | `list { total, page, page_size, rows[] }` / `create { affected_rows }` / `update { affected_rows }` / `delete { affected_rows }` |
+| `SQL` | `SqlResponse` | `execute { affected_rows }` / `explain { rows[] }` |
+| `SYSTEM` | `SystemResponse` | `info { jvm_version, ..., memory { max, total, used, free }, uptime, pid }` / `test_connection { ok, driver, host, port, database, error }` / `server_info { version, catalog, current_database, mode, extras }` |
+| `FUNCTION` | `FunctionResponse` | `list { items[] }` / `info { info }` / `get_ddl { ddl }` / `create { success, message }` / `delete { success, message, name, routine_type }` / `call { result }` / `debug { items[] }` / `update { valid, message }` |
+| `VIEW` | `ViewResponse` | `list { items[] }` / `create { created }` / `delete { deleted }` / `get_ddl { ddl }` |
+| `INDEX` | `IndexResponse` | `list { items[] }` / `create { created, table_name }` / `delete { deleted }` |
+| `FOREIGN_KEY` | `ForeignKeyResponse` | `list { items[] }` / `create { created, table_name }` / `delete { deleted }` |
+| `TRIGGER` | `TriggerResponse` | `list { items[] }` / `get_ddl { ddl }` |
+| `EXPORT` | `ExportResponse` | `progress { exported_rows, column_count, completed, file_path, error }` / `stop { stopped }` |
+
+**流式帧类型**（`Response.body` 流式选项）：
+
+| Frame | 字段 | 用途 |
+|---|---|---|
+| `DataRowFrame` | `total, page=0, page_size=1, row` | `DATA.LIST pageSize=0` 每行一帧 |
+| `SqlSelectRowFrame` | `total=-1, page, page_size=1, row` | `SQL.EXECUTE SELECT` 每行一帧 |
+| `GenerateProgressFrame` | `table, inserted, script_inserted, script_index, total_scripts, sql, data` | `DATA.GENERATE` 每条 INSERT 一帧 |
+| `GenerateTerminalResponse` | `success, tables_processed` | `DATA.GENERATE` 终止帧（end=true） |
+| `ExportProgressFrame` | （见 `EXPORT.progress`） | `EXPORT.RUN_EXPORT` 进度帧 |
 
 **流式响应字段说明**：
 - `stream: true` — 当前响应属于流式序列（一条请求产生多帧响应）
-- `end: true` — 流式序列的最后一帧，`data` 为 `NULL`
+- `end: true` — 流式序列的最后一帧
 - 普通（非流式）响应中 `stream` 和 `end` 均为 `false`
 
 ### 4.3 流式 vs 单次响应矩阵
@@ -215,6 +267,8 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 **支持的 Action**：`LIST` / `CREATE` / `DELETE`
 
 **所有 Action 均需要 connection。**
+
+> **Wire vs 业务层**：下面示例中的 JSON `payload` 字段展示的是**业务参数**的逻辑形状，便于理解业务参数。**实际 wire 上** 这些字段是强类型 per-Category protobuf 消息（`Request.body.schema_request.list.level` / `Request.body.schema_request.list.database` 等），handler 直接读取这些 typed 字段，不再经过任何 `JsonObject` 中间层。
 
 #### LIST — 两级导航
 
@@ -930,14 +984,23 @@ dialects/            方言插件（SPI 动态加载）
 ### 8.2 运行
 
 ```bash
-# TCP（默认）
+# TCP（默认；OS 自动检测）
 cd engine/build/libs && java -jar idb-engine.jar
 
-# Unix Domain Socket（POSIX 自动检测）
-IDB_ENGINE_IPC=unix java -jar idb-engine.jar
+# Unix Domain Socket（POSIX 自动检测同上；显式指定）
+java -jar idb-engine.jar --ipc unix
+
+# TCP 自定义端口
+java -jar idb-engine.jar --ipc tcp --port 60000
+
+# UDS 自定义路径
+java -jar idb-engine.jar --ipc unix --uds-path /var/run/idb.sock
 
 # Windows 命名管道（服务端受限，Windows 自动用 pipe 但需自己实现服务）
-set IDB_ENGINE_IPC=pipe && java -jar idb-engine.jar
+java -jar idb-engine.jar --ipc pipe --pipe-name my-pipe
+
+# 查看帮助
+java -jar idb-engine.jar --help
 ```
 
 ### 8.3 与 Wails 集成（gRPC）
@@ -949,7 +1012,7 @@ import (
     pb "your/proto/gen"
 )
 
-cmd := exec.Command("java", "-jar", "idb-engine.jar")
+cmd := exec.Command("java", "-jar", "idb-engine.jar", "--ipc", "tcp", "--port", "50051")
 cmd.Dir = "/path/to/build/libs"
 cmd.Start()
 
@@ -966,6 +1029,13 @@ stream, _ := client.Handle(ctx, &pb.Request{
         Driver: "Mysql", Host: "127.0.0.1", Port: 3306,
         User: "root", Password: "secret", Database: "test",
     },
+    Body: &pb.Request_TableRequest{
+        TableRequest: &pb.TableRequest{
+            Body: &pb.TableRequest_List{
+                List: &pb.TableListRequest{},
+            },
+        },
+    },
 })
 for {
     resp, err := stream.Recv()
@@ -977,7 +1047,8 @@ for {
 ## 9. 实现状态 (Implementation Status)
 
 ✅ 已完成：
-- 核心架构与通信协议（gRPC over HTTP/2 + Protobuf + `google.protobuf.Value`），支持流式响应
+- 核心架构与通信协议（gRPC over HTTP/2 + Protobuf），支持流式响应
+- 强类型 Request/Response envelopes（per-Category `oneof body`，12 + 12 = 24 个 typed 消息 + 3 个流式帧 + 1 个 terminal + 8 个 per-list-item 消息 + typed `Row` wrapper），13 个业务 handler 全部直接接收 typed proto 消息、返回 typed proto 消息；`TypedRequestMapper` / `TypedResponseMapper` 已删除，业务层无 `JsonObject` 边界映射
 - 异步非阻塞处理（Kotlin 协程 + gRPC 服务端异步响应）
 - 数据库方言抽象层（DatabaseDialect SPI + MySQL/PostgreSQL/H2 插件，**所有 SPI 方法三个方言均完整实现**）
 - 连接池管理（HikariCP + SHA-256 缓存，key 包含 password）
@@ -999,18 +1070,19 @@ for {
 - 外键管理（LIST / CREATE / DROP，支持 CASCADE / SET NULL）
 - 触发器管理（LIST / GET_DDL）
 - 数据导出引擎（5 种格式：CSV / JSON Lines / SQL INSERT / Excel / Parquet，独立子进程隔离）
-- 跨平台 IPC 传输抽象（IpcTransport SPI + TCP / UDS / Named Pipe 三实现 + Linux epoll native）
-- 159 个测试全通过，0 失败 / 0 错误：
+- 跨平台 IPC 传输抽象（IpcTransport SPI + TCP / UDS / Named Pipe 三实现 + Linux epoll native，CLI 参数切换）
+- 179 个测试全通过，0 失败 / 0 错误：
   - `:dialect-h2:test` — H2 方言 63 测试
-  - `:engine:test` — 96 测试
+  - `:engine:test` — 116 测试
     - `pool/PoolManagerTest` — 11
     - `loader/DialectLoaderTest` — 5
-    - `integration/*HandlerIntegrationTest` — 60（11 个 handler × H2Fixture）
-    - `ipc/IpcConfigTest` — 9
+    - `ipc/IpcConfigTest` — 20
     - `ipc/IpcTransportTest` — 7
     - `ipc/TcpIpcTransportIntegrationTest` — 1
     - `ipc/UnixSocketIpcTransportIntegrationTest` — 2（`@EnabledOnOs(LINUX, MAC, FREEBSD)`）
     - `ipc/NamedPipeIpcTransportIntegrationTest` — 2
+    - `integration/*HandlerIntegrationTest` — 60（11 个 handler × H2Fixture，使用 typed proto builders）
+    - `integration/TypedRequestEnvelopeIntegrationTest` — 7（端到端 typed envelope）
 
 ⏳ 待扩展：
 - `Action.EXPLAIN` 路由（proto 已定义但 dispatcher 未实现）
@@ -1025,4 +1097,7 @@ for {
 |---|---|---|
 | v1.0 | stdin/stdout + 4-byte BE uint32 长度前缀 + 自定义 kotlinx-serialization-protobuf | 旧版管道协议 |
 | **v2.0** | **gRPC over HTTP/2 + 标准 google.protobuf.Value** | 替换为标准 gRPC；导出子进程同样切换为 gRPC；移除 stdin/stdout 依赖 |
-| **v2.1 (当前)** | **gRPC + 跨平台 IPC Transport SPI（TCP / UDS / Named Pipe）** | 在 gRPC 之上抽象 `IpcTransport` 接口，默认 TCP；可通过 `IDB_ENGINE_IPC` 切换 UDS（Linux/macOS/BSD，Linux epoll native）或 Windows 命名管道；业务层零感知 |
+| v2.1 | gRPC + 跨平台 IPC Transport SPI（TCP / UDS / Named Pipe） | 在 gRPC 之上抽象 `IpcTransport` 接口，默认 TCP；通过环境变量 `IDB_ENGINE_IPC` / `IDB_ENGINE_PORT` / `IDB_ENGINE_UDS_PATH` / `IDB_ENGINE_PIPE_NAME` 切换 UDS（Linux/macOS/BSD，Linux epoll native）或 Windows 命名管道；业务层零感知（v2.2 起环境变量入口已废弃，改为 CLI 参数） |
+| v2.2 | gRPC + 强类型 Request/Response + CLI Args | `Request.payload` 与 `Response.data` 由 `map<string, Value>` 替换为 per-Category typed protobuf 消息（`oneof body` 路由）；IPC 选择由环境变量改为 CLI 参数（`--ipc` / `--port` / `--uds-path` / `--pipe-name` / `--help`）；`TypedRequestMapper` / `TypedResponseMapper` 在 dispatcher 边界做 typed proto ↔ JsonObject 转换 |
+| **v2.3 (当前)** | **gRPC + 强类型 Handlers end-to-end** | 13 个业务 handler 全部接收 typed per-Category proto 消息、返回 typed `<Category><Action>Response` 消息；`TypedRequestMapper` / `TypedResponseMapper` 删除（67 个对应测试一并删除）；`RequestDispatcher` 简化为 (Category, Action) → handler 的薄路由层；11 个 handler 集成测试改用 typed proto builders；179 个测试全通过（116 engine + 63 H2） |
+| **v2.4 (当前)** | **gRPC + 强类型 per-list-item 消息** | 8 个 typed per-list-item 消息（`TableListItem` / `ViewListItem` / `IndexListItem` / `ForeignKeyListItem` / `TriggerListItem` / `FunctionListItem` / `FunctionDebugItem` / `UserGrantItem`）取代 list/response 中遗留的 `repeated google.protobuf.Value`；动态行使用 typed `Row { map<string, Value> values }` wrapper；方言差异显著的 item shape（USER.LIST overloaded、FUNCTION.CALL/INFO、SYSTEM.SERVER_INFO extras）保留 `google.protobuf.Value`；11 个 handler 集成测试改用 typed accessor（`item.name` 替代 `item.structValue.fieldsMap["name"]?.stringValue`）；179 个测试全通过 |

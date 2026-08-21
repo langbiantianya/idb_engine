@@ -1,9 +1,11 @@
 package com.kxxnzstdsw.integration
 
+import com.kxxnzstdsw.grpc.IndexCreateRequest
+import com.kxxnzstdsw.grpc.IndexDeleteRequest
+import com.kxxnzstdsw.grpc.IndexListRequest
 import com.kxxnzstdsw.handlers.IndexHandler
 import com.kxxnzstdsw.testutil.H2Fixture
 import kotlinx.coroutines.runBlocking
-import kotlinx.serialization.json.*
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -18,60 +20,84 @@ class IndexHandlerIntegrationTest : H2Fixture() {
     @Test
     fun `LIST returns no indexes initially`() = runBlocking {
         seedTable()
-        val result = IndexHandler.list(config, buildJsonObject { put("tableName", "users") })
-        // H2 自动有主键索引（PRIMARY KEY），实际 ≥0
-        assertTrue(result.jsonArray.size >= 0)
+        val result = IndexHandler.list(
+            config,
+            IndexListRequest.newBuilder().setTableName("users").build()
+        )
+        assertTrue(result.itemsCount >= 0)
     }
 
     @Test
     fun `CREATE then LIST then DROP index`() = runBlocking {
         seedTable()
-        IndexHandler.create(config, buildJsonObject {
-            put("tableName", "users")
-            put("indexName", "idx_email")
-            putJsonArray("columns") { add(JsonPrimitive("email")) }
-            put("unique", false)
-        })
-        var list = IndexHandler.list(config, buildJsonObject { put("tableName", "users") })
-        assertTrue(list.jsonArray.any { it.jsonObject["name"]?.jsonPrimitive?.content?.equals("idx_email", ignoreCase = true) == true })
+        IndexHandler.create(
+            config,
+            IndexCreateRequest.newBuilder()
+                .setTableName("users")
+                .setIndexName("idx_email")
+                .addColumns("email")
+                .setUnique(false)
+                .build()
+        )
+        var list = IndexHandler.list(
+            config,
+            IndexListRequest.newBuilder().setTableName("users").build()
+        )
+        assertTrue(list.itemsList.any { it.name.equals("idx_email", ignoreCase = true) })
 
-        IndexHandler.delete(config, buildJsonObject {
-            put("indexName", "idx_email")
-            put("tableName", "users")
-        })
-        list = IndexHandler.list(config, buildJsonObject { put("tableName", "users") })
-        assertFalse(list.jsonArray.any { it.jsonObject["name"]?.jsonPrimitive?.content?.equals("idx_email", ignoreCase = true) == true })
+        IndexHandler.delete(
+            config,
+            IndexDeleteRequest.newBuilder()
+                .setIndexName("idx_email")
+                .setTableName("users")
+                .build()
+        )
+        list = IndexHandler.list(
+            config,
+            IndexListRequest.newBuilder().setTableName("users").build()
+        )
+        assertFalse(list.itemsList.any { it.name.equals("idx_email", ignoreCase = true) })
     }
 
     @Test
     fun `CREATE UNIQUE INDEX has unique=true in list`() = runBlocking {
         seedTable()
-        IndexHandler.create(config, buildJsonObject {
-            put("tableName", "users")
-            put("indexName", "uk_email")
-            putJsonArray("columns") { add(JsonPrimitive("email")) }
-            put("unique", true)
-        })
-        val list = IndexHandler.list(config, buildJsonObject { put("tableName", "users") })
-        val idx = list.jsonArray.first { it.jsonObject["name"]?.jsonPrimitive?.content?.equals("uk_email", ignoreCase = true) == true }
-        assertEquals("true", idx.jsonObject["unique"]?.jsonPrimitive?.content)
+        IndexHandler.create(
+            config,
+            IndexCreateRequest.newBuilder()
+                .setTableName("users")
+                .setIndexName("uk_email")
+                .addColumns("email")
+                .setUnique(true)
+                .build()
+        )
+        val list = IndexHandler.list(
+            config,
+            IndexListRequest.newBuilder().setTableName("users").build()
+        )
+        val idx = list.itemsList.first { it.name.equals("uk_email", ignoreCase = true) }
+        assertEquals(true, idx.unique)
     }
 
     @Test
     fun `CREATE composite index on multiple columns`() = runBlocking {
         seedTable()
-        IndexHandler.create(config, buildJsonObject {
-            put("tableName", "users")
-            put("indexName", "idx_name_email")
-            putJsonArray("columns") {
-                add(JsonPrimitive("name"))
-                add(JsonPrimitive("email"))
-            }
-            put("unique", false)
-        })
-        val list = IndexHandler.list(config, buildJsonObject { put("tableName", "users") })
-        val idx = list.jsonArray.first { it.jsonObject["name"]?.jsonPrimitive?.content?.equals("idx_name_email", ignoreCase = true) == true }
-        val cols = idx.jsonObject["columns"]?.jsonPrimitive?.content!!.uppercase()
+        IndexHandler.create(
+            config,
+            IndexCreateRequest.newBuilder()
+                .setTableName("users")
+                .setIndexName("idx_name_email")
+                .addColumns("name")
+                .addColumns("email")
+                .setUnique(false)
+                .build()
+        )
+        val list = IndexHandler.list(
+            config,
+            IndexListRequest.newBuilder().setTableName("users").build()
+        )
+        val idx = list.itemsList.first { it.name.equals("idx_name_email", ignoreCase = true) }
+        val cols = idx.columnsList.map { it.uppercase() }
         assertTrue(cols.contains("NAME"))
         assertTrue(cols.contains("EMAIL"))
     }

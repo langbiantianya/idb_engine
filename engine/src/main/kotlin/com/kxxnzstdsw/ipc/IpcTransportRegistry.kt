@@ -18,13 +18,13 @@ object IpcTransportRegistry {
         IpcKind.TCP -> TcpIpcTransport(config)
         IpcKind.UNIX -> {
             require(!isWindows()) {
-                "Unix domain sockets are not supported on Windows — set IDB_ENGINE_IPC=tcp|pipe"
+                "Unix domain sockets are not supported on Windows — pass --ipc=tcp or --ipc=pipe"
             }
             UnixSocketIpcTransport(config)
         }
         IpcKind.PIPE -> {
             require(isWindows()) {
-                "Named pipes are only supported on Windows — set IDB_ENGINE_IPC=tcp|unix"
+                "Named pipes are only supported on Windows — pass --ipc=tcp or --ipc=unix"
             }
             NamedPipeIpcTransport(config)
         }

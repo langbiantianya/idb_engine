@@ -1,9 +1,10 @@
 package com.kxxnzstdsw.integration
 
+import com.kxxnzstdsw.grpc.TriggerGetDdlRequest
+import com.kxxnzstdsw.grpc.TriggerListRequest
 import com.kxxnzstdsw.handlers.TriggerHandler
 import com.kxxnzstdsw.testutil.H2Fixture
 import kotlinx.coroutines.runBlocking
-import kotlinx.serialization.json.*
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -12,9 +13,11 @@ class TriggerHandlerIntegrationTest : H2Fixture() {
 
     @Test
     fun `LIST returns empty initially`() = runBlocking {
-        val result = TriggerHandler.list(config, buildJsonObject { put("schema", "PUBLIC") })
-        assertTrue(result is JsonArray)
-        assertEquals(0, result.jsonArray.size)
+        val result = TriggerHandler.list(
+            config,
+            TriggerListRequest.newBuilder().setSchema("PUBLIC").build()
+        )
+        assertEquals(0, result.itemsCount)
     }
 
     /**
@@ -23,11 +26,12 @@ class TriggerHandlerIntegrationTest : H2Fixture() {
      */
     @Test
     fun `LIST returns trigger after CREATE TRIGGER SQL`() = runBlocking {
-        // H2 不易创建简单的触发器 — 通过 SQL 模块间接验证（EXPLAIN CREATE TRIGGER）
         executeUpdate("CREATE TABLE logs (id INT, msg VARCHAR(100))")
-        val result = TriggerHandler.list(config, buildJsonObject { put("schema", "PUBLIC") })
-        // 至少返回 JsonArray（即使为空也代表 LIST 接口工作正常）
-        assertTrue(result is JsonArray)
+        val result = TriggerHandler.list(
+            config,
+            TriggerListRequest.newBuilder().setSchema("PUBLIC").build()
+        )
+        assertEquals(0, result.itemsCount)
     }
 
     /**
@@ -36,10 +40,13 @@ class TriggerHandlerIntegrationTest : H2Fixture() {
     @Test
     fun `GET_DDL throws on H2 (not supported)`() = runBlocking {
         try {
-            TriggerHandler.getDDL(config, buildJsonObject {
-                put("name", "nonexistent_trigger")
-                put("schema", "PUBLIC")
-            })
+            TriggerHandler.getDDL(
+                config,
+                TriggerGetDdlRequest.newBuilder()
+                    .setName("nonexistent_trigger")
+                    .setSchema("PUBLIC")
+                    .build()
+            )
             error("应抛 UnsupportedOperationException（H2 不支持）")
         } catch (e: UnsupportedOperationException) {
             assertTrue(e.message!!.contains("H2"))

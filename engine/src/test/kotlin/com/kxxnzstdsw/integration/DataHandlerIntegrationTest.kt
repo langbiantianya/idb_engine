@@ -1,9 +1,12 @@
 package com.kxxnzstdsw.integration
 
+import com.kxxnzstdsw.grpc.DataCreateRequest
+import com.kxxnzstdsw.grpc.DataDeleteRequest
+import com.kxxnzstdsw.grpc.DataListRequest
+import com.kxxnzstdsw.grpc.DataUpdateRequest
 import com.kxxnzstdsw.handlers.DataHandler
 import com.kxxnzstdsw.testutil.H2Fixture
 import kotlinx.coroutines.runBlocking
-import kotlinx.serialization.json.*
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -19,67 +22,84 @@ class DataHandlerIntegrationTest : H2Fixture() {
     }
 
     @Test
-    fun `LIST returns paginated data with total count`() = runBlocking {
+    fun `LIST returns paginated data with total count`() = runBlocking<Unit> {
         seed()
-        val result = DataHandler.list(config, buildJsonObject {
-            put("tableName", "users")
-            put("page", 1)
-            put("pageSize", 5)
-        }) as JsonElement
-        val obj = result.jsonObject
-        assertEquals(20L, obj["total"]?.jsonPrimitive?.longOrNull)
-        assertEquals(5, (obj["rows"] as JsonArray).size)
+        val result = DataHandler.list(
+            config,
+            DataListRequest.newBuilder()
+                .setTableName("users")
+                .setPage(1)
+                .setPageSize(5)
+                .build()
+        )
+        assertEquals(20L, result.total)
+        assertEquals(5, result.rowsCount)
     }
 
     @Test
-    fun `LIST with where clause filters rows`() = runBlocking {
+    fun `LIST with where clause filters rows`() = runBlocking<Unit> {
         seed()
-        val result = DataHandler.list(config, buildJsonObject {
-            put("tableName", "users")
-            put("page", 1)
-            put("pageSize", 50)
-            put("where", "age > 25")
-        }) as JsonElement
-        val total = result.jsonObject["total"]?.jsonPrimitive?.longOrNull
-        assertNotNull(total)
-        assertEquals(5L, total) // age > 25 → 26..30 = 5 rows
+        val result = DataHandler.list(
+            config,
+            DataListRequest.newBuilder()
+                .setTableName("users")
+                .setPage(1)
+                .setPageSize(50)
+                .setWhere("age > 25")
+                .build()
+        )
+        assertNotNull(result.total)
+        assertEquals(5L, result.total)
     }
 
     @Test
-    fun `LIST with orderBy sorts results`() = runBlocking {
+    fun `LIST with orderBy sorts results`() = runBlocking<Unit> {
         seed()
-        val result = DataHandler.list(config, buildJsonObject {
-            put("tableName", "users")
-            put("page", 1)
-            put("pageSize", 3)
-            put("orderBy", "age DESC")
-        }) as JsonElement
-        val rows = result.jsonObject["rows"] as JsonArray
-        // H2 把列名返回大写 — 查找 key 时大小写不敏感
-        val firstAge = rows[0].jsonObject.entries.firstOrNull { it.key.equals("age", ignoreCase = true) }?.value?.jsonPrimitive?.intOrNull
-        val thirdAge = rows[2].jsonObject.entries.firstOrNull { it.key.equals("age", ignoreCase = true) }?.value?.jsonPrimitive?.intOrNull
-        assertTrue(firstAge!! > thirdAge!!)
+        val result = DataHandler.list(
+            config,
+            DataListRequest.newBuilder()
+                .setTableName("users")
+                .setPage(1)
+                .setPageSize(3)
+                .setOrderBy("age DESC")
+                .build()
+        )
+        val rows = result.rowsList
+        fun ageOf(row: com.kxxnzstdsw.grpc.Row): Int? = row.valuesMap.entries
+            .firstOrNull { it.key.equals("age", ignoreCase = true) }
+            ?.value?.stringValue?.toInt()
+        val firstAge = ageOf(rows[0])
+        val thirdAge = ageOf(rows[2])
+        assertNotNull(firstAge)
+        assertNotNull(thirdAge)
+        assertTrue(firstAge > thirdAge)
     }
 
     @Test
-    fun `LIST with pageSize 0 streams rows via onRow callback`() = runBlocking {
+    fun `LIST with pageSize 0 streams rows via onRow callback`() = runBlocking<Unit> {
         seed()
-        val collected = mutableListOf<JsonElement>()
-        DataHandler.list(config, buildJsonObject {
-            put("tableName", "users")
-            put("pageSize", 0)
-        }) { row -> collected.add(row) }
-        assertEquals(20, collected.size)
+        var count = 0
+        DataHandler.list(
+            config,
+            DataListRequest.newBuilder()
+                .setTableName("users")
+                .setPageSize(0)
+                .build()
+        ) { _ -> count++ }
+        assertEquals(20, count)
     }
 
     @Test
-    fun `LIST rejects WHERE with dangerous keyword`() = runBlocking {
+    fun `LIST rejects WHERE with dangerous keyword`() = runBlocking<Unit> {
         seed()
         try {
-            DataHandler.list(config, buildJsonObject {
-                put("tableName", "users")
-                put("where", "1=1 OR DROP TABLE x")
-            })
+            DataHandler.list(
+                config,
+                DataListRequest.newBuilder()
+                    .setTableName("users")
+                    .setWhere("1=1 OR DROP TABLE x")
+                    .build()
+            )
             error("应抛 IllegalArgumentException")
         } catch (e: IllegalArgumentException) {
             assertTrue(e.message!!.contains("DROP"))
@@ -87,56 +107,62 @@ class DataHandlerIntegrationTest : H2Fixture() {
     }
 
     @Test
-    fun `CREATE inserts a row and returns affectedRows`() = runBlocking {
+    fun `CREATE inserts a row and returns affectedRows`() = runBlocking<Unit> {
         executeUpdate("CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(50), age INT)")
-        val result = DataHandler.create(config, buildJsonObject {
-            put("tableName", "t")
-            putJsonObject("values") {
-                put("name", "Alice")
-                put("age", "30")
-            }
-        })
-        assertEquals(1, result.jsonObject["affectedRows"]?.jsonPrimitive?.intOrNull)
+        val result = DataHandler.create(
+            config,
+            DataCreateRequest.newBuilder()
+                .setTableName("t")
+                .putValues("name", "Alice")
+                .putValues("age", "30")
+                .build()
+        )
+        assertEquals(1, result.affectedRows)
         assertEquals("Alice", executeQuerySingle("SELECT name FROM t LIMIT 1"))
     }
 
     @Test
-    fun `UPDATE changes a row by where clause`() = runBlocking {
+    fun `UPDATE changes a row by where clause`() = runBlocking<Unit> {
         executeUpdate("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(50))")
         executeUpdate("INSERT INTO t VALUES (1, 'old')")
-        val result = DataHandler.update(config, buildJsonObject {
-            put("tableName", "t")
-            putJsonObject("changes") {
-                put("name", "new")
-            }
-            putJsonObject("where") { put("id", "1") }
-        })
-        assertEquals(1, result.jsonObject["affectedRows"]?.jsonPrimitive?.intOrNull)
+        val result = DataHandler.update(
+            config,
+            DataUpdateRequest.newBuilder()
+                .setTableName("t")
+                .putChanges("name", "new")
+                .putWhere("id", "1")
+                .build()
+        )
+        assertEquals(1, result.affectedRows)
         assertEquals("new", executeQuerySingle("SELECT name FROM t WHERE id=1"))
     }
 
     @Test
-    fun `DELETE removes rows by where clause`() = runBlocking {
+    fun `DELETE removes rows by where clause`() = runBlocking<Unit> {
         executeUpdate("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(50))")
         executeUpdate("INSERT INTO t VALUES (1, 'a'), (2, 'b')")
-        val result = DataHandler.delete(config, buildJsonObject {
-            put("tableName", "t")
-            putJsonObject("where") { put("id", "1") }
-        })
-        assertEquals(1, result.jsonObject["affectedRows"]?.jsonPrimitive?.intOrNull)
+        val result = DataHandler.delete(
+            config,
+            DataDeleteRequest.newBuilder()
+                .setTableName("t")
+                .putWhere("id", "1")
+                .build()
+        )
+        assertEquals(1, result.affectedRows)
         assertEquals("1", executeQuerySingle("SELECT COUNT(*) FROM t"))
     }
 
     @Test
-    fun `INSERT binds LocalDate type for DATE column`() = runBlocking {
+    fun `INSERT binds LocalDate type for DATE column`() = runBlocking<Unit> {
         executeUpdate("CREATE TABLE events (id INT PRIMARY KEY, event_date DATE)")
-        DataHandler.create(config, buildJsonObject {
-            put("tableName", "events")
-            putJsonObject("values") {
-                put("id", "1")
-                put("event_date", "2024-06-15")
-            }
-        })
+        DataHandler.create(
+            config,
+            DataCreateRequest.newBuilder()
+                .setTableName("events")
+                .putValues("id", "1")
+                .putValues("event_date", "2024-06-15")
+                .build()
+        )
         assertEquals("2024-06-15", executeQuerySingle("SELECT event_date FROM events"))
     }
 }

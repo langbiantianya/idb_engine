@@ -4,7 +4,10 @@ import com.kxxnzstdsw.export.ExportEngine
 import com.kxxnzstdsw.export.ExportFormat
 import com.kxxnzstdsw.export.ExportProcessManager
 import com.kxxnzstdsw.export.ExportRequest
-import com.kxxnzstdsw.grpc.ConnectionConfig
+import com.kxxnzstdsw.grpc.ExportHubResponse
+import com.kxxnzstdsw.grpc.ExportResponse
+import com.kxxnzstdsw.grpc.ExportRunRequest
+import com.kxxnzstdsw.grpc.ExportStopResponse
 import com.kxxnzstdsw.grpc.PayloadAdapter
 import com.kxxnzstdsw.grpc.Request
 import com.kxxnzstdsw.grpc.Response
@@ -15,9 +18,8 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.io.File
 import kotlin.time.Duration.Companion.milliseconds
@@ -25,74 +27,22 @@ import kotlin.time.Duration.Companion.milliseconds
 /**
  * 数据导出 Handler（gRPC 统一入口）
  *
- * 责任划分：
- * - 本类负责业务解析（payload → ExportRequest）
- * - 主进程模式：根据 payload 决定启动导出还是停止已有任务，通过 ExportProcessManager
- *   投递命令到子进程，并订阅子进程返回的流式进度
- * - 子进程模式：直接调用 ExportEngine.export 并通过返回 Flow 推送进度
+ * 双模式入口：
+ *  - 主进程：`executeInMainProcess(request): Flow<Response>`（typed Response）
+ *  - 子进程：`executeAsSubprocess(request): Flow<ExportHubResponse>`（subprocess wire shape）
  *
- * Flow<Response> 返回：被 RequestDispatcher 直接 emit 给 gRPC StreamObserver
+ * 两者共享 `parseExportRequest()`：把 typed `ExportRunRequest` → ExportRequest。
  */
 object ExportHandler {
 
     /**
-     * 入口：根据模式分流
-     * - 主进程：编排子进程
-     * - 子进程：直接执行 ExportEngine
+     * 主进程模式入口 — 由 [com.kxxnzstdsw.dispatcher.RequestDispatcher] 直接调用。
+     * 编排子进程 + 收集子进程响应并组装为 typed Response 流。
      */
-    fun execute(request: Request): Flow<Response> {
-        return if (isSubprocessMode()) {
-            executeAsSubprocess(request)
-        } else {
-            executeInMainProcess(request)
-        }
-    }
-
-    /**
-     * 子进程模式：在 Flow 中调用 ExportEngine 并 emit 进度
-     */
-    fun executeAsSubprocess(request: Request): Flow<Response> = flow {
+    fun executeInMainProcess(request: Request): Flow<Response> = flow {
         val id = request.id
         val config = request.connection
-        val payload = PayloadAdapter.toJsonObject(request.payloadMap)
-        try {
-            val exportRequest = parseExportRequest(payload)
-            withContext(Dispatchers.IO) {
-                ExportEngine.export(config, exportRequest) { progress ->
-                    val data = buildJsonObject {
-                        put("exportedRows", progress.exportedRows)
-                        put("columnCount", progress.columnCount)
-                        put("completed", progress.completed)
-                        if (progress.filePath != null) put("filePath", progress.filePath)
-                        if (progress.error != null) put("error", progress.error)
-                    }
-                    runBlocking {
-                        emit(
-                            Response.newBuilder()
-                                .setId(id).setSuccess(true).setStream(true).setEnd(progress.completed)
-                                .setData(PayloadAdapter.toValue(data))
-                                .build()
-                        )
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            emit(
-                Response.newBuilder()
-                    .setId(id).setSuccess(false)
-                    .setError(e.message ?: "Export failed")
-                    .build()
-            )
-        }
-    }
-
-    /**
-     * 主进程模式：编排子进程 + 收集子进程响应
-     */
-    private fun executeInMainProcess(request: Request): Flow<Response> = flow {
-        val id = request.id
-        val config = request.connection
-        val payload = PayloadAdapter.toJsonObject(request.payloadMap)
+        val runReq = request.exportRequest.runExport
 
         val jarPath = findEngineJarPath()
         if (jarPath == null) {
@@ -104,17 +54,15 @@ object ExportHandler {
         }
 
         // 停止导出分支
-        val stopExportId = payload["stopExportId"]?.jsonPrimitive?.content
+        val stopExportId = runReq.stopExportId.ifBlank { null }
         if (stopExportId != null) {
             ensureSubprocessRunning(jarPath)
             ExportProcessManager.stopExport(stopExportId)
+            val stopMsg = ExportStopResponse.newBuilder().setStopped(stopExportId).build()
             emit(
-                Response.newBuilder().setId(id).setSuccess(true)
-                    .setData(
-                        PayloadAdapter.toValue(
-                            buildJsonObject { put("stopped", stopExportId) }
-                        )
-                    )
+                Response.newBuilder()
+                    .setId(id).setSuccess(true)
+                    .setExport(ExportResponse.newBuilder().setStop(stopMsg))
                     .build()
             )
             return@flow
@@ -122,10 +70,52 @@ object ExportHandler {
 
         // 启动导出分支
         ensureSubprocessRunning(jarPath)
-        ExportProcessManager.startExport(id, config, PayloadAdapter.toPayloadMap(payload))
+        // 转发给子进程的 ExportCommand 仍然使用 map<string,Value> payload — 子进程 wire 协议保持旧形态
+        ExportProcessManager.startExport(id, config, runReqToPayloadMap(runReq))
 
-        // 收集子进程响应转发给上游 gRPC StreamObserver
+        // 收集子进程响应（已由 ExportProcessManager 转为 typed Response）转发给上游 gRPC StreamObserver
         ExportProcessManager.collectResponses(id).collect { emit(it) }
+    }
+
+    /**
+     * 子进程模式入口 — 由 [com.kxxnzstdsw.export.ExportSubProcess] 直接调用。
+     * 直接调用 ExportEngine.export 并 emit 子进程 wire 形态的 ExportHubResponse。
+     * 不走 typed Response 通道，避免在子进程内部做 typed ↔ Value 的来回转换。
+     */
+    fun executeAsSubprocess(request: Request): Flow<ExportHubResponse> = flow {
+        val id = request.id
+        val config = request.connection
+        val runReq = request.exportRequest.runExport
+        try {
+            val exportRequest = parseExportRequest(runReq)
+            withContext(Dispatchers.IO) {
+                ExportEngine.export(config, exportRequest) { progress ->
+                    val data = buildJsonObject {
+                        put("exportedRows", progress.exportedRows)
+                        put("columnCount", progress.columnCount)
+                        put("completed", progress.completed)
+                        if (progress.filePath != null) put("filePath", progress.filePath)
+                        if (progress.error != null) put("error", progress.error)
+                    }
+                    runBlocking {
+                        emit(
+                            ExportHubResponse.newBuilder()
+                                .setId(id).setSuccess(true).setStream(true).setEnd(progress.completed)
+                                .setData(PayloadAdapter.toValue(data))
+                                .build()
+                        )
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            emit(
+                ExportHubResponse.newBuilder()
+                    .setId(id).setSuccess(false)
+                    .setError(e.message ?: "Export failed")
+                    .setEnd(true)
+                    .build()
+            )
+        }
     }
 
     /**
@@ -140,17 +130,13 @@ object ExportHandler {
     }
 
     /**
-     * 解析 payload → ExportRequest
+     * 解析 typed `ExportRunRequest` → ExportRequest
      */
-    private fun parseExportRequest(payload: JsonObject): ExportRequest {
-        val sql = payload["sql"]?.jsonPrimitive?.content
-            ?: throw IllegalArgumentException("缺少参数 'sql'")
-        val outputDir = payload["outputDir"]?.jsonPrimitive?.content
-            ?: throw IllegalArgumentException("缺少参数 'outputDir'")
-        val fileName = payload["fileName"]?.jsonPrimitive?.content
-            ?: throw IllegalArgumentException("缺少参数 'fileName'")
-        val formatStr = payload["format"]?.jsonPrimitive?.content?.uppercase()
-            ?: throw IllegalArgumentException("缺少参数 'format'")
+    private fun parseExportRequest(runReq: ExportRunRequest): ExportRequest {
+        val sql = runReq.sql.ifBlank { throw IllegalArgumentException("缺少参数 'sql'") }
+        val outputDir = runReq.outputDir.ifBlank { throw IllegalArgumentException("缺少参数 'outputDir'") }
+        val fileName = runReq.fileName.ifBlank { throw IllegalArgumentException("缺少参数 'fileName'") }
+        val formatStr = runReq.format.ifBlank { throw IllegalArgumentException("缺少参数 'format'") }.uppercase()
         val format = try {
             ExportFormat.valueOf(formatStr)
         } catch (e: Exception) {
@@ -158,8 +144,8 @@ object ExportHandler {
                 "不支持的格式: $formatStr，支持: CSV, JSON_LINES, SQL_INSERT, EXCEL, PARQUET"
             )
         }
-        val tableName = payload["tableName"]?.jsonPrimitive?.content
-        val fetchSize = payload["fetchSize"]?.jsonPrimitive?.intOrNull ?: 1000
+        val tableName = runReq.tableName.ifBlank { null }
+        val fetchSize = if (runReq.fetchSize == 0) 1000 else runReq.fetchSize
 
         return ExportRequest(
             sql = sql,
@@ -169,6 +155,23 @@ object ExportHandler {
             tableName = tableName,
             fetchSize = fetchSize
         )
+    }
+
+    /**
+     * 把 typed `ExportRunRequest` 打成子进程 wire 的 `map<string, Value>` 形态。
+     */
+    private fun runReqToPayloadMap(runReq: ExportRunRequest): Map<String, com.google.protobuf.Value> {
+        val obj = JsonObject(
+            linkedMapOf(
+                "sql" to JsonPrimitive(runReq.sql),
+                "outputDir" to JsonPrimitive(runReq.outputDir),
+                "fileName" to JsonPrimitive(runReq.fileName),
+                "format" to JsonPrimitive(runReq.format),
+                "tableName" to JsonPrimitive(runReq.tableName),
+                "fetchSize" to JsonPrimitive(runReq.fetchSize)
+            )
+        )
+        return PayloadAdapter.toPayloadMap(obj)
     }
 
     /**
@@ -185,13 +188,5 @@ object ExportHandler {
             }
         }
         return File(".", "idb-engine.jar").takeIf { it.exists() }?.absolutePath
-    }
-
-    /**
-     * 判定当前是否运行在子进程模式
-     * 由 ExportProcessManager 启动子进程时设置 -Didb.subprocess=true
-     */
-    private fun isSubprocessMode(): Boolean {
-        return System.getProperty("idb.subprocess") == "true"
     }
 }

@@ -1,9 +1,10 @@
 package com.kxxnzstdsw.integration
 
+import com.kxxnzstdsw.grpc.SqlExecuteRequest
+import com.kxxnzstdsw.grpc.SqlExplainRequest
 import com.kxxnzstdsw.handlers.SqlEngineHandler
 import com.kxxnzstdsw.testutil.H2Fixture
 import kotlinx.coroutines.runBlocking
-import kotlinx.serialization.json.*
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -11,71 +12,83 @@ import kotlin.test.assertTrue
 class SqlEngineHandlerIntegrationTest : H2Fixture() {
 
     @Test
-    fun `EXECUTE SELECT returns rows`() = runBlocking {
+    fun `EXECUTE SELECT streams rows via callback`() = runBlocking<Unit> {
         executeUpdate("CREATE TABLE t (id INT, name VARCHAR(50))")
         executeUpdate("INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c')")
-        val result = SqlEngineHandler.execute(config, buildJsonObject {
-            put("sql", "SELECT * FROM t ORDER BY id")
-        }) as JsonElement
-        val arr = (result as JsonArray)
-        assertEquals(3, arr.size)
-        assertEquals("a", arr[0].jsonObject["NAME"]?.jsonPrimitive?.content)
+        var rows = 0
+        var firstName: String? = null
+        SqlEngineHandler.execute(
+            config,
+            SqlExecuteRequest.newBuilder().setSql("SELECT * FROM t ORDER BY id").build()
+        ) { frame ->
+            rows++
+            if (firstName == null) {
+                firstName = frame.row.valuesMap["NAME"]?.stringValue
+            }
+        }
+        assertEquals(3, rows)
+        assertEquals("a", firstName)
     }
 
     @Test
-    fun `EXECUTE INSERT returns affectedRows`() = runBlocking {
+    fun `EXECUTE INSERT returns affectedRows`() = runBlocking<Unit> {
         executeUpdate("CREATE TABLE t (id INT, name VARCHAR(50))")
-        val result = SqlEngineHandler.execute(config, buildJsonObject {
-            put("sql", "INSERT INTO t VALUES (1, 'a'), (2, 'b')")
-        }) as JsonElement
-        assertEquals(2, result.jsonObject["affectedRows"]?.jsonPrimitive?.intOrNull)
+        val result = SqlEngineHandler.execute(
+            config,
+            SqlExecuteRequest.newBuilder().setSql("INSERT INTO t VALUES (1, 'a'), (2, 'b')").build()
+        )
+        assertEquals(2, result.affectedRows)
     }
 
     @Test
-    fun `EXECUTE UPDATE returns affectedRows`() = runBlocking {
+    fun `EXECUTE UPDATE returns affectedRows`() = runBlocking<Unit> {
         executeUpdate("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(50))")
         executeUpdate("INSERT INTO t VALUES (1, 'old')")
-        val result = SqlEngineHandler.execute(config, buildJsonObject {
-            put("sql", "UPDATE t SET name='new' WHERE id=1")
-        }) as JsonElement
-        assertEquals(1, result.jsonObject["affectedRows"]?.jsonPrimitive?.intOrNull)
+        val result = SqlEngineHandler.execute(
+            config,
+            SqlExecuteRequest.newBuilder().setSql("UPDATE t SET name='new' WHERE id=1").build()
+        )
+        assertEquals(1, result.affectedRows)
     }
 
     @Test
-    fun `EXECUTE DELETE returns affectedRows`() = runBlocking {
+    fun `EXECUTE DELETE returns affectedRows`() = runBlocking<Unit> {
         executeUpdate("CREATE TABLE t (id INT PRIMARY KEY)")
         executeUpdate("INSERT INTO t VALUES (1), (2)")
-        val result = SqlEngineHandler.execute(config, buildJsonObject {
-            put("sql", "DELETE FROM t WHERE id=1")
-        }) as JsonElement
-        assertEquals(1, result.jsonObject["affectedRows"]?.jsonPrimitive?.intOrNull)
+        val result = SqlEngineHandler.execute(
+            config,
+            SqlExecuteRequest.newBuilder().setSql("DELETE FROM t WHERE id=1").build()
+        )
+        assertEquals(1, result.affectedRows)
     }
 
     @Test
-    fun `EXECUTE DDL returns 0 affectedRows`() = runBlocking {
-        val result = SqlEngineHandler.execute(config, buildJsonObject {
-            put("sql", "CREATE TABLE new_t (id INT)")
-        }) as JsonElement
-        assertEquals(0, result.jsonObject["affectedRows"]?.jsonPrimitive?.intOrNull)
+    fun `EXECUTE DDL returns 0 affectedRows`() = runBlocking<Unit> {
+        val result = SqlEngineHandler.execute(
+            config,
+            SqlExecuteRequest.newBuilder().setSql("CREATE TABLE new_t (id INT)").build()
+        )
+        assertEquals(0, result.affectedRows)
         assertTrue(tableExists("new_t"))
     }
 
     @Test
-    fun `EXPLAIN returns plan rows for a SELECT`() = runBlocking {
+    fun `EXPLAIN returns plan rows for a SELECT`() = runBlocking<Unit> {
         executeUpdate("CREATE TABLE t (id INT)")
-        val result = SqlEngineHandler.explain(config, buildJsonObject {
-            put("sql", "SELECT * FROM t")
-        })
-        assertTrue(result is JsonArray)
-        assertTrue(result.jsonArray.isNotEmpty())
+        val result = SqlEngineHandler.explain(
+            config,
+            SqlExplainRequest.newBuilder().setSql("SELECT * FROM t").build()
+        )
+        assertTrue(result.rowsCount > 0)
     }
 
     @Test
-    fun `EXPLAIN rejects semicolon`() = runBlocking {
+    fun `EXPLAIN rejects semicolon`() = runBlocking<Unit> {
         try {
-            SqlEngineHandler.explain(config, buildJsonObject {
-                put("sql", "SELECT 1; DROP TABLE x")
-            })
+            SqlEngineHandler.explain(
+                config,
+                SqlExplainRequest.newBuilder().setSql("SELECT 1; DROP TABLE x").build()
+            )
             error("应抛 IllegalArgumentException")
         } catch (e: IllegalArgumentException) {
             assertTrue(e.message!!.contains("分号"))

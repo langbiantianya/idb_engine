@@ -17,22 +17,30 @@ import kotlin.system.exitProcess
  * 通信层：gRPC over HTTP/2 + protobuf；传输层由 [com.kxxnzstdsw.ipc.IpcTransport] SPI 抽象，
  * 支持 TCP（默认 :50051）/ UDS（Linux/macOS/BSD）/ Windows 命名管道（pipe:<name>）。
  *
- * 默认传输由 OS 自动检测（Windows=pipe, POSIX=unix），可通过环境变量 IDB_ENGINE_IPC 覆盖。
+ * 默认传输由 OS 自动检测（Windows=pipe, POSIX=unix），可通过 CLI 参数 `--ipc` 覆盖。
+ * 完整参数列表：`java -jar idb-engine.jar --help`。
  */
 object IdbEngineServer {
     private val logger = LoggerFactory.getLogger(IdbEngineServer::class.java)
 
     @JvmStatic
     fun main(args: Array<String>) {
-        run()
+        try {
+            val cfg = IpcConfig.fromArgs(args)
+            run(cfg)
+        } catch (e: IllegalStateException) {
+            System.err.println("idb-engine: ${e.message}")
+            System.err.println("Try --help for usage.")
+            exitProcess(2)
+        }
     }
 
     /**
-     * 启动 gRPC 服务并阻塞至收到终止信号
+     * 启动 gRPC 服务并阻塞至收到终止信号。
+     *
+     * @param cfg 已解析的 IPC 传输配置
      */
-    fun run() {
-        // 解析 IPC 配置 + 选择传输层实现
-        val cfg = IpcConfig.fromEnv()
+    fun run(cfg: IpcConfig) {
         val transport = IpcTransportRegistry.resolve(cfg)
         transport.prepare()
         logger.info("IDB Engine starting (gRPC mode), transport=${transport.describe()}")

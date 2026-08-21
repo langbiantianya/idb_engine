@@ -13,10 +13,10 @@ enum class IpcKind {
 }
 
 /**
- * IPC 传输配置 — 由 [fromEnv] 从环境变量构造。
+ * IPC 传输配置 — 由 [fromArgs] 从 CLI 参数构造。
  *
- * - 显式 `IDB_ENGINE_IPC` 优先于 OS 自动检测
- * - 不设置时：Windows 默认 [IpcKind.PIPE]；POSIX 默认 [IpcKind.UNIX]；其他兜底 [IpcKind.TCP]
+ * - 未传 `--ipc` 时按 OS 自动检测：Windows → [IpcKind.PIPE]；POSIX → [IpcKind.UNIX]
+ * - 各字段默认值见 [fromArgs]
  */
 data class IpcConfig(
     val kind: IpcKind,
@@ -25,38 +25,99 @@ data class IpcConfig(
     val pipeName: String = "idb-engine",
 ) {
     companion object {
+        val USAGE: String = """
+            |IDB Engine — gRPC server
+            |
+            |Usage: java -jar idb-engine.jar [options]
+            |
+            |Options:
+            |  --ipc <kind>         Transport kind: tcp | unix | pipe
+            |                       Default: OS auto-detect (Windows=pipe, POSIX=unix)
+            |  --port <int>         TCP port (only when --ipc=tcp). Default: 50051
+            |  --uds-path <path>    Unix domain socket path (only when --ipc=unix)
+            |                       Default: /tmp/idb-engine.sock
+            |  --pipe-name <name>   Windows named pipe name (only when --ipc=pipe)
+            |                       Default: idb-engine
+            |  --help, -h           Show this help and exit
+            |
+            |Examples:
+            |  java -jar idb-engine.jar
+            |  java -jar idb-engine.jar --ipc tcp --port 50051
+            |  java -jar idb-engine.jar --ipc unix --uds-path /var/run/idb.sock
+            |  java -jar idb-engine.jar --ipc pipe --pipe-name idb-engine
+        """.trimMargin()
+
         /**
-         * 解析环境变量。允许注入 [env] 函数便于测试。
+         * 解析 CLI 参数。
+         *
+         * 不抛 checked exception：解析错误统一抛 [IllegalStateException]，
+         * 由调用方（[com.kxxnzstdsw.server.IdbEngineServer]）捕获并以非零状态退出。
          */
-        fun fromEnv(env: (String) -> String? = System::getenv): IpcConfig {
-            val explicit = env("IDB_ENGINE_IPC")?.trim()?.lowercase()
-            val os = System.getProperty("os.name", "").lowercase()
-            val kind = when (explicit) {
-                null, "" -> when {
-                    os.contains("win") -> IpcKind.PIPE
-                    else -> IpcKind.UNIX   // POSIX 默认走 UDS
+        fun fromArgs(args: Array<String>): IpcConfig {
+            var explicitKind: IpcKind? = null
+            var tcpPort = 50051
+            var udsPath = "/tmp/idb-engine.sock"
+            var pipeName = "idb-engine"
+
+            var i = 0
+            while (i < args.size) {
+                when (val a = args[i]) {
+                    "--help", "-h" -> {
+                        print(USAGE)
+                        kotlin.system.exitProcess(0)
+                    }
+                    "--ipc" -> {
+                        val v = args.getOrNull(i + 1)
+                            ?: error("--ipc requires a value (tcp|unix|pipe)")
+                        explicitKind = parseKind(v)
+                        i += 2
+                    }
+                    "--port" -> {
+                        val v = args.getOrNull(i + 1)
+                            ?: error("--port requires an integer value")
+                        val parsed = v.toIntOrNull()
+                            ?: error("--port expects an integer, got '$v'")
+                        if (parsed !in 0..65535) {
+                            error("--port must be in 0..65535, got $parsed")
+                        }
+                        tcpPort = parsed
+                        i += 2
+                    }
+                    "--uds-path" -> {
+                        udsPath = args.getOrNull(i + 1)
+                            ?: error("--uds-path requires a path value")
+                        i += 2
+                    }
+                    "--pipe-name" -> {
+                        pipeName = args.getOrNull(i + 1)
+                            ?: error("--pipe-name requires a name value")
+                        i += 2
+                    }
+                    else -> error("Unknown argument: '$a' (try --help)")
                 }
-                "tcp"  -> IpcKind.TCP
-                "unix" -> IpcKind.UNIX
-                "pipe" -> IpcKind.PIPE
-                else -> error("Invalid IDB_ENGINE_IPC='$explicit' (expected: tcp | unix | pipe)")
             }
+
+            // OS 自动检测（用户未显式传 --ipc）
+            val kind = explicitKind ?: autoDetectKind()
+
             return IpcConfig(
-                kind     = kind,
-                tcpPort  = env("IDB_ENGINE_PORT")?.toIntOrNull() ?: 50051,
-                udsPath  = env("IDB_ENGINE_UDS_PATH") ?: defaultUdsPath(os),
-                pipeName = env("IDB_ENGINE_PIPE_NAME") ?: "idb-engine",
+                kind = kind,
+                tcpPort = tcpPort,
+                udsPath = udsPath,
+                pipeName = pipeName,
             )
         }
 
-        /** POSIX 优先用 XDG_RUNTIME_DIR，否则 /tmp。 */
-        private fun defaultUdsPath(os: String): String {
-            val xdg = System.getenv("XDG_RUNTIME_DIR")
-            return if (!xdg.isNullOrBlank() && !os.contains("win")) {
-                "$xdg/idb-engine.sock"
-            } else {
-                "/tmp/idb-engine.sock"
-            }
+        private fun autoDetectKind(): IpcKind {
+            val os = System.getProperty("os.name", "").lowercase()
+            return if (os.contains("win")) IpcKind.PIPE else IpcKind.UNIX
+        }
+
+        private fun parseKind(raw: String): IpcKind = when (raw.trim().lowercase()) {
+            "tcp"  -> IpcKind.TCP
+            "unix" -> IpcKind.UNIX
+            "pipe" -> IpcKind.PIPE
+            else   -> error("Invalid --ipc value '$raw' (expected: tcp | unix | pipe)")
         }
     }
 }

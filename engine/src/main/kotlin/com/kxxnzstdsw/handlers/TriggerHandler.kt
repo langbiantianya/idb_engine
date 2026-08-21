@@ -1,11 +1,15 @@
 package com.kxxnzstdsw.handlers
 
-import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.grpc.ConnectionConfig
+import com.kxxnzstdsw.grpc.TriggerGetDdlRequest
+import com.kxxnzstdsw.grpc.TriggerGetDdlResponse
+import com.kxxnzstdsw.grpc.TriggerListItem
+import com.kxxnzstdsw.grpc.TriggerListRequest
+import com.kxxnzstdsw.grpc.TriggerListResponse
+import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.*
 
 /**
  * 触发器管理 Handler。
@@ -16,30 +20,41 @@ object TriggerHandler {
 
     /**
      * LIST — 列出 schema 下的触发器
-     * payload: { "schema": "public" }
      */
-    suspend fun list(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
-        val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
+    suspend fun list(config: ConnectionConfig, req: TriggerListRequest): TriggerListResponse = withContext(Dispatchers.IO) {
+        val schema = req.schema
         val connection = PoolManager.getConnection(config, schema)
         val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
-            Json.encodeToJsonElement(dialect.listTriggers(conn, schema))
+            val items = dialect.listTriggers(conn, schema)
+            val builder = TriggerListResponse.newBuilder()
+            items.forEach { row ->
+                builder.addItems(
+                    TriggerListItem.newBuilder()
+                        .setName(row["name"] ?: "")
+                        .setTable(row["table"] ?: "")
+                        .setEvent(row["event"] ?: "")
+                        .setTiming(row["timing"] ?: "")
+                        .setStatement(row["statement"] ?: "")
+                )
+            }
+            builder.build()
         }
     }
 
     /**
      * GET_DDL — 获取触发器 DDL
-     * payload: { "name": "trg_xxx", "schema": "public" }
      */
-    suspend fun getDDL(config: ConnectionConfig, payload: JsonObject): JsonElement = withContext(Dispatchers.IO) {
-        val name = payload["name"]?.jsonPrimitive?.content
-            ?: throw IllegalArgumentException("缺少参数 'name'")
-        val schema = payload["schema"]?.jsonPrimitive?.contentOrNull ?: ""
+    suspend fun getDDL(config: ConnectionConfig, req: TriggerGetDdlRequest): TriggerGetDdlResponse = withContext(Dispatchers.IO) {
+        if (req.name.isBlank()) throw IllegalArgumentException("缺少参数 'name'")
+        val schema = req.schema
 
         val connection = PoolManager.getConnection(config, schema)
         val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
-            JsonPrimitive(dialect.getTriggerDDL(conn, name, schema))
+            TriggerGetDdlResponse.newBuilder()
+                .setDdl(dialect.getTriggerDDL(conn, req.name, schema))
+                .build()
         }
     }
 }
