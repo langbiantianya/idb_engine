@@ -10,6 +10,9 @@ import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import com.kxxnzstdsw.grpc.userCreateRequest
+import com.kxxnzstdsw.grpc.userDeleteRequest
+import com.kxxnzstdsw.grpc.userListRequest
 
 class UserHandlerIntegrationTest : H2Fixture() {
 
@@ -39,7 +42,7 @@ class UserHandlerIntegrationTest : H2Fixture() {
 
         UserHandler.delete(
             config,
-            UserDeleteRequest.newBuilder().setUser("alice").setHost("%").build()
+            userDeleteRequest { user = "alice"; host = "%" }
         )
         users = UserHandler.list(config, UserListRequest.getDefaultInstance())
         assertTrue(users.itemsList.none {
@@ -51,7 +54,7 @@ class UserHandlerIntegrationTest : H2Fixture() {
     fun `UPDATE password changes user password`() = runBlocking {
         UserHandler.create(
             config,
-            UserCreateRequest.newBuilder().setUser("bob").setPassword("old").setHost("%").build()
+            userCreateRequest { user = "bob"; password = "old"; host = "%" }
         )
         val result = UserHandler.updatePrivileges(
             config,
@@ -68,7 +71,7 @@ class UserHandlerIntegrationTest : H2Fixture() {
     fun `UPDATE grant and revoke privileges`() = runBlocking {
         UserHandler.create(
             config,
-            UserCreateRequest.newBuilder().setUser("carol").setPassword("p").setHost("%").build()
+            userCreateRequest { user = "carol"; password = "p"; host = "%" }
         )
         val grant = UserHandler.updatePrivileges(
             config,
@@ -97,7 +100,7 @@ class UserHandlerIntegrationTest : H2Fixture() {
     fun `LIST with user field returns user privileges`() = runBlocking {
         UserHandler.create(
             config,
-            UserCreateRequest.newBuilder().setUser("dan").setPassword("p").setHost("%").build()
+            userCreateRequest { user = "dan"; password = "p"; host = "%" }
         )
         UserHandler.updatePrivileges(
             config,
@@ -110,7 +113,7 @@ class UserHandlerIntegrationTest : H2Fixture() {
         )
         val result = UserHandler.list(
             config,
-            UserListRequest.newBuilder().setUser("dan").setHost("%").build()
+            userListRequest { user = "dan"; host = "%" }
         )
         // 返回至少是列表（即使是空）
         assertTrue(result.itemsList.isNotEmpty() || result.itemsList.isEmpty())  // 始终为数组

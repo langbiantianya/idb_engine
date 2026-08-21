@@ -5,9 +5,12 @@ import com.kxxnzstdsw.grpc.ForeignKeyCreateRequest
 import com.kxxnzstdsw.grpc.ForeignKeyCreateResponse
 import com.kxxnzstdsw.grpc.ForeignKeyDeleteRequest
 import com.kxxnzstdsw.grpc.ForeignKeyDeleteResponse
-import com.kxxnzstdsw.grpc.ForeignKeyListItem
 import com.kxxnzstdsw.grpc.ForeignKeyListRequest
 import com.kxxnzstdsw.grpc.ForeignKeyListResponse
+import com.kxxnzstdsw.grpc.foreignKeyCreateResponse
+import com.kxxnzstdsw.grpc.foreignKeyDeleteResponse
+import com.kxxnzstdsw.grpc.foreignKeyListItem
+import com.kxxnzstdsw.grpc.foreignKeyListResponse
 import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
@@ -29,7 +32,6 @@ object ForeignKeyHandler {
         val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
             val items = dialect.listForeignKeys(conn, req.tableName)
-            val builder = ForeignKeyListResponse.newBuilder()
             // Accumulate columns / ref_columns per FK name (some dialects return one row per column)
             val acc = mutableMapOf<String, MutableMap<String, Any>>()
             items.forEach { row ->
@@ -46,19 +48,19 @@ object ForeignKeyHandler {
                 (existing["columns"] as MutableList<String>).add(row["column"] ?: row["columns"] ?: "")
                 (existing["ref_columns"] as MutableList<String>).add(row["ref_column"] ?: row["ref_columns"] ?: "")
             }
-            acc.values.forEach { m ->
-                builder.addItems(
-                    ForeignKeyListItem.newBuilder()
-                        .setName(m["name"] as String)
-                        .setTable(m["table"] as String)
-                        .addAllColumns(m["columns"] as List<String>)
-                        .setRefTable(m["ref_table"] as String)
-                        .addAllRefColumns(m["ref_columns"] as List<String>)
-                        .setOnDelete(m["on_delete"] as String)
-                        .setOnUpdate(m["on_update"] as String)
-                )
+            foreignKeyListResponse {
+                acc.values.forEach { m ->
+                    this.items += foreignKeyListItem {
+                        name = m["name"] as String
+                        table = m["table"] as String
+                        this.columns += m["columns"] as List<String>
+                        refTable = m["ref_table"] as String
+                        this.refColumns += m["ref_columns"] as List<String>
+                        onDelete = m["on_delete"] as String
+                        onUpdate = m["on_update"] as String
+                    }
+                }
             }
-            builder.build()
         }
     }
 
@@ -79,10 +81,10 @@ object ForeignKeyHandler {
         val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
             dialect.addForeignKey(conn, req.tableName, req.fkName, req.columnsList, req.refTable, req.refColumnsList, onDelete, onUpdate)
-            ForeignKeyCreateResponse.newBuilder()
-                .setCreated(req.fkName)
-                .setTableName(req.tableName)
-                .build()
+            foreignKeyCreateResponse {
+                created = req.fkName
+                tableName = req.tableName
+            }
         }
     }
 
@@ -98,7 +100,7 @@ object ForeignKeyHandler {
         val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
             dialect.dropForeignKey(conn, req.tableName, req.fkName)
-            ForeignKeyDeleteResponse.newBuilder().setDeleted(req.fkName).build()
+            foreignKeyDeleteResponse { deleted = req.fkName }
         }
     }
 }

@@ -15,6 +15,10 @@ import org.junit.jupiter.api.assertThrows
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import com.kxxnzstdsw.grpc.functionCreateRequest
+import com.kxxnzstdsw.grpc.functionDebugRequest
+import com.kxxnzstdsw.grpc.functionInfoRequest
+import com.kxxnzstdsw.grpc.functionListRequest
 
 class FunctionHandlerIntegrationTest : H2Fixture() {
 
@@ -22,7 +26,7 @@ class FunctionHandlerIntegrationTest : H2Fixture() {
     fun `LIST returns empty when no routines exist`() = runBlocking {
         val result = FunctionHandler.list(
             config,
-            FunctionListRequest.newBuilder().setSchema("PUBLIC").build()
+            functionListRequest { schema = "PUBLIC" }
         )
         assertEquals(0, result.itemsCount)
     }
@@ -32,13 +36,13 @@ class FunctionHandlerIntegrationTest : H2Fixture() {
         val ddl = "CREATE ALIAS my_func FOR \"java.lang.Math.toDegrees\""
         val result = FunctionHandler.create(
             config,
-            FunctionCreateRequest.newBuilder().setDdl(ddl).build()
+            functionCreateRequest { this.ddl = ddl }
         )
         assertTrue(result.success)
 
         val list = FunctionHandler.list(
             config,
-            FunctionListRequest.newBuilder().setSchema("PUBLIC").build()
+            functionListRequest { schema = "PUBLIC" }
         )
         assertTrue(list.itemsList.any { it.name.equals("my_func", ignoreCase = true) })
     }
@@ -81,7 +85,7 @@ class FunctionHandlerIntegrationTest : H2Fixture() {
         )
         val info = FunctionHandler.info(
             config,
-            FunctionInfoRequest.newBuilder().setName("my_func").setSchema("PUBLIC").build()
+            functionInfoRequest { name = "my_func"; schema = "PUBLIC" }
         )
         assertTrue(info.info.structValue.fieldsMap["name"]?.stringValue?.equals("my_func", ignoreCase = true) == true)
         assertNotNull(info.info.structValue.fieldsMap["routine_type"])
@@ -108,7 +112,7 @@ class FunctionHandlerIntegrationTest : H2Fixture() {
 
         val after = FunctionHandler.list(
             config,
-            FunctionListRequest.newBuilder().setSchema("PUBLIC").build()
+            functionListRequest { schema = "PUBLIC" }
         )
         assertTrue(after.itemsList.none { it.name.equals("tmp_func", ignoreCase = true) })
     }
@@ -134,7 +138,7 @@ class FunctionHandlerIntegrationTest : H2Fixture() {
         )
         val debug = FunctionHandler.debug(
             config,
-            FunctionDebugRequest.newBuilder().setName("debug_func").setSchema("PUBLIC").build()
+            functionDebugRequest { name = "debug_func"; schema = "PUBLIC" }
         )
         assertTrue(debug.itemsList.any { it.type in listOf("EXPLAIN", "INFO") })
     }

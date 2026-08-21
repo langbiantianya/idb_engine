@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import com.kxxnzstdsw.grpc.indexListRequest
 
 class IndexHandlerIntegrationTest : H2Fixture() {
 
@@ -22,7 +23,7 @@ class IndexHandlerIntegrationTest : H2Fixture() {
         seedTable()
         val result = IndexHandler.list(
             config,
-            IndexListRequest.newBuilder().setTableName("users").build()
+            indexListRequest { tableName = "users" }
         )
         assertTrue(result.itemsCount >= 0)
     }
@@ -41,7 +42,7 @@ class IndexHandlerIntegrationTest : H2Fixture() {
         )
         var list = IndexHandler.list(
             config,
-            IndexListRequest.newBuilder().setTableName("users").build()
+            indexListRequest { tableName = "users" }
         )
         assertTrue(list.itemsList.any { it.name.equals("idx_email", ignoreCase = true) })
 
@@ -54,7 +55,7 @@ class IndexHandlerIntegrationTest : H2Fixture() {
         )
         list = IndexHandler.list(
             config,
-            IndexListRequest.newBuilder().setTableName("users").build()
+            indexListRequest { tableName = "users" }
         )
         assertFalse(list.itemsList.any { it.name.equals("idx_email", ignoreCase = true) })
     }
@@ -73,7 +74,7 @@ class IndexHandlerIntegrationTest : H2Fixture() {
         )
         val list = IndexHandler.list(
             config,
-            IndexListRequest.newBuilder().setTableName("users").build()
+            indexListRequest { tableName = "users" }
         )
         val idx = list.itemsList.first { it.name.equals("uk_email", ignoreCase = true) }
         assertEquals(true, idx.unique)
@@ -94,7 +95,7 @@ class IndexHandlerIntegrationTest : H2Fixture() {
         )
         val list = IndexHandler.list(
             config,
-            IndexListRequest.newBuilder().setTableName("users").build()
+            indexListRequest { tableName = "users" }
         )
         val idx = list.itemsList.first { it.name.equals("idx_name_email", ignoreCase = true) }
         val cols = idx.columnsList.map { it.uppercase() }

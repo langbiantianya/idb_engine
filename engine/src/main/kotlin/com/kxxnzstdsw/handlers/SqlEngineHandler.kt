@@ -9,6 +9,10 @@ import com.kxxnzstdsw.grpc.SqlExecuteResponse
 import com.kxxnzstdsw.grpc.SqlExplainRequest
 import com.kxxnzstdsw.grpc.SqlExplainResponse
 import com.kxxnzstdsw.grpc.SqlSelectRowFrame
+import com.kxxnzstdsw.grpc.row
+import com.kxxnzstdsw.grpc.sqlExecuteResponse
+import com.kxxnzstdsw.grpc.sqlExplainResponse
+import com.kxxnzstdsw.grpc.sqlSelectRowFrame
 import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
@@ -48,23 +52,23 @@ object SqlEngineHandler {
                                 var pageIdx = 0
                                 while (rs.next()) {
                                     onRow(
-                                        SqlSelectRowFrame.newBuilder()
-                                            .setTotal(-1L)
-                                            .setPage(pageIdx)
-                                            .setPageSize(1)
-                                            .setRow(buildRow(rs))
-                                            .build()
+                                        sqlSelectRowFrame {
+                                            this.total = -1L
+                                            this.page = pageIdx
+                                            this.pageSize = 1
+                                            row = buildRow(rs)
+                                        }
                                     )
                                     pageIdx++
                                 }
                             }
-                            SqlExecuteResponse.newBuilder().build()
+                            sqlExecuteResponse { }
                         } else {
                             // 非流式模式：此路径 dispatcher 不会调用（dispatcher 总走流式），保留占位
-                            SqlExecuteResponse.newBuilder().build()
+                            sqlExecuteResponse { }
                         }
                     } else {
-                        SqlExecuteResponse.newBuilder().setAffectedRows(stmt.updateCount).build()
+                        sqlExecuteResponse { this.affectedRows = stmt.updateCount }
                     }
                 } finally {
                     dialect.restoreConnectionAfterStreaming(conn, originalAutoCommit)
@@ -79,18 +83,18 @@ object SqlEngineHandler {
     private fun buildRow(rs: ResultSet): Row {
         val metaData = rs.metaData
         val columnCount = metaData.columnCount
-        val row = Row.newBuilder()
-        for (i in 1..columnCount) {
-            val columnName = metaData.getColumnName(i)
-            val columnType = metaData.getColumnTypeName(i)
-            val value: Value = if (columnType in listOf("BLOB", "LONGTEXT", "BYTEA", "TEXT")) {
-                PayloadAdapter.toValue(JsonPrimitive("[LOB Data]"))
-            } else {
-                PayloadAdapter.toValue(JsonPrimitive(rs.getString(i)))
+        return row {
+            for (i in 1..columnCount) {
+                val columnName = metaData.getColumnName(i)
+                val columnType = metaData.getColumnTypeName(i)
+                val value: Value = if (columnType in listOf("BLOB", "LONGTEXT", "BYTEA", "TEXT")) {
+                    PayloadAdapter.toValue(JsonPrimitive("[LOB Data]"))
+                } else {
+                    PayloadAdapter.toValue(JsonPrimitive(rs.getString(i)))
+                }
+                values.put(columnName, value)
             }
-            row.putValues(columnName, value)
         }
-        return row.build()
     }
 
     /**
@@ -103,15 +107,16 @@ object SqlEngineHandler {
         val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
             val rows = dialect.explainSQL(conn, req.sql)
-            val builder = SqlExplainResponse.newBuilder()
-            rows.forEach { row ->
-                val r = Row.newBuilder()
-                row.forEach { (k, v) ->
-                    r.putValues(k, PayloadAdapter.toValue(JsonPrimitive(v)))
+            sqlExplainResponse {
+                rows.forEach { row ->
+                    val r = row {
+                        row.forEach { (k, v) ->
+                            values.put(k, PayloadAdapter.toValue(JsonPrimitive(v)))
+                        }
+                    }
+                    this.rows += r
                 }
-                builder.addRows(r.build())
             }
-            builder.build()
         }
     }
 }

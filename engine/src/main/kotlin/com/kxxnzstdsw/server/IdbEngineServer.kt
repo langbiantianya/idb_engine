@@ -64,7 +64,7 @@ object IdbEngineServer {
         val maxMsgBytes = 256L * 1024L * 1024L
 
         val server = transport.serverBuilder()
-            .addService(IdbEngineImpl())
+            .addService(IdbEngineImpl().bindService())
             .maxInboundMessageSize(maxMsgBytes.toInt())
             .build()
 

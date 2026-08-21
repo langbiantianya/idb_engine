@@ -5,9 +5,12 @@ import com.kxxnzstdsw.grpc.IndexCreateRequest
 import com.kxxnzstdsw.grpc.IndexCreateResponse
 import com.kxxnzstdsw.grpc.IndexDeleteRequest
 import com.kxxnzstdsw.grpc.IndexDeleteResponse
-import com.kxxnzstdsw.grpc.IndexListItem
 import com.kxxnzstdsw.grpc.IndexListRequest
 import com.kxxnzstdsw.grpc.IndexListResponse
+import com.kxxnzstdsw.grpc.indexCreateResponse
+import com.kxxnzstdsw.grpc.indexDeleteResponse
+import com.kxxnzstdsw.grpc.indexListItem
+import com.kxxnzstdsw.grpc.indexListResponse
 import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
@@ -26,21 +29,20 @@ object IndexHandler {
         val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
             val items = dialect.listIndexes(conn, req.tableName)
-            val builder = IndexListResponse.newBuilder()
-            items.forEach { row ->
-                val columnsStr = row["columns"].orEmpty()
-                val columnsList = if (columnsStr.isNotEmpty()) columnsStr.split(",") else emptyList()
-                builder.addItems(
-                    IndexListItem.newBuilder()
-                        .setName(row["name"] ?: "")
-                        .setTable(req.tableName)
-                        .addAllColumns(columnsList)
-                        .setUnique(row["unique"]?.toBooleanStrictOrNull() ?: false)
-                        .setType(row["type"] ?: "")
-                        .setDefinition(row["definition"] ?: "")
-                )
+            indexListResponse {
+                items.forEach { row ->
+                    val columnsStr = row["columns"].orEmpty()
+                    val columnsList = if (columnsStr.isNotEmpty()) columnsStr.split(",") else emptyList()
+                    this.items += indexListItem {
+                        name = row["name"] ?: ""
+                        table = req.tableName
+                        this.columns += columnsList
+                        unique = row["unique"]?.toBooleanStrictOrNull() ?: false
+                        type = row["type"] ?: ""
+                        definition = row["definition"] ?: ""
+                    }
+                }
             }
-            builder.build()
         }
     }
 
@@ -57,10 +59,10 @@ object IndexHandler {
         val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
             dialect.createIndex(conn, req.tableName, req.indexName, req.columnsList, req.unique)
-            IndexCreateResponse.newBuilder()
-                .setCreated(req.indexName)
-                .setTableName(req.tableName)
-                .build()
+            indexCreateResponse {
+                created = req.indexName
+                tableName = req.tableName
+            }
         }
     }
 
@@ -76,7 +78,7 @@ object IndexHandler {
         val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
             dialect.dropIndex(conn, req.indexName, tableName)
-            IndexDeleteResponse.newBuilder().setDeleted(req.indexName).build()
+            indexDeleteResponse { deleted = req.indexName }
         }
     }
 }

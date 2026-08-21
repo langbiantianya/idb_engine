@@ -1,8 +1,7 @@
-# 📖 Wails-Kotlin 数据库管理端后端架构设计文档 (V2.1)
+# 📖 Kotlin 数据库管理端后端架构设计文档 (V2.5)
 
 ## 1. 架构总览 (Architecture Overview)
 
-本项目采用 **Wails (Go) + Kotlin (JVM)** 混合架构，旨在开发一款高安全性、免安装、跨平台的桌面端数据库管理工具。
 Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)** 的底层"数据库算力引擎"。它不暴露网络端口，完全依附于 Wails 主进程的生命周期，通过 **gRPC over IPC 抽象层** 接收指令并返回结果。
 
 **系统拓扑流（gRPC 模式）：**
@@ -11,9 +10,9 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 **IPC 传输抽象**（v2.1 起新增，详见 §3.6）：引擎与 Wails 主进程之间的 gRPC 通信可通过 CLI 参数 `--ipc` 在三种传输间切换：
 - `tcp`（默认） — TCP loopback `localhost:<port>`，跨平台
 - `unix` — Unix Domain Socket，Linux/macOS/BSD，Linux 使用 epoll native，macOS/BSD 走 NIO
-- `pipe` — Windows 命名管道（grpc-java 1.68 客户端支持；服务端暂未开放公共 API，抛 `UnsupportedOperationException`）
+- `pipe` — Windows 命名管道（grpc-java 1.76 客户端支持；服务端暂未开放公共 API，抛 `UnsupportedOperationException`）
 
-> **架构升级**：自 v2.0 起，引擎以 gRPC 服务端方式运行（默认 `:50051`，可通过 `--port` 覆盖）。客户端通过 gRPC streaming 调用 `IdbEngine.Handle(Request)`，接收 `stream<Response>`（流式响应使用 `stream`/`end` 字段分帧）。自 v2.2 起，所有 `Request.payload` / `Response.data` 字段都已替换为强类型 per-Category protobuf 消息（`oneof body`）。自 v2.3 起，13 个业务 handler 全部接收 typed per-Category proto 消息、返回 typed `<Category><Action>Response` 消息；`TypedRequestMapper` / `TypedResponseMapper` 已删除，业务层不再经过 `JsonObject` 转换。自 v2.4 起，列表项 envelope 也已 typed（per-list `*ListItem` 消息 + typed `Row` wrapper）；仅方言差异显著的 item shape（`USER.LIST` overloaded、FUNCTION.CALL/INFO、SYSTEM.SERVER_INFO extras）保留 `google.protobuf.Value`。旧的 stdin/stdout 长度前缀 Protobuf 帧协议已彻底移除。
+> **架构升级**：自 v2.0 起，引擎以 gRPC 服务端方式运行（默认 `:50051`，可通过 `--port` 覆盖）。客户端通过 gRPC streaming 调用 `IdbEngine.Handle(Request)`，接收 `stream<Response>`（流式响应使用 `stream`/`end` 字段分帧）。自 v2.2 起，所有 `Request.payload` / `Response.data` 字段都已替换为强类型 per-Category protobuf 消息（`oneof body`）。自 v2.3 起，13 个业务 handler 全部接收 typed per-Category proto 消息、返回 typed `<Category><Action>Response` 消息；`TypedRequestMapper` / `TypedResponseMapper` 已删除，业务层不再经过 `JsonObject` 转换。自 v2.4 起，列表项 envelope 也已 typed（per-list `*ListItem` 消息 + typed `Row` wrapper）；仅方言差异显著的 item shape（`USER.LIST` overloaded、FUNCTION.CALL/INFO、SYSTEM.SERVER_INFO extras）保留 `google.protobuf.Value`。旧的 stdin/stdout 长度前缀 Protobuf 帧协议已彻底移除。自 v2.5 起，gRPC 依赖从 `1.68.0` 升至 `1.76.0`，并接入 `grpc-kotlin` 协程 stub（`IdbEngineCoroutineImplBase`）+ Kotlin DSL 生成器（`protobuf-kotlin-lite`）；13 个 handler + `RequestDispatcher` + 11 个集成测试全部以 Kotlin DSL 形态（`xxxRequest { ... }` / `xxxResponse { ... }` / `xxxItem { ... }` / `request { ... }` / `response { ... }`）编写，业务层无 `Request.newBuilder()...build()` 残留。
 >
 > **性能隔离**：数据导出模块运行在独立的子进程中，通过 `ExportProcessManager` 管理（同样通过 gRPC 连接到主进程的 side server），防止大数据量导出时 OOM 影响主进程稳定性。
 
@@ -21,8 +20,8 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 
 - **核心语言**：Kotlin 2.4.0 / JDK 25
 - **异步框架**：kotlinx-coroutines 1.11.0
-- **gRPC**：grpc-netty-shaded 1.68.0 + grpc-stub + grpc-protobuf + grpc-kotlin-stub（Kotlin 协程集成）
-- **Protobuf**：com.google.protobuf:protobuf-kotlin 4.28.2（proto3 + 强类型 per-Category 消息 + 强类型 per-list-item 消息（v2.4）；少量遗留字段如 `MemoryInfo.extras` 仍使用 `google.protobuf.Value` 包装方言特定扩展）
+- **gRPC**：grpc-netty-shaded 1.76.0 + grpc-stub + grpc-protobuf + grpc-kotlin-stub 1.4.1（Kotlin 协程服务端 + Kotlin DSL 生成）
+- **Protobuf**：com.google.protobuf:protobuf-kotlin-lite 3.25.8（生成 *Kt DSL builder）+ protoc 3.25.5 + protoc-gen-grpc-java 1.68.0 + protoc-gen-grpc-kotlin 1.4.1（proto3 + 强类型 per-Category 消息 + 强类型 per-list-item 消息（v2.4）；少量遗留字段如 `MemoryInfo.extras` 仍使用 `google.protobuf.Value` 包装方言特定扩展；业务层全部以 Kotlin DSL 形态编写（v2.5））
 - **数据库驱动**：MySQL Connector/J 9.7.0、PostgreSQL JDBC Driver 42.7.11、H2 2.3.232
 - **连接池管理**：HikariCP 7.0.2
 - **数据序列化**：kotlinx-serialization-json 1.11.0（业务层）
@@ -31,7 +30,7 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 - **脚本引擎**：LuaJIT 4.1.0 + Lua 5.1~5.5 via luajava
 - **Excel 导出**：Apache POI 5.5.1（poi-ooxml SXSSF 流式 API）
 - **Parquet 导出**：Apache Parquet 1.17.1 + Hadoop 3.5.0
-- **测试框架**：JUnit 5 + kotlin.test — 159 测试全量通过（0 失败 / 0 错误），其中 H2 dialect 63 项 + engine 96 项
+- **测试框架**：JUnit 5 + kotlin.test — 179 测试全量通过（0 失败 / 0 错误），其中 H2 dialect 63 项 + engine 116 项
 
 ## 3. 核心机制设计 (Core Mechanisms)
 
@@ -49,8 +48,9 @@ Kotlin 引擎以 **gRPC 服务端** 方式运行（端口默认 `:50051`，可�
 - **消息边界**：gRPC 自动处理帧切分，无需手动 length-prefix
 - **Wire 类型**：自 v2.2 起，`Request` 与 `Response` 均为强类型 — `Request` 使用 `oneof body { schema_request, user_request, ... }` 路由到 per-Category 消息（共 12 个：`SystemRequest`/`SchemaRequest`/`UserRequest`/`TableRequest`/`DataRequest`/`SqlRequest`/`FunctionRequest`/`ViewRequest`/`IndexRequest`/`ForeignKeyRequest`/`TriggerRequest`/`ExportRequest`）；`Response` 同样使用 `oneof body` 镜像 12 个 per-Category 响应消息 + 3 个流式帧类型（`DataRowFrame`/`SqlSelectRowFrame`/`GenerateProgressFrame`）+ `GenerateTerminalResponse`
 - **业务层**：13 个 handler 全部直接接收 typed per-Category proto 消息（`ConnectionConfig` + `<Category><Action>Request`），返回 typed per-Action proto 消息（`<Category><Action>Response`）；`RequestDispatcher` 是按 (Category, Action) 路由的薄层，把 typed handler 返回值装入 `Response.body` 对应 oneof 分支。**无 `JsonObject` 边界映射**
+- **Kotlin DSL（v2.5 起）**：业务层全部使用 protoc-gen-grpc-kotlin + protobuf-kotlin-lite 生成的 Kotlin DSL builder（`xxxRequest { ... }` / `xxxResponse { ... }` / `xxxItem { ... }` / `request { ... }` / `response { ... }`），无 `Request.newBuilder()...build()` 残留；`google.protobuf.Value` 因属 Well-Known Type 仍用 `Value.newBuilder()`（无生成 DSL）
 - **最大消息大小**：`maxInboundMessageSize = 256 MiB`
-- **异步处理**：使用 Kotlin 协程 (`kotlinx-coroutines`) + gRPC 服务端异步响应
+- **异步处理**：服务端基于 grpc-kotlin `IdbEngineCoroutineImplBase`（suspend `handle()` → `Flow<Response>`）+ Kotlin 协程 (`kotlinx-coroutines`)；`addService` 改为 `.addService(IdbEngineImpl().bindService())`
 - **错误响应**：业务异常被 `RequestDispatcher` 拦截，提取 `e.message` 包装入 `Response.error`，`success` 置为 `false`，`id` 保持请求的 id
 
 ### 3.2 绝对无状态设计 (Stateless Design)
@@ -132,7 +132,7 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 **为什么不用 Linux abstract namespace UDS**：macOS / BSD 不支持 abstract namespace。
 
-**Windows 服务端限制**：grpc-java 1.68.0（当前依赖版本，最新 1.83.0 亦未公开）未暴露用于 Windows Named Pipes 的 server-side API。`NamedPipeIpcTransport.serverBuilder()` 抛 `UnsupportedOperationException`，提示需 JNA + Win32 `CreateNamedPipe` 自实现（标记为未来工作）；客户端 `channelBuilder()` 可用。Engine 在 Windows 上仍可通过切换到 `tcp` 模式运行（`--ipc tcp`）。
+**Windows 服务端限制**：grpc-java 1.76.0（当前依赖版本，最新 1.83.0 亦未公开）未暴露用于 Windows Named Pipes 的 server-side API。`NamedPipeIpcTransport.serverBuilder()` 抛 `UnsupportedOperationException`，提示需 JNA + Win32 `CreateNamedPipe` 自实现（标记为未来工作）；客户端 `channelBuilder()` 可用。Engine 在 Windows 上仍可通过切换到 `tcp` 模式运行（`--ipc tcp`）。
 
 ## 4. 数据交互契约 (gRPC Wire Contract)
 
@@ -1049,7 +1049,9 @@ for {
 ✅ 已完成：
 - 核心架构与通信协议（gRPC over HTTP/2 + Protobuf），支持流式响应
 - 强类型 Request/Response envelopes（per-Category `oneof body`，12 + 12 = 24 个 typed 消息 + 3 个流式帧 + 1 个 terminal + 8 个 per-list-item 消息 + typed `Row` wrapper），13 个业务 handler 全部直接接收 typed proto 消息、返回 typed proto 消息；`TypedRequestMapper` / `TypedResponseMapper` 已删除，业务层无 `JsonObject` 边界映射
-- 异步非阻塞处理（Kotlin 协程 + gRPC 服务端异步响应）
+- 异步非阻塞处理（grpc-kotlin `IdbEngineCoroutineImplBase` + Kotlin 协程 `suspend handle()` → `Flow<Response>`）
+- **业务层 Kotlin DSL end-to-end（v2.5）**：13 个 handler + `RequestDispatcher` + 11 个集成测试全部以 Kotlin DSL 形态编写（`xxxRequest { ... }` / `xxxResponse { ... }` / `xxxItem { ... }` / `request { ... }` / `response { ... }`）；`google.protobuf.Value` 因属 Well-Known Type 仍用 `Value.newBuilder()`（无生成 DSL）
+- **gRPC 1.76 + protoc 工具链对齐（v2.5）**：`grpc-netty-shaded 1.76.0` + `grpc-kotlin-stub 1.4.1`，protoc 锁 `3.25.5` / `protoc-gen-grpc-java` 锁 `1.68.0` / `protoc-gen-grpc-kotlin` 锁 `1.4.1`，`protobuf-java` 强制 `3.25.8`（grpc-protobuf 1.76 传递依赖，不可强制升 4.x）
 - 数据库方言抽象层（DatabaseDialect SPI + MySQL/PostgreSQL/H2 插件，**所有 SPI 方法三个方言均完整实现**）
 - 连接池管理（HikariCP + SHA-256 缓存，key 包含 password）
 - 13 个 handler 全部使用 suspend 协程
@@ -1081,7 +1083,7 @@ for {
     - `ipc/TcpIpcTransportIntegrationTest` — 1
     - `ipc/UnixSocketIpcTransportIntegrationTest` — 2（`@EnabledOnOs(LINUX, MAC, FREEBSD)`）
     - `ipc/NamedPipeIpcTransportIntegrationTest` — 2
-    - `integration/*HandlerIntegrationTest` — 60（11 个 handler × H2Fixture，使用 typed proto builders）
+    - `integration/*HandlerIntegrationTest` — 60（11 个 handler × H2Fixture，使用 typed proto Kotlin DSL builders）
     - `integration/TypedRequestEnvelopeIntegrationTest` — 7（端到端 typed envelope）
 
 ⏳ 待扩展：
@@ -1099,5 +1101,6 @@ for {
 | **v2.0** | **gRPC over HTTP/2 + 标准 google.protobuf.Value** | 替换为标准 gRPC；导出子进程同样切换为 gRPC；移除 stdin/stdout 依赖 |
 | v2.1 | gRPC + 跨平台 IPC Transport SPI（TCP / UDS / Named Pipe） | 在 gRPC 之上抽象 `IpcTransport` 接口，默认 TCP；通过环境变量 `IDB_ENGINE_IPC` / `IDB_ENGINE_PORT` / `IDB_ENGINE_UDS_PATH` / `IDB_ENGINE_PIPE_NAME` 切换 UDS（Linux/macOS/BSD，Linux epoll native）或 Windows 命名管道；业务层零感知（v2.2 起环境变量入口已废弃，改为 CLI 参数） |
 | v2.2 | gRPC + 强类型 Request/Response + CLI Args | `Request.payload` 与 `Response.data` 由 `map<string, Value>` 替换为 per-Category typed protobuf 消息（`oneof body` 路由）；IPC 选择由环境变量改为 CLI 参数（`--ipc` / `--port` / `--uds-path` / `--pipe-name` / `--help`）；`TypedRequestMapper` / `TypedResponseMapper` 在 dispatcher 边界做 typed proto ↔ JsonObject 转换 |
-| **v2.3 (当前)** | **gRPC + 强类型 Handlers end-to-end** | 13 个业务 handler 全部接收 typed per-Category proto 消息、返回 typed `<Category><Action>Response` 消息；`TypedRequestMapper` / `TypedResponseMapper` 删除（67 个对应测试一并删除）；`RequestDispatcher` 简化为 (Category, Action) → handler 的薄路由层；11 个 handler 集成测试改用 typed proto builders；179 个测试全通过（116 engine + 63 H2） |
-| **v2.4 (当前)** | **gRPC + 强类型 per-list-item 消息** | 8 个 typed per-list-item 消息（`TableListItem` / `ViewListItem` / `IndexListItem` / `ForeignKeyListItem` / `TriggerListItem` / `FunctionListItem` / `FunctionDebugItem` / `UserGrantItem`）取代 list/response 中遗留的 `repeated google.protobuf.Value`；动态行使用 typed `Row { map<string, Value> values }` wrapper；方言差异显著的 item shape（USER.LIST overloaded、FUNCTION.CALL/INFO、SYSTEM.SERVER_INFO extras）保留 `google.protobuf.Value`；11 个 handler 集成测试改用 typed accessor（`item.name` 替代 `item.structValue.fieldsMap["name"]?.stringValue`）；179 个测试全通过 |
+| v2.3 | gRPC + 强类型 Handlers end-to-end | 13 个业务 handler 全部接收 typed per-Category proto 消息、返回 typed `<Category><Action>Response` 消息；`TypedRequestMapper` / `TypedResponseMapper` 删除（67 个对应测试一并删除）；`RequestDispatcher` 简化为 (Category, Action) → handler 的薄路由层；11 个 handler 集成测试改用 typed proto builders；179 个测试全通过（116 engine + 63 H2） |
+| v2.4 | gRPC + 强类型 per-list-item 消息 | 8 个 typed per-list-item 消息（`TableListItem` / `ViewListItem` / `IndexListItem` / `ForeignKeyListItem` / `TriggerListItem` / `FunctionListItem` / `FunctionDebugItem` / `UserGrantItem`）取代 list/response 中遗留的 `repeated google.protobuf.Value`；动态行使用 typed `Row { map<string, Value> values }` wrapper；方言差异显著的 item shape（USER.LIST overloaded、FUNCTION.CALL/INFO、SYSTEM.SERVER_INFO extras）保留 `google.protobuf.Value`；11 个 handler 集成测试改用 typed accessor（`item.name` 替代 `item.structValue.fieldsMap["name"]?.stringValue`）；179 个测试全通过 |
+| **v2.5 (当前)** | **gRPC 1.76 + grpc-kotlin 协程服务端 + Kotlin DSL end-to-end** | gRPC 依赖 `1.68.0` → `1.76.0`，接入 `grpc-kotlin-stub 1.4.1`；服务端 `IdbEngineImpl : IdbEngineGrpcKt.IdbEngineCoroutineImplBase()`（suspend `handle()` → `Flow<Response>`）；protoc 工具链锁定 `protoc 3.25.5` + `protoc-gen-grpc-java 1.68.0` + `protoc-gen-grpc-kotlin 1.4.1`；启用 `protobuf-kotlin-lite` 生成 Kotlin DSL（`xxxRequest { ... }` / `xxxResponse { ... }` / `xxxItem { ... }` / `request { ... }` / `response { ... }`）；13 个 handler + `RequestDispatcher` + 11 个集成测试全部切到 DSL，业务层无 `Request.newBuilder()...build()` 残留；移除 `grpc-core` / `protobuf-java-util` / `ksp` / `kotlinx-serialization-protobuf` 等无用依赖；179 个测试全通过 |

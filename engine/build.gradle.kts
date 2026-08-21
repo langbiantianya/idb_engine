@@ -108,13 +108,17 @@ dependencies {
     }
 
     // gRPC 服务端（Netty 实现，HTTP/2 over TCP loopback）
-    implementation(libs.grpc.core)
+    // - grpc-stub: io.grpc.Server / ServerBuilder（transport.serverBuilder() 调用）
+    // - grpc-protobuf: io.grpc.protobuf.ProtoUtils（生成代码 IdbEngineGrpc.getServiceDescriptor）
+    // - grpc-netty-shaded: NettyServerBuilder / NettyChannelBuilder + epoll（IPC transport）
+    // - grpc-kotlin-stub: io.grpc.kotlin.*（生成代码 IdbEngineGrpcKt 的协程 stub / IdbEngineCoroutineImplBase）
+    // - protobuf-kotlin-lite: com.google.protobuf.kotlin.*（生成代码 *Kt DSL 与 .Dsl 内部类）
+    //   grpc-core / grpc-api / grpc-context / grpc-util 由 grpc-stub 传递依赖
     implementation(libs.grpc.stub)
     implementation(libs.grpc.protobuf)
     implementation(libs.grpc.netty.shaded)
     implementation(libs.grpc.kotlin.stub)
-    implementation(libs.protobuf.kotlin)
-    implementation(libs.protobuf.java.util)
+    implementation(libs.protobuf.kotlin.lite)
 
     // JDBC Drivers — 不编译依赖，构建时复制到 drivers/
     val jdbcDrivers by configurations.creating {
@@ -133,17 +137,29 @@ dependencies {
     testImplementation(project(":dialect-postgresql"))
 }
 
-// Protobuf — 启用 java/kotlin 双代码生成
+// Protobuf — 启用 java + kotlin 双代码生成
+// java (protoc-gen-grpc-java) 生成 Java-style IdbEngineGrpc.java + gRPC service descriptor，
+//   这是 grpc-kotlin 生成 stub 内部依赖的（IdbEngineGrpcKt.kt 引用 IdbEngineGrpc.getServiceDescriptor）
+// kotlin (grpckt) 生成 IdbEngineGrpcKt 协程 stub + *Kt DSL builder，业务层用 suspend handle() + Kotlin DSL
+//
+// 版本对齐（关键约束 — 整组必须配套）：
+// - protoc 3.25.5           ← 主二进制，生成 Java message class（Request.java 等）
+// - protoc-gen-grpc-java 1.68.0  ← 生成 Java gRPC stub（IdbEngineGrpc.java）
+// - protobuf-java 3.25.8    ← 运行/编译时 protobuf 库（grpc-protobuf 1.76 传递依赖）
+// - grpc-protobuf 1.76.0    ← io.grpc.protobuf.ProtoUtils 运行时
+// - grpc-kotlin-stub 1.4.1  ← io.grpc.kotlin.* 运行时
+// 不能用 4.x 版的 protoc 或 protoc-gen-grpc-java — 它们生成的代码依赖 protobuf-java 4.26+ 引入的
+// RuntimeVersion / GeneratedMessage.isStringEmpty，与 grpc-protobuf 1.76 传递的 protobuf-java 3.25.8 不兼容。
 protobuf {
     protoc {
-        artifact = "com.google.protobuf:protoc:${libs.versions.protobuf.asProvider().get()}"
+        artifact = "com.google.protobuf:protoc:3.25.5"
     }
     plugins {
         id("grpc") {
-            artifact = "io.grpc:protoc-gen-grpc-java:${libs.versions.grpc.asProvider().get()}"
+            artifact = "io.grpc:protoc-gen-grpc-java:1.68.0"
         }
         id("grpckt") {
-            artifact = "io.grpc:protoc-gen-grpc-kotlin:1.3.0:jdk8@jar"
+            artifact = "io.grpc:protoc-gen-grpc-kotlin:1.4.1:jdk8@jar"
         }
     }
     generateProtoTasks {
@@ -152,7 +168,7 @@ protobuf {
                 id("grpc")
                 id("grpckt")
             }
-            // 仅为 kotlin 生成 lite 代码；java 生成由 protobuf-gradle-plugin 默认 builtin 提供
+            // 生成 Kotlin DSL（com.kxxnzstdsw.grpc.ColumnDefKt 等），业务层通过 columnDef { ... } 构造
             task.builtins {
                 id("kotlin") {
                     option("lite")

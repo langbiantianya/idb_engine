@@ -11,6 +11,9 @@ import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import com.kxxnzstdsw.grpc.viewDeleteRequest
+import com.kxxnzstdsw.grpc.viewGetDdlRequest
+import com.kxxnzstdsw.grpc.viewListRequest
 
 class ViewHandlerIntegrationTest : H2Fixture() {
 
@@ -18,7 +21,7 @@ class ViewHandlerIntegrationTest : H2Fixture() {
     fun `LIST returns empty initially`() = runBlocking {
         val result = ViewHandler.list(
             config,
-            ViewListRequest.newBuilder().setSchema("PUBLIC").build()
+            viewListRequest { schema = "PUBLIC" }
         )
         assertEquals(0, result.itemsCount)
     }
@@ -37,23 +40,23 @@ class ViewHandlerIntegrationTest : H2Fixture() {
 
         val list = ViewHandler.list(
             config,
-            ViewListRequest.newBuilder().setSchema("PUBLIC").build()
+            viewListRequest { schema = "PUBLIC" }
         )
         assertTrue(list.itemsList.any { it.name.equals("v_products", ignoreCase = true) })
 
         val ddl = ViewHandler.getDDL(
             config,
-            ViewGetDdlRequest.newBuilder().setName("v_products").setSchema("PUBLIC").build()
+            viewGetDdlRequest { name = "v_products"; schema = "PUBLIC" }
         )
         assertTrue(ddl.ddl.contains("CREATE VIEW", ignoreCase = true))
 
         ViewHandler.delete(
             config,
-            ViewDeleteRequest.newBuilder().setName("v_products").setIfExists(true).build()
+            viewDeleteRequest { name = "v_products"; ifExists = true }
         )
         val after = ViewHandler.list(
             config,
-            ViewListRequest.newBuilder().setSchema("PUBLIC").build()
+            viewListRequest { schema = "PUBLIC" }
         )
         assertFalse(after.itemsList.any { it.name.equals("v_products", ignoreCase = true) })
     }
@@ -62,7 +65,7 @@ class ViewHandlerIntegrationTest : H2Fixture() {
     fun `DELETE with ifExists does not throw on missing view`() = runBlocking {
         ViewHandler.delete(
             config,
-            ViewDeleteRequest.newBuilder().setName("no_such_view").setIfExists(true).build()
+            viewDeleteRequest { name = "no_such_view"; ifExists = true }
         )
         assertTrue(true)
     }

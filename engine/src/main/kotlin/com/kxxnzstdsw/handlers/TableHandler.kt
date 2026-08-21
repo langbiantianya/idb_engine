@@ -1,6 +1,5 @@
 package com.kxxnzstdsw.handlers
 
-import com.kxxnzstdsw.grpc.ColumnDef
 import com.kxxnzstdsw.grpc.ConnectionConfig
 import com.kxxnzstdsw.grpc.TableColumnListRequest
 import com.kxxnzstdsw.grpc.TableColumnListResponse
@@ -10,7 +9,6 @@ import com.kxxnzstdsw.grpc.TableDeleteRequest
 import com.kxxnzstdsw.grpc.TableDeleteResponse
 import com.kxxnzstdsw.grpc.TableGetDdlRequest
 import com.kxxnzstdsw.grpc.TableGetDdlResponse
-import com.kxxnzstdsw.grpc.TableListItem
 import com.kxxnzstdsw.grpc.TableListRequest
 import com.kxxnzstdsw.grpc.TableListResponse
 import com.kxxnzstdsw.grpc.TableRenameRequest
@@ -19,6 +17,16 @@ import com.kxxnzstdsw.grpc.TableTruncateRequest
 import com.kxxnzstdsw.grpc.TableTruncateResponse
 import com.kxxnzstdsw.grpc.TableUpdateRequest
 import com.kxxnzstdsw.grpc.TableUpdateResponse
+import com.kxxnzstdsw.grpc.columnDef
+import com.kxxnzstdsw.grpc.tableColumnListResponse
+import com.kxxnzstdsw.grpc.tableCreateResponse
+import com.kxxnzstdsw.grpc.tableDeleteResponse
+import com.kxxnzstdsw.grpc.tableGetDdlResponse
+import com.kxxnzstdsw.grpc.tableListItem
+import com.kxxnzstdsw.grpc.tableListResponse
+import com.kxxnzstdsw.grpc.tableRenameResponse
+import com.kxxnzstdsw.grpc.tableTruncateResponse
+import com.kxxnzstdsw.grpc.tableUpdateResponse
 import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
@@ -32,15 +40,14 @@ object TableHandler {
 
         return@withContext connection.use { conn ->
             val tables = dialect.listTables(conn, config.database, schema)
-            val builder = TableListResponse.newBuilder()
-            tables.forEach { row ->
-                builder.addItems(
-                    TableListItem.newBuilder()
-                        .setName(row["name"] ?: "")
-                        .setType(row["type"] ?: "TABLE")
-                )
+            tableListResponse {
+                tables.forEach { row ->
+                    this.items += tableListItem {
+                        name = row["name"] ?: ""
+                        type = row["type"] ?: "TABLE"
+                    }
+                }
             }
-            builder.build()
         }
     }
 
@@ -52,30 +59,26 @@ object TableHandler {
 
         return@withContext connection.use { conn ->
             val cols = dialect.listColumns(conn, config.database, schema, req.tableName)
-            val builder = TableColumnListResponse.newBuilder()
-            cols.forEach { col ->
-                builder.addItems(buildColumnDef(col))
+            tableColumnListResponse {
+                cols.forEach { col -> this.items += buildColumnDef(col) }
             }
-            builder.build()
         }
     }
 
     /**
      * Convert a dialect-returned Map<String, Any?> column descriptor into a typed ColumnDef proto.
      */
-    private fun buildColumnDef(col: Map<String, Any?>): ColumnDef {
-        val b = ColumnDef.newBuilder()
-            .setName(col["name"]?.toString() ?: "")
-            .setType(col["type"]?.toString() ?: "")
-            .setSize((col["size"] as? Number)?.toInt() ?: 0)
-            .setIsPrimaryKey(col["isPrimaryKey"] as? Boolean ?: false)
-            .setAutoIncrement(col["autoIncrement"] as? Boolean ?: false)
+    private fun buildColumnDef(col: Map<String, Any?>) = columnDef {
+        name = col["name"]?.toString() ?: ""
+        type = col["type"]?.toString() ?: ""
+        size = (col["size"] as? Number)?.toInt() ?: 0
+        isPrimaryKey = col["isPrimaryKey"] as? Boolean ?: false
+        autoIncrement = col["autoIncrement"] as? Boolean ?: false
         // `nullable` is `optional` in proto3; preserve presence
         val nullable = col["nullable"] as? Boolean
-        if (nullable != null) b.setNullable(nullable)
+        if (nullable != null) this.nullable = nullable
         val defaultValue = col["defaultValue"]?.toString()
-        if (defaultValue != null) b.setDefaultValue(defaultValue)
-        return b.build()
+        if (defaultValue != null) this.defaultValue = defaultValue
     }
 
     suspend fun create(config: ConnectionConfig, req: TableCreateRequest): TableCreateResponse = withContext(Dispatchers.IO) {
@@ -125,7 +128,7 @@ object TableHandler {
                 conn.createStatement().use { it.execute(stmt) }
             }
 
-            TableCreateResponse.newBuilder().setCreated(req.tableName).build()
+            tableCreateResponse { created = req.tableName }
         }
     }
 
@@ -169,10 +172,10 @@ object TableHandler {
             }
 
             conn.createStatement().use { it.execute(sql) }
-            TableUpdateResponse.newBuilder()
-                .setTableName(req.tableName)
-                .setOperation(req.operation)
-                .build()
+            tableUpdateResponse {
+                tableName = req.tableName
+                operation = req.operation
+            }
         }
     }
 
@@ -182,9 +185,7 @@ object TableHandler {
         val connection = PoolManager.getConnection(config, schema)
         val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
-            TableGetDdlResponse.newBuilder()
-                .setDdl(dialect.getCreateTableDDL(conn, req.tableName))
-                .build()
+            tableGetDdlResponse { ddl = dialect.getCreateTableDDL(conn, req.tableName) }
         }
     }
 
@@ -198,7 +199,7 @@ object TableHandler {
         return@withContext connection.use { conn ->
             val sql = "DROP TABLE ${dialect.quoteIdentifier(req.tableName)}"
             conn.createStatement().use { it.execute(sql) }
-            TableDeleteResponse.newBuilder().setDeleted(req.tableName).build()
+            tableDeleteResponse { deleted = req.tableName }
         }
     }
 
@@ -213,10 +214,10 @@ object TableHandler {
         val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
             dialect.renameTable(conn, oldName, req.newName)
-            TableRenameResponse.newBuilder()
-                .setRenamed(oldName)
-                .setNewName(req.newName)
-                .build()
+            tableRenameResponse {
+                renamed = oldName
+                newName = req.newName
+            }
         }
     }
 
@@ -229,7 +230,7 @@ object TableHandler {
 
         return@withContext connection.use { conn ->
             dialect.truncateTable(conn, req.tableName)
-            TableTruncateResponse.newBuilder().setTruncated(req.tableName).build()
+            tableTruncateResponse { truncated = req.tableName }
         }
     }
 }

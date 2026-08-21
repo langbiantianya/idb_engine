@@ -3,9 +3,11 @@ package com.kxxnzstdsw.handlers
 import com.kxxnzstdsw.grpc.ConnectionConfig
 import com.kxxnzstdsw.grpc.TriggerGetDdlRequest
 import com.kxxnzstdsw.grpc.TriggerGetDdlResponse
-import com.kxxnzstdsw.grpc.TriggerListItem
 import com.kxxnzstdsw.grpc.TriggerListRequest
 import com.kxxnzstdsw.grpc.TriggerListResponse
+import com.kxxnzstdsw.grpc.triggerGetDdlResponse
+import com.kxxnzstdsw.grpc.triggerListItem
+import com.kxxnzstdsw.grpc.triggerListResponse
 import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
@@ -27,18 +29,17 @@ object TriggerHandler {
         val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
             val items = dialect.listTriggers(conn, schema)
-            val builder = TriggerListResponse.newBuilder()
-            items.forEach { row ->
-                builder.addItems(
-                    TriggerListItem.newBuilder()
-                        .setName(row["name"] ?: "")
-                        .setTable(row["table"] ?: "")
-                        .setEvent(row["event"] ?: "")
-                        .setTiming(row["timing"] ?: "")
-                        .setStatement(row["statement"] ?: "")
-                )
+            triggerListResponse {
+                items.forEach { row ->
+                    this.items += triggerListItem {
+                        name = row["name"] ?: ""
+                        table = row["table"] ?: ""
+                        event = row["event"] ?: ""
+                        timing = row["timing"] ?: ""
+                        statement = row["statement"] ?: ""
+                    }
+                }
             }
-            builder.build()
         }
     }
 
@@ -52,9 +53,7 @@ object TriggerHandler {
         val connection = PoolManager.getConnection(config, schema)
         val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
-            TriggerGetDdlResponse.newBuilder()
-                .setDdl(dialect.getTriggerDDL(conn, req.name, schema))
-                .build()
+            triggerGetDdlResponse { ddl = dialect.getTriggerDDL(conn, req.name, schema) }
         }
     }
 }

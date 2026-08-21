@@ -1,11 +1,14 @@
 package com.kxxnzstdsw.handlers
 
 import com.kxxnzstdsw.grpc.ConnectionConfig
-import com.kxxnzstdsw.grpc.MemoryInfo
 import com.kxxnzstdsw.grpc.PayloadAdapter
 import com.kxxnzstdsw.grpc.SystemInfoResponse
 import com.kxxnzstdsw.grpc.SystemServerInfoResponse
 import com.kxxnzstdsw.grpc.SystemTestConnectionResponse
+import com.kxxnzstdsw.grpc.memoryInfo
+import com.kxxnzstdsw.grpc.systemInfoResponse
+import com.kxxnzstdsw.grpc.systemServerInfoResponse
+import com.kxxnzstdsw.grpc.systemTestConnectionResponse
 import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
@@ -25,25 +28,23 @@ object SystemHandler {
         val maxMemory = runtime.maxMemory()
         val usedMemory = totalMemory - freeMemory
 
-        val memory = MemoryInfo.newBuilder()
-            .setMax(maxMemory)
-            .setTotal(totalMemory)
-            .setUsed(usedMemory)
-            .setFree(freeMemory)
-            .build()
-
-        return SystemInfoResponse.newBuilder()
-            .setJvmVersion(System.getProperty("java.version"))
-            .setJvmVendor(System.getProperty("java.vendor"))
-            .setJvmName(System.getProperty("java.vm.name"))
-            .setOsName(osBean.name)
-            .setOsArch(osBean.arch)
-            .setOsVersion(osBean.version)
-            .setAvailableProcessors(osBean.availableProcessors)
-            .setMemory(memory)
-            .setUptime(runtimeBean.uptime)
-            .setPid(runtimeBean.pid)
-            .build()
+        return systemInfoResponse {
+            jvmVersion = System.getProperty("java.version")
+            jvmVendor = System.getProperty("java.vendor")
+            jvmName = System.getProperty("java.vm.name")
+            osName = osBean.name
+            osArch = osBean.arch
+            osVersion = osBean.version
+            availableProcessors = osBean.availableProcessors
+            memory = memoryInfo {
+                max = maxMemory
+                total = totalMemory
+                used = usedMemory
+                free = freeMemory
+            }
+            uptime = runtimeBean.uptime
+            pid = runtimeBean.pid
+        }
     }
 
     /**
@@ -54,19 +55,19 @@ object SystemHandler {
             val connection = PoolManager.getConnection(config)
             connection.use { conn ->
                 val ok = conn.isValid(5)
-                SystemTestConnectionResponse.newBuilder()
-                    .setOk(ok)
-                    .setDriver(config.driver)
-                    .setHost(config.host)
-                    .setPort(config.port)
-                    .setDatabase(config.database)
-                    .build()
+                systemTestConnectionResponse {
+                    this.ok = ok
+                    driver = config.driver
+                    host = config.host
+                    port = config.port
+                    database = config.database
+                }
             }
         } catch (e: Exception) {
-            SystemTestConnectionResponse.newBuilder()
-                .setOk(false)
-                .setError(e.message ?: "Unknown error")
-                .build()
+            systemTestConnectionResponse {
+                ok = false
+                error = e.message ?: "Unknown error"
+            }
         }
     }
 
@@ -81,27 +82,29 @@ object SystemHandler {
         val dialect = DialectLoader.getDialect(config.driver)
         connection.use { conn ->
             val info = dialect.getServerInfo(conn)
-            val builder = SystemServerInfoResponse.newBuilder()
             val extras = mutableMapOf<String, kotlinx.serialization.json.JsonElement>()
-            info.forEach { (k, v) ->
-                when (k) {
-                    "version" -> builder.setVersion(v)
-                    "catalog" -> builder.setCatalog(v)
-                    "current_database" -> builder.setCurrentDatabase(v)
-                    "mode" -> builder.setMode(v)
-                    else -> extras[k] = JsonPrimitive(v)
+            val response = systemServerInfoResponse {
+                info.forEach { (k, v) ->
+                    when (k) {
+                        "version" -> version = v
+                        "catalog" -> catalog = v
+                        "current_database" -> currentDatabase = v
+                        "mode" -> mode = v
+                        else -> extras[k] = JsonPrimitive(v)
+                    }
                 }
             }
             if (extras.isNotEmpty()) {
-                builder.setExtras(
+                response.toBuilder().setExtras(
                     PayloadAdapter.toValue(
                         kotlinx.serialization.json.buildJsonObject {
                             extras.forEach { (k, v) -> put(k, v) }
                         }
                     )
-                )
+                ).build()
+            } else {
+                response
             }
-            builder.build()
         }
     }
 }

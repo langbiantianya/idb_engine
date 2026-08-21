@@ -2,11 +2,13 @@
 
 A headless, cross-platform database management engine written in Kotlin. Exposes a **gRPC** API (HTTP/2 + strongly-typed per-Category protobuf messages) over a configurable **IPC transport** (TCP loopback / Unix Domain Socket / Windows Named Pipe). Designed to be embedded in a Wails (Go) host with three pluggable dialects: MySQL, PostgreSQL, H2.
 
-> **Current version: v2.4**
+> **Current version: v2.5**
 > - gRPC server on `:50051` by default (`--port <int>` override)
 > - IPC transport selected via `--ipc <tcp|unix|pipe>` CLI flag (default auto-detected per OS)
 > - Pluggable dialect architecture (add a new DB by implementing `DatabaseDialect` and dropping a JAR in `dialects/`)
+> - **gRPC 1.76 + grpc-kotlin coroutine server** — server extends `IdbEngineCoroutineImplBase` (suspend `handle()` → `Flow<Response>`); proto toolchain locked: `protoc 3.25.5` + `protoc-gen-grpc-java 1.68.0` + `protoc-gen-grpc-kotlin 1.4.1`
 > - **Handlers are strongly-typed end-to-end** — no `JsonObject` round-trip; dispatcher routes typed per-Category proto to typed handler methods returning typed `<Category><Action>Response` messages
+> - **Business layer in Kotlin DSL (v2.5)** — all 13 handlers + `RequestDispatcher` + 11 integration tests use generated Kotlin DSL builders (`xxxRequest { ... }` / `xxxResponse { ... }` / `xxxItem { ... }` / `request { ... }` / `response { ... }`); only `google.protobuf.Value` (Well-Known Type) still uses `Value.newBuilder()`
 > - **Typed list-item envelopes** — `TableListItem` / `ViewListItem` / `IndexListItem` / `ForeignKeyListItem` / `TriggerListItem` / `FunctionListItem` / `FunctionDebugItem` / `UserGrantItem` / typed `Row` for dynamic rows; only genuinely dialect-specific shapes (USER.LIST overloaded, FUNCTION.CALL/INFO, SYSTEM.SERVER_INFO extras) keep `google.protobuf.Value`
 > - 179 tests passing across engine + H2 dialect modules (116 engine + 63 H2 dialect)
 
@@ -88,7 +90,7 @@ service IdbEngine {
 |---|---|---|---|
 | `tcp`（默认） | TCP loopback `localhost:<port>` | 全平台 | 生产路径；`--port` 控制端口（默认 50051） |
 | `unix` | Unix Domain Socket | Linux / macOS / BSD | Linux 用 epoll native，macOS/BSD 用 NIO；UDS 文件权限 `rw-------`；默认路径 `/tmp/idb-engine.sock` |
-| `pipe` | Windows 命名管道 | Windows | 客户端可用；grpc-java 1.68 无 server-side API，`serverBuilder()` 抛 `UnsupportedOperationException`；管道名默认 `idb-engine` |
+| `pipe` | Windows 命名管道 | Windows | 客户端可用；grpc-java 1.76 无 server-side API，`serverBuilder()` 抛 `UnsupportedOperationException`；管道名默认 `idb-engine` |
 
 **自动检测**：`--ipc` 缺省时，Windows → `pipe`，POSIX → `unix`。
 
@@ -752,6 +754,8 @@ SYSTEM 还支持 `TEST_CONNECTION` 和 `SERVER_INFO`（表中未列出）。
 ## 架构特性
 
 - **gRPC + 强类型 per-Category 消息**：12 个 Category 各有自己的 `oneof body` 消息，wire 上是标准 protobuf，无 stringly-typed payload；`repeated google.protobuf.Value` 承载方言差异化的 item 形状
+- **gRPC 1.76 + grpc-kotlin 协程服务端（v2.5）**：`IdbEngineCoroutineImplBase` + suspend `handle()` → `Flow<Response>`；`addService(IdbEngineImpl().bindService())` 挂载服务
+- **业务层 Kotlin DSL end-to-end（v2.5）**：13 个 handler + `RequestDispatcher` + 11 个集成测试全部以 `xxxRequest { ... }` / `xxxResponse { ... }` / `request { ... }` / `response { ... }` DSL 形态编写；`google.protobuf.Value` 因属 Well-Known Type 无生成 DSL，仍走 `Value.newBuilder()`
 - **跨平台 IPC Transport**：TCP / UDS / Named Pipe 三实现，CLI `--ipc` 参数选择，业务层零感知
 - **方言插件化**：方言以独立 JAR 通过 SPI 动态加载
 - **绝对无状态**：每次请求携带完整连接凭证
@@ -770,13 +774,28 @@ SYSTEM 还支持 `TEST_CONNECTION` 和 `SERVER_INFO`（表中未列出）。
 ## 技术栈
 
 - Kotlin 2.4.0 / JDK 25
-- grpc-netty-shaded 1.68.0 + grpc-stub + grpc-protobuf
+- grpc-netty-shaded 1.76.0 + grpc-stub + grpc-protobuf + grpc-kotlin-stub 1.4.1（协程服务端 + Kotlin DSL 生成）
+- protoc 3.25.5 + protoc-gen-grpc-java 1.68.0 + protoc-gen-grpc-kotlin 1.4.1（工具链锁定，protobuf-java 强制 3.25.8）
 - kotlinx-coroutines 1.11.0
 - kotlinx-serialization-json 1.11.0
-- protobuf-kotlin 4.28.2
+- protobuf-kotlin-lite 3.25.8（生成 *Kt DSL builder：`xxxRequest { ... }` / `xxxResponse { ... }` / `xxxItem { ... }`）
 - HikariCP 7.0.2
 - MySQL Connector/J 9.7.0 / PostgreSQL JDBC 42.7.11 / H2 2.3.232
 - SLF4J 2.0.18 + Logback 1.5.13
 - LuaJIT 4.1.0（luajava）
 - Apache POI 5.5.1（poi-ooxml — Excel 流式导出）
 - Apache Parquet 1.17.1 + Hadoop 3.5.0
+
+---
+
+## 架构升级历史 (Architecture Migration Log)
+
+| 版本 | 通信协议 | 备注 |
+|---|---|---|
+| v1.0 | stdin/stdout + 4-byte BE uint32 长度前缀 + 自定义 kotlinx-serialization-protobuf | 旧版管道协议 |
+| v2.0 | gRPC over HTTP/2 + 标准 google.protobuf.Value | 替换为标准 gRPC；导出子进程同样切换为 gRPC；移除 stdin/stdout 依赖 |
+| v2.1 | gRPC + 跨平台 IPC Transport SPI | 在 gRPC 之上抽象 `IpcTransport` 接口，默认 TCP；CLI 参数 `--ipc` 切换 UDS / Named Pipe |
+| v2.2 | gRPC + 强类型 Request/Response + CLI Args | `Request.payload` 与 `Response.data` 由 `map<string, Value>` 替换为 per-Category typed protobuf 消息；IPC 选择改为 CLI 参数 |
+| v2.3 | gRPC + 强类型 Handlers end-to-end | 13 个 handler 全部接收 typed proto 消息、返回 typed `<Category><Action>Response` 消息；`TypedRequestMapper` / `TypedResponseMapper` 删除；`RequestDispatcher` 简化为薄路由层；179 测试全通过 |
+| v2.4 | gRPC + 强类型 per-list-item 消息 | 8 个 typed per-list-item 消息（`TableListItem` 等）取代遗留 `repeated google.protobuf.Value`；动态行用 typed `Row` wrapper |
+| **v2.5 (当前)** | **gRPC 1.76 + grpc-kotlin 协程服务端 + Kotlin DSL end-to-end** | gRPC 依赖 `1.68.0` → `1.76.0`，接入 `grpc-kotlin-stub 1.4.1`；服务端 `IdbEngineCoroutineImplBase`（suspend `handle()` → `Flow<Response>`）；protoc 工具链锁定 `protoc 3.25.5` + `protoc-gen-grpc-java 1.68.0` + `protoc-gen-grpc-kotlin 1.4.1`；启用 `protobuf-kotlin-lite` 生成 Kotlin DSL；13 个 handler + `RequestDispatcher` + 11 个集成测试全部切到 DSL 形态；移除 `grpc-core` / `protobuf-java-util` / `ksp` / `kotlinx-serialization-protobuf` 无用依赖；179 测试全通过 |

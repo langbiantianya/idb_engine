@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import com.kxxnzstdsw.grpc.foreignKeyListRequest
 
 class ForeignKeyHandlerIntegrationTest : H2Fixture() {
 
@@ -19,7 +20,7 @@ class ForeignKeyHandlerIntegrationTest : H2Fixture() {
         executeUpdate("CREATE TABLE orders (id INT PRIMARY KEY)")
         val result = ForeignKeyHandler.list(
             config,
-            ForeignKeyListRequest.newBuilder().setTableName("orders").build()
+            foreignKeyListRequest { tableName = "orders" }
         )
         assertEquals(0, result.itemsCount)
     }
@@ -43,7 +44,7 @@ class ForeignKeyHandlerIntegrationTest : H2Fixture() {
 
         var fks = ForeignKeyHandler.list(
             config,
-            ForeignKeyListRequest.newBuilder().setTableName("orders").build()
+            foreignKeyListRequest { tableName = "orders" }
         )
         assertTrue(fks.itemsList.any { it.name.equals("fk_orders_user", ignoreCase = true) }, "FK 应在列表中")
 
@@ -57,7 +58,7 @@ class ForeignKeyHandlerIntegrationTest : H2Fixture() {
 
         fks = ForeignKeyHandler.list(
             config,
-            ForeignKeyListRequest.newBuilder().setTableName("orders").build()
+            foreignKeyListRequest { tableName = "orders" }
         )
         assertFalse(fks.itemsList.any { it.name.equals("fk_orders_user", ignoreCase = true) })
     }
@@ -81,7 +82,7 @@ class ForeignKeyHandlerIntegrationTest : H2Fixture() {
 
         val fks = ForeignKeyHandler.list(
             config,
-            ForeignKeyListRequest.newBuilder().setTableName("orders").build()
+            foreignKeyListRequest { tableName = "orders" }
         )
         val fk = fks.itemsList.first { it.name.equals("fk_orders_user", ignoreCase = true) }
         assertEquals("CASCADE", fk.onDelete)

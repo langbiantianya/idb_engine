@@ -11,6 +11,10 @@ import com.kxxnzstdsw.grpc.ExportStopResponse
 import com.kxxnzstdsw.grpc.PayloadAdapter
 import com.kxxnzstdsw.grpc.Request
 import com.kxxnzstdsw.grpc.Response
+import com.kxxnzstdsw.grpc.exportHubResponse
+import com.kxxnzstdsw.grpc.exportResponse
+import com.kxxnzstdsw.grpc.exportStopResponse
+import com.kxxnzstdsw.grpc.response
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -47,8 +51,11 @@ object ExportHandler {
         val jarPath = findEngineJarPath()
         if (jarPath == null) {
             emit(
-                Response.newBuilder().setId(id).setSuccess(false)
-                    .setError("Cannot find idb-engine.jar path").build()
+                response {
+                    this.id = id
+                    success = false
+                    error = "Cannot find idb-engine.jar path"
+                }
             )
             return@flow
         }
@@ -58,12 +65,14 @@ object ExportHandler {
         if (stopExportId != null) {
             ensureSubprocessRunning(jarPath)
             ExportProcessManager.stopExport(stopExportId)
-            val stopMsg = ExportStopResponse.newBuilder().setStopped(stopExportId).build()
             emit(
-                Response.newBuilder()
-                    .setId(id).setSuccess(true)
-                    .setExport(ExportResponse.newBuilder().setStop(stopMsg))
-                    .build()
+                response {
+                    this.id = id
+                    success = true
+                    export = exportResponse {
+                        stop = exportStopResponse { stopped = stopExportId }
+                    }
+                }
             )
             return@flow
         }
@@ -99,21 +108,25 @@ object ExportHandler {
                     }
                     runBlocking {
                         emit(
-                            ExportHubResponse.newBuilder()
-                                .setId(id).setSuccess(true).setStream(true).setEnd(progress.completed)
-                                .setData(PayloadAdapter.toValue(data))
-                                .build()
+                            exportHubResponse {
+                                this.id = id
+                                success = true
+                                stream = true
+                                end = progress.completed
+                                this.data = PayloadAdapter.toValue(data)
+                            }
                         )
                     }
                 }
             }
         } catch (e: Exception) {
             emit(
-                ExportHubResponse.newBuilder()
-                    .setId(id).setSuccess(false)
-                    .setError(e.message ?: "Export failed")
-                    .setEnd(true)
-                    .build()
+                exportHubResponse {
+                    this.id = id
+                    success = false
+                    error = e.message ?: "Export failed"
+                    end = true
+                }
             )
         }
     }

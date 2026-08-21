@@ -5,7 +5,8 @@ import com.kxxnzstdsw.grpc.ConnectionConfig
 import com.kxxnzstdsw.grpc.DataGenerateRequest
 import com.kxxnzstdsw.grpc.GenerateProgressFrame
 import com.kxxnzstdsw.grpc.PayloadAdapter
-import com.kxxnzstdsw.grpc.Row
+import com.kxxnzstdsw.grpc.generateProgressFrame
+import com.kxxnzstdsw.grpc.row
 import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
@@ -201,27 +202,28 @@ object GenerateHandler {
             // 实时流式回报（包含 SQL 和实际插入的数据）
             state.onProgress?.let { cb ->
                 runBlocking {
-                    val rowProto = Row.newBuilder()
-                    row.forEach { (k, v) ->
-                        val value = when (v) {
-                            null -> PayloadAdapter.toValue(JsonNull)
-                            is Long -> PayloadAdapter.toValue(JsonPrimitive(v))
-                            is Double -> PayloadAdapter.toValue(JsonPrimitive(v))
-                            is Boolean -> PayloadAdapter.toValue(JsonPrimitive(v))
-                            else -> PayloadAdapter.toValue(JsonPrimitive(v.toString()))
+                    val rowProto = row {
+                        row.forEach { (k, v) ->
+                            val value = when (v) {
+                                null -> PayloadAdapter.toValue(JsonNull)
+                                is Long -> PayloadAdapter.toValue(JsonPrimitive(v))
+                                is Double -> PayloadAdapter.toValue(JsonPrimitive(v))
+                                is Boolean -> PayloadAdapter.toValue(JsonPrimitive(v))
+                                else -> PayloadAdapter.toValue(JsonPrimitive(v.toString()))
+                            }
+                            values.put(k, value)
                         }
-                        rowProto.putValues(k, value)
                     }
                     cb(
-                        GenerateProgressFrame.newBuilder()
-                            .setTable(state.currentTable)
-                            .setInserted(state.totalInserted)
-                            .setScriptInserted(state.scriptInserted)
-                            .setScriptIndex(state.scriptIndex + 1)
-                            .setTotalScripts(state.totalScripts)
-                            .setSql(state.currentSql)
-                            .setData(rowProto.build())
-                            .build()
+                        generateProgressFrame {
+                            table = state.currentTable
+                            inserted = state.totalInserted
+                            scriptInserted = state.scriptInserted
+                            scriptIndex = state.scriptIndex + 1
+                            totalScripts = state.totalScripts
+                            sql = state.currentSql
+                            data = rowProto
+                        }
                     )
                 }
             }

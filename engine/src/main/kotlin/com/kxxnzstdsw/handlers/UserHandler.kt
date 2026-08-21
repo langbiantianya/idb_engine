@@ -6,13 +6,18 @@ import com.kxxnzstdsw.grpc.UserCreateRequest
 import com.kxxnzstdsw.grpc.UserCreateResponse
 import com.kxxnzstdsw.grpc.UserDeleteRequest
 import com.kxxnzstdsw.grpc.UserDeleteResponse
-import com.kxxnzstdsw.grpc.UserGrantItem
 import com.kxxnzstdsw.grpc.UserGrantsRequest
 import com.kxxnzstdsw.grpc.UserGrantsResponse
 import com.kxxnzstdsw.grpc.UserListRequest
 import com.kxxnzstdsw.grpc.UserListResponse
 import com.kxxnzstdsw.grpc.UserUpdateRequest
 import com.kxxnzstdsw.grpc.UserUpdateResponse
+import com.kxxnzstdsw.grpc.userCreateResponse
+import com.kxxnzstdsw.grpc.userDeleteResponse
+import com.kxxnzstdsw.grpc.userGrantItem
+import com.kxxnzstdsw.grpc.userGrantsResponse
+import com.kxxnzstdsw.grpc.userListResponse
+import com.kxxnzstdsw.grpc.userUpdateResponse
 import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
@@ -27,24 +32,24 @@ object UserHandler {
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
-            val builder = UserListResponse.newBuilder()
-            if (req.user.isNotBlank()) {
-                val targetHost = req.host.ifBlank { "%" }
-                val privileges = dialect.listPrivileges(conn, req.user, targetHost)
-                // Privileges shape varies by dialect (MySQL raw SHOW GRANTS text vs PG/H2 structured
-                // {schema, table, privilege}). Keep Value packing — genuinely dialect-specific.
-                privileges.forEach { row ->
-                    val obj = JsonObject(row.mapValues { (_, v) -> JsonPrimitive(v) })
-                    builder.addItems(PayloadAdapter.toValue(obj))
-                }
-            } else {
-                val users = dialect.listUsers(conn)
-                users.forEach { row ->
-                    val obj = JsonObject(row.mapValues { (_, v) -> JsonPrimitive(v) })
-                    builder.addItems(PayloadAdapter.toValue(obj))
+            userListResponse {
+                if (req.user.isNotBlank()) {
+                    val targetHost = req.host.ifBlank { "%" }
+                    val privileges = dialect.listPrivileges(conn, req.user, targetHost)
+                    // Privileges shape varies by dialect (MySQL raw SHOW GRANTS text vs PG/H2 structured
+                    // {schema, table, privilege}). Keep Value packing — genuinely dialect-specific.
+                    privileges.forEach { row ->
+                        val obj = JsonObject(row.mapValues { (_, v) -> JsonPrimitive(v) })
+                        this.items += PayloadAdapter.toValue(obj)
+                    }
+                } else {
+                    val users = dialect.listUsers(conn)
+                    users.forEach { row ->
+                        val obj = JsonObject(row.mapValues { (_, v) -> JsonPrimitive(v) })
+                        this.items += PayloadAdapter.toValue(obj)
+                    }
                 }
             }
-            builder.build()
         }
     }
 
@@ -57,16 +62,15 @@ object UserHandler {
 
         return@withContext connection.use { conn ->
             val grants = dialect.listAllGrants(conn, req.user, host)
-            val builder = UserGrantsResponse.newBuilder()
-            grants.forEach { row ->
-                builder.addItems(
-                    UserGrantItem.newBuilder()
-                        .setSchema(row["schema"] ?: "")
-                        .setTable(row["table"] ?: "")
-                        .setPrivilege(row["privileges"] ?: row["privilege"] ?: "")
-                )
+            userGrantsResponse {
+                grants.forEach { row ->
+                    this.items += userGrantItem {
+                        schema = row["schema"] ?: ""
+                        table = row["table"] ?: ""
+                        privilege = row["privileges"] ?: row["privilege"] ?: ""
+                    }
+                }
             }
-            builder.build()
         }
     }
 
@@ -80,7 +84,7 @@ object UserHandler {
 
         return@withContext connection.use { conn ->
             dialect.createUser(conn, req.user, req.password, host)
-            UserCreateResponse.newBuilder().setCreated(req.user).build()
+            userCreateResponse { created = req.user }
         }
     }
 
@@ -93,7 +97,7 @@ object UserHandler {
 
         return@withContext connection.use { conn ->
             dialect.deleteUser(conn, req.user, host)
-            UserDeleteResponse.newBuilder().setDeleted(req.user).build()
+            userDeleteResponse { deleted = req.user }
         }
     }
 
@@ -109,10 +113,10 @@ object UserHandler {
             if (req.password.isNotBlank() && !hasPrivileges) {
                 val host = req.host.ifBlank { "%" }
                 dialect.updatePassword(conn, req.user, req.password, host)
-                UserUpdateResponse.newBuilder()
-                    .setUser(req.user)
-                    .setAction("password_changed")
-                    .build()
+                userUpdateResponse {
+                    user = req.user
+                    action = "password_changed"
+                }
             } else {
                 if (req.schema.isBlank()) throw IllegalArgumentException("Missing 'schema'")
                 val isGrant = req.isGrant
@@ -120,13 +124,13 @@ object UserHandler {
                 val withGrantOption = req.withGrantOption
 
                 dialect.updatePrivileges(conn, req.user, req.schema, req.privilegesList, isGrant, tableName, withGrantOption)
-                val builder = UserUpdateResponse.newBuilder()
-                    .setUser(req.user)
-                    .setSchema(req.schema)
-                    .setAction(if (isGrant) "granted" else "revoked")
-                if (tableName != null) builder.table = tableName
-                if (withGrantOption) builder.withGrantOption = true
-                builder.build()
+                userUpdateResponse {
+                    user = req.user
+                    schema = req.schema
+                    action = if (isGrant) "granted" else "revoked"
+                    if (tableName != null) table = tableName
+                    if (withGrantOption) this.withGrantOption = true
+                }
             }
         }
     }

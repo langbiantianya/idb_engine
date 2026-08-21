@@ -13,6 +13,12 @@ import com.kxxnzstdsw.grpc.DataUpdateRequest
 import com.kxxnzstdsw.grpc.DataUpdateResponse
 import com.kxxnzstdsw.grpc.PayloadAdapter
 import com.kxxnzstdsw.grpc.Row
+import com.kxxnzstdsw.grpc.dataCreateResponse
+import com.kxxnzstdsw.grpc.dataDeleteResponse
+import com.kxxnzstdsw.grpc.dataListPagedResponse
+import com.kxxnzstdsw.grpc.dataRowFrame
+import com.kxxnzstdsw.grpc.dataUpdateResponse
+import com.kxxnzstdsw.grpc.row
 import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
@@ -82,12 +88,12 @@ object DataHandler {
                         stmt.executeQuery().use { rs ->
                             while (rs.next()) {
                                 onRow(
-                                    DataRowFrame.newBuilder()
-                                        .setTotal(total)
-                                        .setPage(0)
-                                        .setPageSize(1)
-                                        .setRow(buildRow(rs))
-                                        .build()
+                                    dataRowFrame {
+                                        this.total = total
+                                        this.page = 0
+                                        this.pageSize = 1
+                                        row = buildRow(rs)
+                                    }
                                 )
                             }
                         }
@@ -96,7 +102,11 @@ object DataHandler {
                     dialect.restoreConnectionAfterStreaming(conn, originalAutoCommit)
                 }
                 // 流式模式不回传 paged body — 返回空 paged 仅占位（dispatcher 不会使用）
-                DataListPagedResponse.newBuilder().setTotal(total).setPage(0).setPageSize(0).build()
+                dataListPagedResponse {
+                    this.total = total
+                    this.page = 0
+                    this.pageSize = 0
+                }
             } else {
                 // 普通分页模式
                 val offset = (page - 1) * pageSize
@@ -105,14 +115,14 @@ object DataHandler {
                     stmt.setInt(1, pageSize)
                     stmt.setInt(2, offset)
                     stmt.executeQuery().use { rs ->
-                        val rowBuilder = DataListPagedResponse.newBuilder()
-                            .setTotal(total)
-                            .setPage(page)
-                            .setPageSize(pageSize)
-                        while (rs.next()) {
-                            rowBuilder.addRows(buildRow(rs))
+                        dataListPagedResponse {
+                            this.total = total
+                            this.page = page
+                            this.pageSize = pageSize
+                            while (rs.next()) {
+                                this.rows += buildRow(rs)
+                            }
                         }
-                        rowBuilder.build()
                     }
                 }
             }
@@ -127,18 +137,18 @@ object DataHandler {
     private fun buildRow(rs: ResultSet): Row {
         val metaData = rs.metaData
         val columnCount = metaData.columnCount
-        val row = Row.newBuilder()
-        for (i in 1..columnCount) {
-            val columnName = metaData.getColumnName(i)
-            val columnType = metaData.getColumnTypeName(i)
-            val value: Value = if (columnType in listOf("BLOB", "LONGTEXT", "BYTEA", "TEXT")) {
-                PayloadAdapter.toValue(JsonPrimitive("[LOB Data]"))
-            } else {
-                PayloadAdapter.toValue(JsonPrimitive(rs.getString(i)))
+        return row {
+            for (i in 1..columnCount) {
+                val columnName = metaData.getColumnName(i)
+                val columnType = metaData.getColumnTypeName(i)
+                val value: Value = if (columnType in listOf("BLOB", "LONGTEXT", "BYTEA", "TEXT")) {
+                    PayloadAdapter.toValue(JsonPrimitive("[LOB Data]"))
+                } else {
+                    PayloadAdapter.toValue(JsonPrimitive(rs.getString(i)))
+                }
+                values.put(columnName, value)
             }
-            row.putValues(columnName, value)
         }
-        return row.build()
     }
 
     suspend fun create(config: ConnectionConfig, req: DataCreateRequest): DataCreateResponse = withContext(Dispatchers.IO) {
@@ -160,7 +170,7 @@ object DataHandler {
                     bindTypedValue(stmt, index + 1, columnTypes[name.lowercase()], JsonPrimitive(value))
                 }
                 val affectedRows = stmt.executeUpdate()
-                DataCreateResponse.newBuilder().setAffectedRows(affectedRows).build()
+                dataCreateResponse { this.affectedRows = affectedRows }
             }
         }
     }
@@ -188,7 +198,7 @@ object DataHandler {
                     bindTypedValue(stmt, paramIndex++, columnTypes[name.lowercase()], JsonPrimitive(value))
                 }
                 val affectedRows = stmt.executeUpdate()
-                DataUpdateResponse.newBuilder().setAffectedRows(affectedRows).build()
+                dataUpdateResponse { this.affectedRows = affectedRows }
             }
         }
     }
@@ -211,7 +221,7 @@ object DataHandler {
                     bindTypedValue(stmt, index + 1, columnTypes[name.lowercase()], JsonPrimitive(value))
                 }
                 val affectedRows = stmt.executeUpdate()
-                DataDeleteResponse.newBuilder().setAffectedRows(affectedRows).build()
+                dataDeleteResponse { this.affectedRows = affectedRows }
             }
         }
     }

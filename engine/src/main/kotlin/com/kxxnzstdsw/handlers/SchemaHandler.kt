@@ -7,6 +7,9 @@ import com.kxxnzstdsw.grpc.SchemaDeleteRequest
 import com.kxxnzstdsw.grpc.SchemaDeleteResponse
 import com.kxxnzstdsw.grpc.SchemaListRequest
 import com.kxxnzstdsw.grpc.SchemaListResponse
+import com.kxxnzstdsw.grpc.schemaCreateResponse
+import com.kxxnzstdsw.grpc.schemaDeleteResponse
+import com.kxxnzstdsw.grpc.schemaListResponse
 import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
@@ -27,10 +30,10 @@ object SchemaHandler {
             when (level) {
                 "database" -> {
                     val items = dialect.listDatabases(conn)
-                    SchemaListResponse.newBuilder()
-                        .setLevel("database")
-                        .addAllItems(items)
-                        .build()
+                    schemaListResponse {
+                        this.level = "database"
+                        this.items += items
+                    }
                 }
                 "schema" -> {
                     val database = req.database.ifBlank {
@@ -40,11 +43,11 @@ object SchemaHandler {
                         )
                     }
                     val items = dialect.listSchemas(conn, database)
-                    SchemaListResponse.newBuilder()
-                        .setLevel("schema")
-                        .setDatabase(database)
-                        .addAllItems(items)
-                        .build()
+                    schemaListResponse {
+                        this.level = "schema"
+                        this.database = database
+                        this.items += items
+                    }
                 }
                 else -> throw IllegalArgumentException(
                     "Unsupported SCHEMA LIST level: '$level' — 必须是 'database' 或 'schema'"
@@ -60,7 +63,7 @@ object SchemaHandler {
 
         return@withContext connection.use { conn ->
             dialect.createSchema(conn, req.name, req.optionsMap)
-            SchemaCreateResponse.newBuilder().setCreated(req.name).build()
+            schemaCreateResponse { created = req.name }
         }
     }
 
@@ -71,7 +74,7 @@ object SchemaHandler {
 
         return@withContext connection.use { conn ->
             dialect.deleteSchema(conn, req.name)
-            SchemaDeleteResponse.newBuilder().setDeleted(req.name).build()
+            schemaDeleteResponse { deleted = req.name }
         }
     }
 }

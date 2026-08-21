@@ -16,6 +16,11 @@ import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import com.kxxnzstdsw.grpc.tableColumnListRequest
+import com.kxxnzstdsw.grpc.tableDeleteRequest
+import com.kxxnzstdsw.grpc.tableGetDdlRequest
+import com.kxxnzstdsw.grpc.tableRenameRequest
+import com.kxxnzstdsw.grpc.tableTruncateRequest
 
 class TableHandlerIntegrationTest : H2Fixture() {
 
@@ -34,7 +39,7 @@ class TableHandlerIntegrationTest : H2Fixture() {
         executeUpdate("CREATE TABLE users (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, name VARCHAR(50) NOT NULL, age INT)")
         val result = TableHandler.columnList(
             config,
-            TableColumnListRequest.newBuilder().setTableName("users").build()
+            tableColumnListRequest { tableName = "users" }
         )
         assertEquals(3, result.itemsCount)
         val id = result.itemsList.first { it.name.equals("id", ignoreCase = true) }
@@ -150,7 +155,7 @@ class TableHandlerIntegrationTest : H2Fixture() {
         executeUpdate("CREATE TABLE users (id INT NOT NULL PRIMARY KEY, name VARCHAR(50))")
         val result = TableHandler.getDDL(
             config,
-            TableGetDdlRequest.newBuilder().setTableName("users").build()
+            tableGetDdlRequest { tableName = "users" }
         )
         assertTrue(result.ddl.contains("CREATE TABLE", ignoreCase = true))
         assertTrue(result.ddl.contains("PRIMARY KEY", ignoreCase = true))
@@ -161,7 +166,7 @@ class TableHandlerIntegrationTest : H2Fixture() {
         executeUpdate("CREATE TABLE t (id INT)")
         TableHandler.delete(
             config,
-            TableDeleteRequest.newBuilder().setTableName("t").build()
+            tableDeleteRequest { tableName = "t" }
         )
         assertFalse(tableExists("t"))
     }
@@ -171,7 +176,7 @@ class TableHandlerIntegrationTest : H2Fixture() {
         executeUpdate("CREATE TABLE old_t (id INT)")
         TableHandler.rename(
             config,
-            TableRenameRequest.newBuilder().setOldName("old_t").setNewName("new_t").build()
+            tableRenameRequest { oldName = "old_t"; newName = "new_t" }
         )
         assertTrue(tableExists("new_t"))
         assertFalse(tableExists("old_t"))
@@ -183,7 +188,7 @@ class TableHandlerIntegrationTest : H2Fixture() {
         executeUpdate("INSERT INTO t VALUES (1), (2), (3)")
         TableHandler.truncate(
             config,
-            TableTruncateRequest.newBuilder().setTableName("t").build()
+            tableTruncateRequest { tableName = "t" }
         )
         assertEquals("0", executeQuerySingle("SELECT COUNT(*) FROM t"))
     }

@@ -8,6 +8,8 @@ import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import com.kxxnzstdsw.grpc.sqlExecuteRequest
+import com.kxxnzstdsw.grpc.sqlExplainRequest
 
 class SqlEngineHandlerIntegrationTest : H2Fixture() {
 
@@ -19,7 +21,7 @@ class SqlEngineHandlerIntegrationTest : H2Fixture() {
         var firstName: String? = null
         SqlEngineHandler.execute(
             config,
-            SqlExecuteRequest.newBuilder().setSql("SELECT * FROM t ORDER BY id").build()
+            sqlExecuteRequest { sql = "SELECT * FROM t ORDER BY id" }
         ) { frame ->
             rows++
             if (firstName == null) {
@@ -46,7 +48,7 @@ class SqlEngineHandlerIntegrationTest : H2Fixture() {
         executeUpdate("INSERT INTO t VALUES (1, 'old')")
         val result = SqlEngineHandler.execute(
             config,
-            SqlExecuteRequest.newBuilder().setSql("UPDATE t SET name='new' WHERE id=1").build()
+            sqlExecuteRequest { sql = "UPDATE t SET name='new' WHERE id=1" }
         )
         assertEquals(1, result.affectedRows)
     }
@@ -57,7 +59,7 @@ class SqlEngineHandlerIntegrationTest : H2Fixture() {
         executeUpdate("INSERT INTO t VALUES (1), (2)")
         val result = SqlEngineHandler.execute(
             config,
-            SqlExecuteRequest.newBuilder().setSql("DELETE FROM t WHERE id=1").build()
+            sqlExecuteRequest { sql = "DELETE FROM t WHERE id=1" }
         )
         assertEquals(1, result.affectedRows)
     }
@@ -66,7 +68,7 @@ class SqlEngineHandlerIntegrationTest : H2Fixture() {
     fun `EXECUTE DDL returns 0 affectedRows`() = runBlocking<Unit> {
         val result = SqlEngineHandler.execute(
             config,
-            SqlExecuteRequest.newBuilder().setSql("CREATE TABLE new_t (id INT)").build()
+            sqlExecuteRequest { sql = "CREATE TABLE new_t (id INT)" }
         )
         assertEquals(0, result.affectedRows)
         assertTrue(tableExists("new_t"))
@@ -77,7 +79,7 @@ class SqlEngineHandlerIntegrationTest : H2Fixture() {
         executeUpdate("CREATE TABLE t (id INT)")
         val result = SqlEngineHandler.explain(
             config,
-            SqlExplainRequest.newBuilder().setSql("SELECT * FROM t").build()
+            sqlExplainRequest { sql = "SELECT * FROM t" }
         )
         assertTrue(result.rowsCount > 0)
     }
@@ -87,7 +89,7 @@ class SqlEngineHandlerIntegrationTest : H2Fixture() {
         try {
             SqlEngineHandler.explain(
                 config,
-                SqlExplainRequest.newBuilder().setSql("SELECT 1; DROP TABLE x").build()
+                sqlExplainRequest { sql = "SELECT 1; DROP TABLE x" }
             )
             error("应抛 IllegalArgumentException")
         } catch (e: IllegalArgumentException) {

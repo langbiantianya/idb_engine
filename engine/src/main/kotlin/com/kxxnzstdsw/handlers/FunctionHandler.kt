@@ -5,7 +5,6 @@ import com.kxxnzstdsw.grpc.FunctionCallRequest
 import com.kxxnzstdsw.grpc.FunctionCallResponse
 import com.kxxnzstdsw.grpc.FunctionCreateRequest
 import com.kxxnzstdsw.grpc.FunctionCreateResponse
-import com.kxxnzstdsw.grpc.FunctionDebugItem
 import com.kxxnzstdsw.grpc.FunctionDebugRequest
 import com.kxxnzstdsw.grpc.FunctionDebugResponse
 import com.kxxnzstdsw.grpc.FunctionDeleteRequest
@@ -14,17 +13,25 @@ import com.kxxnzstdsw.grpc.FunctionGetDdlRequest
 import com.kxxnzstdsw.grpc.FunctionGetDdlResponse
 import com.kxxnzstdsw.grpc.FunctionInfoRequest
 import com.kxxnzstdsw.grpc.FunctionInfoResponse
-import com.kxxnzstdsw.grpc.FunctionListItem
 import com.kxxnzstdsw.grpc.FunctionListRequest
 import com.kxxnzstdsw.grpc.FunctionListResponse
 import com.kxxnzstdsw.grpc.FunctionValidateRequest
 import com.kxxnzstdsw.grpc.FunctionValidateResponse
 import com.kxxnzstdsw.grpc.PayloadAdapter
+import com.kxxnzstdsw.grpc.functionCallResponse
+import com.kxxnzstdsw.grpc.functionCreateResponse
+import com.kxxnzstdsw.grpc.functionDebugItem
+import com.kxxnzstdsw.grpc.functionDebugResponse
+import com.kxxnzstdsw.grpc.functionDeleteResponse
+import com.kxxnzstdsw.grpc.functionGetDdlResponse
+import com.kxxnzstdsw.grpc.functionInfoResponse
+import com.kxxnzstdsw.grpc.functionListItem
+import com.kxxnzstdsw.grpc.functionListResponse
+import com.kxxnzstdsw.grpc.functionValidateResponse
 import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
@@ -43,24 +50,23 @@ object FunctionHandler {
 
         return@withContext connection.use { conn ->
             val routines = dialect.listRoutines(conn, schema)
-            val builder = FunctionListResponse.newBuilder()
-            routines.forEach { row ->
-                builder.addItems(
-                    FunctionListItem.newBuilder()
-                        .setName(row["name"] ?: "")
-                        .setRoutineType(row["routine_type"] ?: "")
-                        .setReturnType(row["return_type"] ?: "")
-                        .setLanguage(row["language"] ?: "")
-                        .setSecurityDefiner(row["security_definer"] ?: "")
-                        .setVolatility(row["volatility"] ?: "")
-                        .setArgCount(row["arg_count"] ?: "")
-                        .setArgNames(row["arg_names"] ?: "")
-                        .setSchema(row["schema"] ?: "")
-                        .setDescription(row["description"] ?: "")
-                        .setTriggerTable(row["trigger_table"] ?: "")
-                )
+            functionListResponse {
+                routines.forEach { row ->
+                    this.items += functionListItem {
+                        name = row["name"] ?: ""
+                        routineType = row["routine_type"] ?: ""
+                        returnType = row["return_type"] ?: ""
+                        language = row["language"] ?: ""
+                        securityDefiner = row["security_definer"] ?: ""
+                        volatility = row["volatility"] ?: ""
+                        argCount = row["arg_count"] ?: ""
+                        argNames = row["arg_names"] ?: ""
+                        this.schema = row["schema"] ?: ""
+                        description = row["description"] ?: ""
+                        triggerTable = row["trigger_table"] ?: ""
+                    }
+                }
             }
-            builder.build()
         }
     }
 
@@ -77,9 +83,7 @@ object FunctionHandler {
             val obj = buildJsonObject {
                 info.forEach { (key, value) -> put(key, JsonPrimitive(value)) }
             }
-            FunctionInfoResponse.newBuilder()
-                .setInfo(PayloadAdapter.toValue(obj))
-                .build()
+            functionInfoResponse { this.info = PayloadAdapter.toValue(obj) }
         }
     }
 
@@ -90,9 +94,7 @@ object FunctionHandler {
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
-            FunctionGetDdlResponse.newBuilder()
-                .setDdl(dialect.getRoutineDDL(conn, req.name, schema))
-                .build()
+            functionGetDdlResponse { ddl = dialect.getRoutineDDL(conn, req.name, schema) }
         }
     }
 
@@ -104,10 +106,10 @@ object FunctionHandler {
 
         return@withContext connection.use { conn ->
             dialect.createRoutine(conn, req.ddl)
-            FunctionCreateResponse.newBuilder()
-                .setSuccess(true)
-                .setMessage("函数/存储过程创建成功")
-                .build()
+            functionCreateResponse {
+                success = true
+                message = "函数/存储过程创建成功"
+            }
         }
     }
 
@@ -121,12 +123,12 @@ object FunctionHandler {
 
         return@withContext connection.use { conn ->
             dialect.dropRoutine(conn, req.name, req.routineType, schema, req.ifExists, req.cascade)
-            FunctionDeleteResponse.newBuilder()
-                .setSuccess(true)
-                .setMessage("函数/存储过程删除成功")
-                .setName(req.name)
-                .setRoutineType(req.routineType)
-                .build()
+            functionDeleteResponse {
+                success = true
+                message = "函数/存储过程删除成功"
+                name = req.name
+                routineType = req.routineType
+            }
         }
     }
 
@@ -148,9 +150,7 @@ object FunctionHandler {
                     put(key, value.toJsonElement())
                 }
             }
-            FunctionCallResponse.newBuilder()
-                .setResult(PayloadAdapter.toValue(obj))
-                .build()
+            functionCallResponse { this.result = PayloadAdapter.toValue(obj) }
         }
     }
 
@@ -177,15 +177,14 @@ object FunctionHandler {
 
         return@withContext connection.use { conn ->
             val debugInfo = dialect.debugRoutine(conn, req.name, schema)
-            val builder = FunctionDebugResponse.newBuilder()
-            debugInfo.forEach { row ->
-                builder.addItems(
-                    FunctionDebugItem.newBuilder()
-                        .setType(row["type"] ?: "")
-                        .setOutput(row["output"] ?: "")
-                )
+            functionDebugResponse {
+                debugInfo.forEach { row ->
+                    this.items += functionDebugItem {
+                        type = row["type"] ?: ""
+                        output = row["output"] ?: ""
+                    }
+                }
             }
-            builder.build()
         }
     }
 
@@ -197,10 +196,10 @@ object FunctionHandler {
 
         return@withContext connection.use { conn ->
             dialect.validateRoutineDDL(conn, req.ddl)
-            FunctionValidateResponse.newBuilder()
-                .setValid(true)
-                .setMessage("DDL 语法验证通过")
-                .build()
+            functionValidateResponse {
+                valid = true
+                message = "DDL 语法验证通过"
+            }
         }
     }
 }

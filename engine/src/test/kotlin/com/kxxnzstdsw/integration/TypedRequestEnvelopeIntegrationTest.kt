@@ -22,6 +22,7 @@ import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import com.kxxnzstdsw.grpc.schemaListRequest
 
 /**
  * 端到端测试：通过强类型 gRPC [Request] envelope → [RequestDispatcher] → H2 dialect → typed [Response]。
@@ -86,7 +87,7 @@ class TypedRequestEnvelopeIntegrationTest : H2Fixture() {
         val resp = RequestDispatcher.dispatch(
             request(Category.SCHEMA, Action.LIST) {
                 setSchemaRequest(SchemaRequest.newBuilder()
-                    .setList(com.kxxnzstdsw.grpc.SchemaListRequest.newBuilder().setLevel("database").build())
+                    .setList(com.kxxnzstdsw.grpc.schemaListRequest { level = "database" })
                     .build())
             }
         ).toList()

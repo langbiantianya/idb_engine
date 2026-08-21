@@ -8,6 +8,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import com.kxxnzstdsw.grpc.triggerListRequest
 
 class TriggerHandlerIntegrationTest : H2Fixture() {
 
@@ -15,7 +16,7 @@ class TriggerHandlerIntegrationTest : H2Fixture() {
     fun `LIST returns empty initially`() = runBlocking {
         val result = TriggerHandler.list(
             config,
-            TriggerListRequest.newBuilder().setSchema("PUBLIC").build()
+            triggerListRequest { schema = "PUBLIC" }
         )
         assertEquals(0, result.itemsCount)
     }
@@ -29,7 +30,7 @@ class TriggerHandlerIntegrationTest : H2Fixture() {
         executeUpdate("CREATE TABLE logs (id INT, msg VARCHAR(100))")
         val result = TriggerHandler.list(
             config,
-            TriggerListRequest.newBuilder().setSchema("PUBLIC").build()
+            triggerListRequest { schema = "PUBLIC" }
         )
         assertEquals(0, result.itemsCount)
     }

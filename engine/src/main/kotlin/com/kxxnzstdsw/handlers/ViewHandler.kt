@@ -7,9 +7,13 @@ import com.kxxnzstdsw.grpc.ViewDeleteRequest
 import com.kxxnzstdsw.grpc.ViewDeleteResponse
 import com.kxxnzstdsw.grpc.ViewGetDdlRequest
 import com.kxxnzstdsw.grpc.ViewGetDdlResponse
-import com.kxxnzstdsw.grpc.ViewListItem
 import com.kxxnzstdsw.grpc.ViewListRequest
 import com.kxxnzstdsw.grpc.ViewListResponse
+import com.kxxnzstdsw.grpc.viewCreateResponse
+import com.kxxnzstdsw.grpc.viewDeleteResponse
+import com.kxxnzstdsw.grpc.viewGetDdlResponse
+import com.kxxnzstdsw.grpc.viewListItem
+import com.kxxnzstdsw.grpc.viewListResponse
 import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
@@ -29,16 +33,15 @@ object ViewHandler {
         val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
             val items = dialect.listViews(conn, schema)
-            val builder = ViewListResponse.newBuilder()
-            items.forEach { row ->
-                builder.addItems(
-                    ViewListItem.newBuilder()
-                        .setName(row["name"] ?: "")
-                        .setType(row["type"] ?: "VIEW")
-                        .setDefinition(row["definition"] ?: "")
-                )
+            viewListResponse {
+                items.forEach { row ->
+                    this.items += viewListItem {
+                        name = row["name"] ?: ""
+                        type = row["type"] ?: "VIEW"
+                        definition = row["definition"] ?: ""
+                    }
+                }
             }
-            builder.build()
         }
     }
 
@@ -54,7 +57,7 @@ object ViewHandler {
         val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
             dialect.createView(conn, req.name, req.definition)
-            ViewCreateResponse.newBuilder().setCreated(req.name).build()
+            viewCreateResponse { created = req.name }
         }
     }
 
@@ -69,7 +72,7 @@ object ViewHandler {
         val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
             dialect.dropView(conn, req.name, req.ifExists)
-            ViewDeleteResponse.newBuilder().setDeleted(req.name).build()
+            viewDeleteResponse { deleted = req.name }
         }
     }
 
@@ -83,9 +86,7 @@ object ViewHandler {
         val connection = PoolManager.getConnection(config, schema)
         val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
-            ViewGetDdlResponse.newBuilder()
-                .setDdl(dialect.getViewDDL(conn, req.name, schema))
-                .build()
+            viewGetDdlResponse { ddl = dialect.getViewDDL(conn, req.name, schema) }
         }
     }
 }
