@@ -1,4 +1,4 @@
-# 📖 Kotlin 数据库管理端后端架构设计文档 (V2.5)
+# 📖 Kotlin 数据库管理端后端架构设计文档 (V2.6)
 
 ## 1. 架构总览 (Architecture Overview)
 
@@ -12,7 +12,7 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 - `unix` — Unix Domain Socket，Linux/macOS/BSD，Linux 使用 epoll native，macOS/BSD 走 NIO
 - `pipe` — Windows 命名管道（grpc-java 1.76 客户端支持；服务端暂未开放公共 API，抛 `UnsupportedOperationException`）
 
-> **架构升级**：自 v2.0 起，引擎以 gRPC 服务端方式运行（默认 `:50051`，可通过 `--port` 覆盖）。客户端通过 gRPC streaming 调用 `IdbEngine.Handle(Request)`，接收 `stream<Response>`（流式响应使用 `stream`/`end` 字段分帧）。自 v2.2 起，所有 `Request.payload` / `Response.data` 字段都已替换为强类型 per-Category protobuf 消息（`oneof body`）。自 v2.3 起，13 个业务 handler 全部接收 typed per-Category proto 消息、返回 typed `<Category><Action>Response` 消息；`TypedRequestMapper` / `TypedResponseMapper` 已删除，业务层不再经过 `JsonObject` 转换。自 v2.4 起，列表项 envelope 也已 typed（per-list `*ListItem` 消息 + typed `Row` wrapper）；仅方言差异显著的 item shape（`USER.LIST` overloaded、FUNCTION.CALL/INFO、SYSTEM.SERVER_INFO extras）保留 `google.protobuf.Value`。旧的 stdin/stdout 长度前缀 Protobuf 帧协议已彻底移除。自 v2.5 起，gRPC 依赖从 `1.68.0` 升至 `1.76.0`，并接入 `grpc-kotlin` 协程 stub（`IdbEngineCoroutineImplBase`）+ Kotlin DSL 生成器（`protobuf-kotlin-lite`）；13 个 handler + `RequestDispatcher` + 11 个集成测试全部以 Kotlin DSL 形态（`xxxRequest { ... }` / `xxxResponse { ... }` / `xxxItem { ... }` / `request { ... }` / `response { ... }`）编写，业务层无 `Request.newBuilder()...build()` 残留。
+> **架构升级**：自 v2.0 起，引擎以 gRPC 服务端方式运行（默认 `:50051`，可通过 `--port` 覆盖）。客户端通过 gRPC streaming 调用 `IdbEngine.Handle(Request)`，接收 `stream<Response>`（流式响应使用 `stream`/`end` 字段分帧）。自 v2.2 起，所有 `Request.payload` / `Response.data` 字段都已替换为强类型 per-Category protobuf 消息（`oneof body`）。自 v2.3 起，13 个业务 handler 全部接收 typed per-Category proto 消息、返回 typed `<Category><Action>Response` 消息；`TypedRequestMapper` / `TypedResponseMapper` 已删除，业务层不再经过 `JsonObject` 转换。自 v2.4 起，列表项 envelope 也已 typed（per-list `*ListItem` 消息 + typed `Row` wrapper）；仅方言差异显著的 item shape（`USER.LIST` overloaded、FUNCTION.CALL/INFO、SYSTEM.SERVER_INFO extras）保留 `google.protobuf.Value`。旧的 stdin/stdout 长度前缀 Protobuf 帧协议已彻底移除。自 v2.5 起，gRPC 依赖从 `1.68.0` 升至 `1.76.0`，并接入 `grpc-kotlin` 协程 stub（`IdbEngineCoroutineImplBase`）+ Kotlin DSL 生成器（`protobuf-kotlin-lite`）；13 个 handler + `RequestDispatcher` + 11 个集成测试全部以 Kotlin DSL 形态（`xxxRequest { ... }` / `xxxResponse { ... }` / `xxxItem { ... }` / `request { ... }` / `response { ... }`）编写，业务层无 `Request.newBuilder()...build()` 残留。自 v2.6 起，`RequestDispatcher` 重构为表驱动（`Map<Pair<Category, Action>, Route>`），新增跨切面 `RequestOptions { trace_id, dry_run, timeout_ms }`，新增 `SQL.EXPLAIN` 路由、`if_exists` / `if_not_exists` 贯通到 SCHEMA/TABLE/INDEX/FOREIGN_KEY。
 >
 > **性能隔离**：数据导出模块运行在独立的子进程中，通过 `ExportProcessManager` 管理（同样通过 gRPC 连接到主进程的 side server），防止大数据量导出时 OOM 影响主进程稳定性。
 
@@ -30,7 +30,7 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 - **脚本引擎**：LuaJIT 4.1.0 + Lua 5.1~5.5 via luajava
 - **Excel 导出**：Apache POI 5.5.1（poi-ooxml SXSSF 流式 API）
 - **Parquet 导出**：Apache Parquet 1.17.1 + Hadoop 3.5.0
-- **测试框架**：JUnit 5 + kotlin.test — 179 测试全量通过（0 失败 / 0 错误），其中 H2 dialect 63 项 + engine 116 项
+- **测试框架**：JUnit 5 + kotlin.test — 191 测试全量通过（0 失败 / 0 错误），其中 H2 dialect 63 项 + engine 128 项
 
 ## 3. 核心机制设计 (Core Mechanisms)
 
@@ -1052,6 +1052,9 @@ for {
 - 异步非阻塞处理（grpc-kotlin `IdbEngineCoroutineImplBase` + Kotlin 协程 `suspend handle()` → `Flow<Response>`）
 - **业务层 Kotlin DSL end-to-end（v2.5）**：13 个 handler + `RequestDispatcher` + 11 个集成测试全部以 Kotlin DSL 形态编写（`xxxRequest { ... }` / `xxxResponse { ... }` / `xxxItem { ... }` / `request { ... }` / `response { ... }`）；`google.protobuf.Value` 因属 Well-Known Type 仍用 `Value.newBuilder()`（无生成 DSL）
 - **gRPC 1.76 + protoc 工具链对齐（v2.5）**：`grpc-netty-shaded 1.76.0` + `grpc-kotlin-stub 1.4.1`，protoc 锁 `3.25.5` / `protoc-gen-grpc-java` 锁 `1.68.0` / `protoc-gen-grpc-kotlin` 锁 `1.4.1`，`protobuf-java` 强制 `3.25.8`（grpc-protobuf 1.76 传递依赖，不可强制升 4.x）
+- **表驱动 RequestDispatcher（v2.6）**：9 个 `handleX` 函数 + 11 个 `wrapTypedResponse` `when` 分支 → 单个 typed `routes` map（`Pair<Category, Action>` → `Route{invoke, wrap}`）；新 (Category, Action) 仅需一个 map 条目；消除 `wrapTypedResponse` 中静默 `else -> {}` 兜底；`SQL.EXPLAIN` 路由打通（之前 `SqlEngineHandler.explain` 已实现但 dispatcher 从未路由）
+- **跨切面 Envelope Options（v2.6）**：新增 `RequestOptions { trace_id, dry_run, timeout_ms }` 跨切面；MDC 注入 `trace_id`；`dryRun=true` + write action 直接短路返回 success（不修改数据库）；`timeoutMs > 0` 包 `withTimeoutOrNull`，超时返回 `success=false, error="timeout"`
+- **`if_exists` / `if_not_exists` 贯通（v2.6）**：SCHEMA/TABLE/INDEX/FOREIGN_KEY 路径全部支持 `optional bool if_exists` / `optional bool if_not_exists`；方言层 SPI 与 handler 实现已贯通
 - 数据库方言抽象层（DatabaseDialect SPI + MySQL/PostgreSQL/H2 插件，**所有 SPI 方法三个方言均完整实现**）
 - 连接池管理（HikariCP + SHA-256 缓存，key 包含 password）
 - 13 个 handler 全部使用 suspend 协程
@@ -1073,9 +1076,9 @@ for {
 - 触发器管理（LIST / GET_DDL）
 - 数据导出引擎（5 种格式：CSV / JSON Lines / SQL INSERT / Excel / Parquet，独立子进程隔离）
 - 跨平台 IPC 传输抽象（IpcTransport SPI + TCP / UDS / Named Pipe 三实现 + Linux epoll native，CLI 参数切换）
-- 179 个测试全通过，0 失败 / 0 错误：
+- 191 个测试全通过，0 失败 / 0 错误：
   - `:dialect-h2:test` — H2 方言 63 测试
-  - `:engine:test` — 116 测试
+  - `:engine:test` — 128 测试
     - `pool/PoolManagerTest` — 11
     - `loader/DialectLoaderTest` — 5
     - `ipc/IpcConfigTest` — 20
@@ -1085,9 +1088,13 @@ for {
     - `ipc/NamedPipeIpcTransportIntegrationTest` — 2
     - `integration/*HandlerIntegrationTest` — 60（11 个 handler × H2Fixture，使用 typed proto Kotlin DSL builders）
     - `integration/TypedRequestEnvelopeIntegrationTest` — 7（端到端 typed envelope）
+    - `integration/UserGrantsIntegrationTest` — 2（USER.GRANTS 路由，H2 限制场景）
+    - `integration/DataGenerateIntegrationTest` — 2（DATA.GENERATE 流式进度 + 错误路径）
+    - `integration/FunctionGetDdlIntegrationTest` — 2（FUNCTION.GET_DDL dispatcher 路由 + H2 限制）
+    - `integration/SqlExplainRouteIntegrationTest` — 2（SQL.EXPLAIN 端到端路由，v2.6 之前未实现）
+    - `integration/EnvelopeOptionsIntegrationTest` — 4（dryRun / timeoutMs envelope 跨切面）
 
 ⏳ 待扩展：
-- `Action.EXPLAIN` 路由（proto 已定义但 dispatcher 未实现）
 - GraalVM Native Image 编译
 - 更多数据库方言插件（Oracle, SQL Server, SQLite — 实现 SPI 接口即可）
 - 性能监控与指标上报
@@ -1103,4 +1110,5 @@ for {
 | v2.2 | gRPC + 强类型 Request/Response + CLI Args | `Request.payload` 与 `Response.data` 由 `map<string, Value>` 替换为 per-Category typed protobuf 消息（`oneof body` 路由）；IPC 选择由环境变量改为 CLI 参数（`--ipc` / `--port` / `--uds-path` / `--pipe-name` / `--help`）；`TypedRequestMapper` / `TypedResponseMapper` 在 dispatcher 边界做 typed proto ↔ JsonObject 转换 |
 | v2.3 | gRPC + 强类型 Handlers end-to-end | 13 个业务 handler 全部接收 typed per-Category proto 消息、返回 typed `<Category><Action>Response` 消息；`TypedRequestMapper` / `TypedResponseMapper` 删除（67 个对应测试一并删除）；`RequestDispatcher` 简化为 (Category, Action) → handler 的薄路由层；11 个 handler 集成测试改用 typed proto builders；179 个测试全通过（116 engine + 63 H2） |
 | v2.4 | gRPC + 强类型 per-list-item 消息 | 8 个 typed per-list-item 消息（`TableListItem` / `ViewListItem` / `IndexListItem` / `ForeignKeyListItem` / `TriggerListItem` / `FunctionListItem` / `FunctionDebugItem` / `UserGrantItem`）取代 list/response 中遗留的 `repeated google.protobuf.Value`；动态行使用 typed `Row { map<string, Value> values }` wrapper；方言差异显著的 item shape（USER.LIST overloaded、FUNCTION.CALL/INFO、SYSTEM.SERVER_INFO extras）保留 `google.protobuf.Value`；11 个 handler 集成测试改用 typed accessor（`item.name` 替代 `item.structValue.fieldsMap["name"]?.stringValue`）；179 个测试全通过 |
-| **v2.5 (当前)** | **gRPC 1.76 + grpc-kotlin 协程服务端 + Kotlin DSL end-to-end** | gRPC 依赖 `1.68.0` → `1.76.0`，接入 `grpc-kotlin-stub 1.4.1`；服务端 `IdbEngineImpl : IdbEngineGrpcKt.IdbEngineCoroutineImplBase()`（suspend `handle()` → `Flow<Response>`）；protoc 工具链锁定 `protoc 3.25.5` + `protoc-gen-grpc-java 1.68.0` + `protoc-gen-grpc-kotlin 1.4.1`；启用 `protobuf-kotlin-lite` 生成 Kotlin DSL（`xxxRequest { ... }` / `xxxResponse { ... }` / `xxxItem { ... }` / `request { ... }` / `response { ... }`）；13 个 handler + `RequestDispatcher` + 11 个集成测试全部切到 DSL，业务层无 `Request.newBuilder()...build()` 残留；移除 `grpc-core` / `protobuf-java-util` / `ksp` / `kotlinx-serialization-protobuf` 等无用依赖；179 个测试全通过 |
+| v2.5 | gRPC 1.76 + grpc-kotlin 协程服务端 + Kotlin DSL end-to-end | gRPC 依赖 `1.68.0` → `1.76.0`，接入 `grpc-kotlin-stub 1.4.1`；服务端 `IdbEngineImpl : IdbEngineGrpcKt.IdbEngineCoroutineImplBase()`（suspend `handle()` → `Flow<Response>`）；protoc 工具链锁定 `protoc 3.25.5` + `protoc-gen-grpc-java 1.68.0` + `protoc-gen-grpc-kotlin 1.4.1`；启用 `protobuf-kotlin-lite` 生成 Kotlin DSL（`xxxRequest { ... }` / `xxxResponse { ... }` / `xxxItem { ... }` / `request { ... }` / `response { ... }`）；13 个 handler + `RequestDispatcher` + 11 个集成测试全部切到 DSL，业务层无 `Request.newBuilder()...build()` 残留；移除 `grpc-core` / `protobuf-java-util` / `ksp` / `kotlinx-serialization-protobuf` 等无用依赖；179 个测试全通过 |
+| **v2.6 (当前)** | **表驱动 Dispatcher + 跨切面 Envelope Options** | `RequestDispatcher` 重构：9 个 `handleX` 函数 + 11 个 `wrapTypedResponse` `when` 分支 → 单个 typed `routes` map（`Pair<Category, Action>` → `Route{invoke, wrap}`）；新 (Category, Action) 仅需一个 map 条目；消除 `wrapTypedResponse` 中静默 `else -> {}` 兜底；`SQL.EXPLAIN` 路由打通（之前 `SqlEngineHandler.explain` 已实现但 dispatcher 从未路由）。新增 `RequestOptions { trace_id, dry_run, timeout_ms }`：MDC 注入 `trace_id`；`dryRun=true` + write action 短路返回 success（不修改数据库）；`timeoutMs > 0` 用 `withTimeoutOrNull` 包 handler 调用，超时返回 `success=false, error="timeout"`。`if_exists` / `if_not_exists` 在 SCHEMA/TABLE/INDEX/FOREIGN_KEY 路径下贯通（v2.6 之前仅 VIEW/FUNCTION.DELETE 支持）。191 测试全通过（128 engine + 63 H2） |

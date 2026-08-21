@@ -99,7 +99,8 @@ object ForeignKeyHandler {
         val connection = PoolManager.getConnection(config, schema)
         val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
-            dialect.dropForeignKey(conn, req.tableName, req.fkName)
+            val ifExists = req.hasIfExists() && req.ifExists
+            dialect.dropForeignKey(conn, req.tableName, req.fkName, ifExists)
             foreignKeyDeleteResponse { deleted = req.fkName }
         }
     }

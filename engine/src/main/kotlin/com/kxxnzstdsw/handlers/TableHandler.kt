@@ -110,6 +110,7 @@ object TableHandler {
 
             val sql = buildString {
                 append("CREATE TABLE ")
+                if (req.hasIfNotExists() && req.ifNotExists) append("IF NOT EXISTS ")
                 append(dialect.quoteIdentifier(req.tableName))
                 append(" (")
                 append(columnDefs.joinToString(", "))
@@ -197,7 +198,8 @@ object TableHandler {
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
-            val sql = "DROP TABLE ${dialect.quoteIdentifier(req.tableName)}"
+            val ifClause = if (req.hasIfExists() && req.ifExists) "IF EXISTS " else ""
+            val sql = "DROP TABLE ${ifClause}${dialect.quoteIdentifier(req.tableName)}"
             conn.createStatement().use { it.execute(sql) }
             tableDeleteResponse { deleted = req.tableName }
         }

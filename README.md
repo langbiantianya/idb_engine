@@ -2,7 +2,7 @@
 
 A headless, cross-platform database management engine written in Kotlin. Exposes a **gRPC** API (HTTP/2 + strongly-typed per-Category protobuf messages) over a configurable **IPC transport** (TCP loopback / Unix Domain Socket / Windows Named Pipe). Designed to be embedded in a Wails (Go) host with three pluggable dialects: MySQL, PostgreSQL, H2.
 
-> **Current version: v2.5**
+> **Current version: v2.6**
 > - gRPC server on `:50051` by default (`--port <int>` override)
 > - IPC transport selected via `--ipc <tcp|unix|pipe>` CLI flag (default auto-detected per OS)
 > - Pluggable dialect architecture (add a new DB by implementing `DatabaseDialect` and dropping a JAR in `dialects/`)
@@ -10,7 +10,9 @@ A headless, cross-platform database management engine written in Kotlin. Exposes
 > - **Handlers are strongly-typed end-to-end** — no `JsonObject` round-trip; dispatcher routes typed per-Category proto to typed handler methods returning typed `<Category><Action>Response` messages
 > - **Business layer in Kotlin DSL (v2.5)** — all 13 handlers + `RequestDispatcher` + 11 integration tests use generated Kotlin DSL builders (`xxxRequest { ... }` / `xxxResponse { ... }` / `xxxItem { ... }` / `request { ... }` / `response { ... }`); only `google.protobuf.Value` (Well-Known Type) still uses `Value.newBuilder()`
 > - **Typed list-item envelopes** — `TableListItem` / `ViewListItem` / `IndexListItem` / `ForeignKeyListItem` / `TriggerListItem` / `FunctionListItem` / `FunctionDebugItem` / `UserGrantItem` / typed `Row` for dynamic rows; only genuinely dialect-specific shapes (USER.LIST overloaded, FUNCTION.CALL/INFO, SYSTEM.SERVER_INFO extras) keep `google.protobuf.Value`
-> - 179 tests passing across engine + H2 dialect modules (116 engine + 63 H2 dialect)
+> - 191 tests passing across engine + H2 dialect modules (128 engine + 63 H2 dialect)
+> - **Cross-cutting request options (v2.6)** — `Request.options { traceId, dryRun, timeoutMs }` envelope uniformly applied to all (Category, Action) routes; `traceId` propagates via SLF4J MDC; `dryRun` short-circuits write actions without invoking handlers or modifying DB; `timeoutMs > 0` wraps handler call in `withTimeoutOrNull` and returns `success=false, error="timeout"` on expiry
+> - **Table-driven dispatcher (v2.6)** — `RequestDispatcher` replaced 9 `handleX` functions + 11 `wrapTypedResponse` `when` blocks with a single typed `routes` map; new (Category, Action) is one map entry; silent `else -> {}` fallbacks eliminated (impossible — table lookup either finds the entry or throws `UnsupportedOperationException`); `SQL.EXPLAIN` now routed (previously handler existed but dispatcher never invoked it)
 
 ---
 
@@ -192,20 +194,20 @@ for {
 
 ## Handler 路由矩阵
 
-| Category \ Action | LIST | CREATE | UPDATE | DELETE | EXECUTE | GET_DDL | INFO | GRANTS | GENERATE | DEBUG | CALL | RUN_EXPORT | RENAME | TRUNCATE |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| SCHEMA      | ✓ | ✓ | — | ✓ | — | — | — | — | — | — | — | — | — | — |
-| USER        | ✓ | ✓ | ✓ | ✓ | — | — | — | ✓ | — | — | — | — | — | — |
-| TABLE       | ✓ | ✓ | ✓ | ✓ | — | ✓ | — | — | — | — | — | — | ✓ | ✓ |
-| DATA        | ✓ | ✓ | ✓ | ✓ | — | — | — | — | ✓ | — | — | — | — | — |
-| SQL         | — | — | — | — | ✓ | — | — | — | — | — | — | — | — | — |
-| SYSTEM      | — | — | — | — | — | — | ✓ | — | — | — | — | — | — | — |
-| FUNCTION    | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | — | — | ✓ | ✓ | — | — | — |
-| EXPORT      | — | — | — | — | — | — | — | — | — | — | — | ✓ | — | — |
-| VIEW        | ✓ | ✓ | — | ✓ | — | ✓ | — | — | — | — | — | — | — | — |
-| INDEX       | ✓ | ✓ | — | ✓ | — | — | — | — | — | — | — | — | — | — |
-| FOREIGN_KEY | ✓ | ✓ | — | ✓ | — | — | — | — | — | — | — | — | — | — |
-| TRIGGER     | ✓ | — | — | — | — | ✓ | — | — | — | — | — | — | — | — |
+| Category \ Action | LIST | CREATE | UPDATE | DELETE | EXECUTE | EXPLAIN | GET_DDL | INFO | GRANTS | GENERATE | DEBUG | CALL | RUN_EXPORT | RENAME | TRUNCATE |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| SCHEMA      | ✓ | ✓ | — | ✓ | — | — | — | — | — | — | — | — | — | — | — |
+| USER        | ✓ | ✓ | ✓ | ✓ | — | — | — | — | ✓ | — | — | — | — | — | — |
+| TABLE       | ✓ | ✓ | ✓ | ✓ | — | — | ✓ | — | — | — | — | — | — | ✓ | ✓ |
+| DATA        | ✓ | ✓ | ✓ | ✓ | — | — | — | — | — | ✓ | — | — | — | — | — |
+| SQL         | — | — | — | — | ✓ | ✓ | — | — | — | — | — | — | — | — | — |
+| SYSTEM      | — | — | — | — | — | — | — | ✓ | — | — | — | — | — | — | — |
+| FUNCTION    | ✓ | ✓ | ✓ | ✓ | — | — | ✓ | ✓ | — | — | ✓ | ✓ | — | — | — |
+| EXPORT      | — | — | — | — | — | — | — | — | — | — | — | — | ✓ | — | — |
+| VIEW        | ✓ | ✓ | — | ✓ | — | — | ✓ | — | — | — | — | — | — | — | — |
+| INDEX       | ✓ | ✓ | — | ✓ | — | — | — | — | — | — | — | — | — | — | — |
+| FOREIGN_KEY | ✓ | ✓ | — | ✓ | — | — | — | — | — | — | — | — | — | — | — |
+| TRIGGER     | ✓ | — | — | — | — | — | ✓ | — | — | — | — | — | — | — | — |
 
 SYSTEM 还支持 `TEST_CONNECTION` 和 `SERVER_INFO`（表中未列出）。
 
@@ -715,7 +717,7 @@ SYSTEM 还支持 `TEST_CONNECTION` 和 `SERVER_INFO`（表中未列出）。
 
 ## 测试
 
-**179 个测试全通过（0 失败，0 错误）**：
+**191 个测试全通过（0 失败，0 错误）**：
 
 ```bash
 ./gradlew test
@@ -798,4 +800,5 @@ SYSTEM 还支持 `TEST_CONNECTION` 和 `SERVER_INFO`（表中未列出）。
 | v2.2 | gRPC + 强类型 Request/Response + CLI Args | `Request.payload` 与 `Response.data` 由 `map<string, Value>` 替换为 per-Category typed protobuf 消息；IPC 选择改为 CLI 参数 |
 | v2.3 | gRPC + 强类型 Handlers end-to-end | 13 个 handler 全部接收 typed proto 消息、返回 typed `<Category><Action>Response` 消息；`TypedRequestMapper` / `TypedResponseMapper` 删除；`RequestDispatcher` 简化为薄路由层；179 测试全通过 |
 | v2.4 | gRPC + 强类型 per-list-item 消息 | 8 个 typed per-list-item 消息（`TableListItem` 等）取代遗留 `repeated google.protobuf.Value`；动态行用 typed `Row` wrapper |
-| **v2.5 (当前)** | **gRPC 1.76 + grpc-kotlin 协程服务端 + Kotlin DSL end-to-end** | gRPC 依赖 `1.68.0` → `1.76.0`，接入 `grpc-kotlin-stub 1.4.1`；服务端 `IdbEngineCoroutineImplBase`（suspend `handle()` → `Flow<Response>`）；protoc 工具链锁定 `protoc 3.25.5` + `protoc-gen-grpc-java 1.68.0` + `protoc-gen-grpc-kotlin 1.4.1`；启用 `protobuf-kotlin-lite` 生成 Kotlin DSL；13 个 handler + `RequestDispatcher` + 11 个集成测试全部切到 DSL 形态；移除 `grpc-core` / `protobuf-java-util` / `ksp` / `kotlinx-serialization-protobuf` 无用依赖；179 测试全通过 |
+| v2.5 | gRPC 1.76 + grpc-kotlin 协程服务端 + Kotlin DSL end-to-end | gRPC 依赖 `1.68.0` → `1.76.0`，接入 `grpc-kotlin-stub 1.4.1`；服务端 `IdbEngineCoroutineImplBase`（suspend `handle()` → `Flow<Response>`）；protoc 工具链锁定 `protoc 3.25.5` + `protoc-gen-grpc-java 1.68.0` + `protoc-gen-grpc-kotlin 1.4.1`；启用 `protobuf-kotlin-lite` 生成 Kotlin DSL；13 个 handler + `RequestDispatcher` + 11 个集成测试全部切到 DSL 形态；移除 `grpc-core` / `protobuf-java-util` / `ksp` / `kotlinx-serialization-protobuf` 无用依赖；179 测试全通过 |
+| **v2.6 (当前)** | **表驱动 Dispatcher + 跨切面 Envelope Options** | `RequestDispatcher` 重构：9 个 `handleX` 函数 + 11 个 `wrapTypedResponse` when 分支 → 单个 typed `routes` map（`Pair<Category, Action>` → `Route`）；新 (Category, Action) 仅需一个 map 条目；消除 `wrapTypedResponse` 中静默 `else -> {}` 兜底；`SQL.EXPLAIN` 路由打通（之前 handler 存在但 dispatcher 未路由）。新增 `RequestOptions { trace_id, dry_run, timeout_ms }`：MDC 注入 `trace_id`；`dryRun=true` + write action 直接短路返回 success（不修改数据库）；`timeoutMs>0` 包 `withTimeoutOrNull` 超时返回 `error="timeout"`。`if_exists` / `if_not_exists` 在 SCHEMA/TABLE/INDEX/FOREIGN_KEY 路径下贯通（v2.6 之前仅 VIEW/FUNCTION.DELETE 支持）。191 测试全通过（128 engine + 63 H2）|

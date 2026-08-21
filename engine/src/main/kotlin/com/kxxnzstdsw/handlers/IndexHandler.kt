@@ -58,7 +58,8 @@ object IndexHandler {
         val connection = PoolManager.getConnection(config, schema)
         val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
-            dialect.createIndex(conn, req.tableName, req.indexName, req.columnsList, req.unique)
+            val ifNotExists = req.hasIfNotExists() && req.ifNotExists
+            dialect.createIndex(conn, req.tableName, req.indexName, req.columnsList, req.unique, ifNotExists)
             indexCreateResponse {
                 created = req.indexName
                 tableName = req.tableName
@@ -77,7 +78,8 @@ object IndexHandler {
         val connection = PoolManager.getConnection(config, schema)
         val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
-            dialect.dropIndex(conn, req.indexName, tableName)
+            val ifExists = req.hasIfExists() && req.ifExists
+            dialect.dropIndex(conn, req.indexName, tableName, ifExists)
             indexDeleteResponse { deleted = req.indexName }
         }
     }

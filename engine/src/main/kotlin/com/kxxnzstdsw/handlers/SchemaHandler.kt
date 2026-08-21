@@ -62,7 +62,8 @@ object SchemaHandler {
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
-            dialect.createSchema(conn, req.name, req.optionsMap)
+            val ifNotExists = req.hasIfNotExists() && req.ifNotExists
+            dialect.createSchema(conn, req.name, req.optionsMap, ifNotExists)
             schemaCreateResponse { created = req.name }
         }
     }
@@ -73,7 +74,8 @@ object SchemaHandler {
         val dialect = DialectLoader.getDialect(config.driver)
 
         return@withContext connection.use { conn ->
-            dialect.deleteSchema(conn, req.name)
+            val ifExists = req.hasIfExists() && req.ifExists
+            dialect.deleteSchema(conn, req.name, ifExists)
             schemaDeleteResponse { deleted = req.name }
         }
     }

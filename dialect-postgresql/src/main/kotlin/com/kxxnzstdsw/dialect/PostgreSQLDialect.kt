@@ -111,18 +111,20 @@ class PostgreSQLDialect : DatabaseDialect {
         schemas
     }
 
-    override suspend fun createSchema(conn: Connection, name: String, options: Map<String, String>): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun createSchema(conn: Connection, name: String, options: Map<String, String>, ifNotExists: Boolean): Boolean = withContext(Dispatchers.IO) {
         val safeName = sanitizeIdentifier(name, "schema name")
         conn.createStatement().use { stmt ->
-            stmt.execute("CREATE SCHEMA ${quoteIdentifier(safeName)}")
+            val ifClause = if (ifNotExists) "IF NOT EXISTS " else ""
+            stmt.execute("CREATE SCHEMA ${ifClause}${quoteIdentifier(safeName)}")
         }
         true
     }
 
-    override suspend fun deleteSchema(conn: Connection, name: String): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun deleteSchema(conn: Connection, name: String, ifExists: Boolean): Boolean = withContext(Dispatchers.IO) {
         val safeName = sanitizeIdentifier(name, "schema name")
         conn.createStatement().use { stmt ->
-            stmt.execute("DROP SCHEMA ${quoteIdentifier(safeName)} CASCADE")
+            val ifClause = if (ifExists) "IF EXISTS " else ""
+            stmt.execute("DROP SCHEMA ${ifClause}${quoteIdentifier(safeName)} CASCADE")
         }
         true
     }
@@ -1466,7 +1468,8 @@ class PostgreSQLDialect : DatabaseDialect {
         tableName: String,
         indexName: String,
         columns: List<String>,
-        unique: Boolean
+        unique: Boolean,
+        ifNotExists: Boolean
     ): Boolean = withContext(Dispatchers.IO) {
         val safeTable = sanitizeIdentifier(tableName, "table name")
         val safeIndex = sanitizeIdentifier(indexName, "index name")
@@ -1474,6 +1477,7 @@ class PostgreSQLDialect : DatabaseDialect {
         val sql = buildString {
             if (unique) append("CREATE UNIQUE INDEX ")
             else append("CREATE INDEX ")
+            if (ifNotExists) append("IF NOT EXISTS ")
             append(quoteIdentifier(safeIndex))
             append(" ON ${quoteIdentifier(safeTable)} ($safeCols)")
         }
@@ -1481,10 +1485,11 @@ class PostgreSQLDialect : DatabaseDialect {
         true
     }
 
-    override suspend fun dropIndex(conn: Connection, indexName: String, tableName: String?): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun dropIndex(conn: Connection, indexName: String, tableName: String?, ifExists: Boolean): Boolean = withContext(Dispatchers.IO) {
         val safeIndex = sanitizeIdentifier(indexName, "index name")
         conn.createStatement().use { stmt ->
-            stmt.execute("DROP INDEX IF EXISTS ${quoteIdentifier(safeIndex)}")
+            val ifClause = if (ifExists) "IF EXISTS " else ""
+            stmt.execute("DROP INDEX ${ifClause}${quoteIdentifier(safeIndex)}")
         }
         true
     }
@@ -1551,11 +1556,12 @@ class PostgreSQLDialect : DatabaseDialect {
         true
     }
 
-    override suspend fun dropForeignKey(conn: Connection, tableName: String, fkName: String): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun dropForeignKey(conn: Connection, tableName: String, fkName: String, ifExists: Boolean): Boolean = withContext(Dispatchers.IO) {
         val safeTable = sanitizeIdentifier(tableName, "table name")
         val safeFk = sanitizeIdentifier(fkName, "foreign key name")
         conn.createStatement().use { stmt ->
-            stmt.execute("ALTER TABLE ${quoteIdentifier(safeTable)} DROP CONSTRAINT ${quoteIdentifier(safeFk)}")
+            val ifClause = if (ifExists) "IF EXISTS " else ""
+            stmt.execute("ALTER TABLE ${quoteIdentifier(safeTable)} DROP CONSTRAINT ${ifClause}${quoteIdentifier(safeFk)}")
         }
         true
     }

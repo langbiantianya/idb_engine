@@ -45,10 +45,12 @@ class MySQLDialect : DatabaseDialect {
         listOf(database)
     }
 
-    override suspend fun createSchema(conn: Connection, name: String, options: Map<String, String>): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun createSchema(conn: Connection, name: String, options: Map<String, String>, ifNotExists: Boolean): Boolean = withContext(Dispatchers.IO) {
         val safeName = sanitizeIdentifier(name, "schema name")
         val sql = buildString {
-            append("CREATE DATABASE ${quoteIdentifier(safeName)}")
+            append("CREATE DATABASE ")
+            if (ifNotExists) append("IF NOT EXISTS ")
+            append(quoteIdentifier(safeName))
             options["charset"]?.let { append(" CHARACTER SET $it") }
             options["collate"]?.let { append(" COLLATE $it") }
         }
@@ -56,10 +58,11 @@ class MySQLDialect : DatabaseDialect {
         true
     }
 
-    override suspend fun deleteSchema(conn: Connection, name: String): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun deleteSchema(conn: Connection, name: String, ifExists: Boolean): Boolean = withContext(Dispatchers.IO) {
         val safeName = sanitizeIdentifier(name, "schema name")
         conn.createStatement().use { stmt ->
-            stmt.execute("DROP DATABASE ${quoteIdentifier(safeName)}")
+            val ifClause = if (ifExists) "IF EXISTS " else ""
+            stmt.execute("DROP DATABASE ${ifClause}${quoteIdentifier(safeName)}")
         }
         true
     }
@@ -893,7 +896,8 @@ class MySQLDialect : DatabaseDialect {
         tableName: String,
         indexName: String,
         columns: List<String>,
-        unique: Boolean
+        unique: Boolean,
+        ifNotExists: Boolean
     ): Boolean = withContext(Dispatchers.IO) {
         val safeTable = sanitizeIdentifier(tableName, "table name")
         val safeIndex = sanitizeIdentifier(indexName, "index name")
@@ -901,6 +905,7 @@ class MySQLDialect : DatabaseDialect {
         val sql = buildString {
             if (unique) append("CREATE UNIQUE INDEX ")
             else append("CREATE INDEX ")
+            if (ifNotExists) append("IF NOT EXISTS ")
             append(quoteIdentifier(safeIndex))
             append(" ON ${quoteIdentifier(safeTable)} ($safeCols)")
         }
@@ -908,13 +913,14 @@ class MySQLDialect : DatabaseDialect {
         true
     }
 
-    override suspend fun dropIndex(conn: Connection, indexName: String, tableName: String?): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun dropIndex(conn: Connection, indexName: String, tableName: String?, ifExists: Boolean): Boolean = withContext(Dispatchers.IO) {
         val safeIndex = sanitizeIdentifier(indexName, "index name")
         val safeTable = tableName?.let { sanitizeIdentifier(it, "table name") }
+        val ifClause = if (ifExists) "IF EXISTS " else ""
         val sql = if (safeTable != null) {
-            "DROP INDEX ${quoteIdentifier(safeIndex)} ON ${quoteIdentifier(safeTable)}"
+            "DROP INDEX ${ifClause}${quoteIdentifier(safeIndex)} ON ${quoteIdentifier(safeTable)}"
         } else {
-            "DROP INDEX ${quoteIdentifier(safeIndex)}"
+            "DROP INDEX ${ifClause}${quoteIdentifier(safeIndex)}"
         }
         conn.createStatement().use { stmt -> stmt.execute(sql) }
         true
@@ -979,10 +985,19 @@ class MySQLDialect : DatabaseDialect {
         true
     }
 
-    override suspend fun dropForeignKey(conn: Connection, tableName: String, fkName: String): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun dropForeignKey(conn: Connection, tableName: String, fkName: String, ifExists: Boolean): Boolean = withContext(Dispatchers.IO) {
         val safeTable = sanitizeIdentifier(tableName, "table name")
         val safeFk = sanitizeIdentifier(fkName, "foreign key name")
         conn.createStatement().use { stmt ->
+            // MySQL 无 DROP FOREIGN KEY IF EXISTS — 预查询 information_schema
+            if (ifExists) {
+                val exists = stmt.executeQuery(
+                    "SELECT 1 FROM information_schema.table_constraints " +
+                    "WHERE table_schema=DATABASE() AND table_name='$safeTable' " +
+                    "AND constraint_name='$safeFk' LIMIT 1"
+                ).use { rs -> rs.next() }
+                if (!exists) return@withContext true
+            }
             stmt.execute("ALTER TABLE ${quoteIdentifier(safeTable)} DROP FOREIGN KEY ${quoteIdentifier(safeFk)}")
         }
         true

@@ -66,13 +66,15 @@ interface DatabaseDialect {
      * Create a new schema/database
      * @param name schema/database name
      * @param options 可选项（如 MySQL: charset, collate）
+     * @param ifNotExists `true` → `CREATE ... IF NOT EXISTS`（错误幂等：已存在时不抛错）
      */
-    suspend fun createSchema(conn: Connection, name: String, options: Map<String, String> = emptyMap()): Boolean
+    suspend fun createSchema(conn: Connection, name: String, options: Map<String, String> = emptyMap(), ifNotExists: Boolean = false): Boolean
 
     /**
      * Delete a schema/database
+     * @param ifExists `true` → `DROP ... IF EXISTS`（缺失对象时不抛错）
      */
-    suspend fun deleteSchema(conn: Connection, name: String): Boolean
+    suspend fun deleteSchema(conn: Connection, name: String, ifExists: Boolean = false): Boolean
 
     /**
      * List all tables in a specific database/schema
@@ -402,7 +404,8 @@ interface DatabaseDialect {
         tableName: String,
         indexName: String,
         columns: List<String>,
-        unique: Boolean
+        unique: Boolean,
+        ifNotExists: Boolean = false
     ): Boolean {
         throw UnsupportedOperationException("$driverName 不支持创建索引")
     }
@@ -410,8 +413,9 @@ interface DatabaseDialect {
     /**
      * 删除索引
      * @param tableName 部分方言需要（如 MySQL），可为空
+     * @param ifExists `true` → `DROP INDEX IF EXISTS <name>`（索引不存在时不抛错）
      */
-    suspend fun dropIndex(conn: Connection, indexName: String, tableName: String?): Boolean {
+    suspend fun dropIndex(conn: Connection, indexName: String, tableName: String?, ifExists: Boolean = false): Boolean {
         throw UnsupportedOperationException("$driverName 不支持删除索引")
     }
 
@@ -445,7 +449,7 @@ interface DatabaseDialect {
     /**
      * 删除外键
      */
-    suspend fun dropForeignKey(conn: Connection, tableName: String, fkName: String): Boolean {
+    suspend fun dropForeignKey(conn: Connection, tableName: String, fkName: String, ifExists: Boolean = false): Boolean {
         throw UnsupportedOperationException("$driverName 不支持删除外键")
     }
 

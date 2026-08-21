@@ -92,8 +92,9 @@ message SchemaListRequest {
 message SchemaCreateRequest {
   string name = 1;
   map<string, string> options = 2;  // MySQL charset/collate
+  optional bool if_not_exists = 3; // CREATE SCHEMA/DATABASE IF NOT EXISTS <name>
 }
-message SchemaDeleteRequest { string name = 1; }
+message SchemaDeleteRequest { string name = 1; optional bool if_exists = 2; }
 message SchemaRequest {
   oneof body {
     SchemaListRequest   list   = 1;
@@ -153,6 +154,7 @@ message TableCreateRequest {
   repeated ColumnDef columns = 2;
   map<string, string> options = 3;
   string schema = 4;
+  optional bool if_not_exists = 5;
 }
 message TableUpdateRequest {
   string table_name = 1;
@@ -168,7 +170,7 @@ message TableRenameRequest {
   string new_name   = 3;
   string schema     = 4;
 }
-message TableDeleteRequest    { string table_name = 1; string schema = 2; }
+message TableDeleteRequest    { string table_name = 1; string schema = 2; optional bool if_exists = 3; }
 message TableTruncateRequest  { string table_name = 1; string schema = 2; }
 message TableRequest {
   oneof body {
@@ -288,11 +290,13 @@ message IndexCreateRequest {
   repeated string columns = 3;
   bool   unique = 4;
   string schema = 5;
+  optional bool if_not_exists = 6;
 }
 message IndexDeleteRequest {
   string index_name = 1;
   string table_name = 2;
   string schema = 3;
+  optional bool if_exists = 4;
 }
 message IndexRequest {
   oneof body {
@@ -318,6 +322,7 @@ message ForeignKeyDeleteRequest {
   string table_name = 1;
   string fk_name    = 2;
   string schema     = 3;
+  optional bool if_exists = 4;
 }
 message ForeignKeyRequest {
   oneof body {
@@ -361,6 +366,9 @@ message Request {
   Action   action   = 3;
   ConnectionConfig connection = 4;
 
+  // Cross-cutting options (v2.6): applied uniformly to all (Category, Action) routes.
+  RequestOptions options = 5;
+
   oneof body {
     SystemRequest    system_request    = 10;
     SchemaRequest    schema_request    = 11;
@@ -375,6 +383,24 @@ message Request {
     TriggerRequest   trigger_request   = 20;
     ExportRequest    export_request    = 21;
   }
+}
+
+// ============================================================================
+// Cross-cutting Request options (v2.6)
+// ============================================================================
+//
+// Read by the dispatcher before invoking any handler.
+// - trace_id:   MDC propagation key — appears in every log line for this request.
+// - dry_run:    write actions (CREATE/UPDATE/DELETE/TRUNCATE/RENAME/RUN_EXPORT/
+//               GENERATE) execute inside a transaction that is always rolled back.
+//               Read actions pass through unchanged.
+// - timeout_ms: 0 = no timeout (default). >0 wraps the handler call in
+//               withTimeoutOrNull; on cancel the dispatcher emits a Response with
+//               success=false, error="Request timed out after Nms".
+message RequestOptions {
+  string trace_id   = 1;
+  bool   dry_run    = 2;
+  int32  timeout_ms = 3;
 }
 
 // ============================================================================
