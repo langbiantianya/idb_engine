@@ -12,10 +12,10 @@ luajava = "4.1.0"
 poi = "5.5.1"
 parquet = "1.17.1"
 hadoop = "3.5.0"
-grpc = "1.76.0"
-grpc-kotlin = "1.4.1"
-protobuf = "4.28.2"
-protobuf-plugin = "0.9.4"
+grpc = "1.83.1"
+grpc-kotlin = "1.5.0"
+protobuf = "4.35.1"
+protobuf-plugin = "0.10.0"
 
 [libraries]
 kotlin-gradle-plugin = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin", version.ref = "kotlin" }
@@ -43,15 +43,9 @@ poi-ooxml = { module = "org.apache.poi:poi-ooxml", version.ref = "poi" }
 parquet-hadoop = { module = "org.apache.parquet:parquet-hadoop", version.ref = "parquet" }
 hadoop-common = { module = "org.apache.hadoop:hadoop-common", version.ref = "hadoop" }
 
-# gRPC — 统一服务端 IPC 协议
-# grpc-stub: io.grpc.Server / ServerBuilder（transport.serverBuilder() 调用）
-# grpc-protobuf: io.grpc.protobuf.ProtoUtils（grpc-kotlin 生成的 stub 内部依赖的 Java 类型）
-# grpc-netty-shaded: io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder + Netty（IPC transport）
-# grpc-kotlin-stub: io.grpc.kotlin.*（生成代码 IdbEngineGrpcKt 的协程 stub 与 IdbEngineCoroutineImplBase）
-# protobuf-kotlin-lite: com.google.protobuf.kotlin.*（生成代码 *Kt DSL 与 .Dsl 内部类）
-#   grpc-core / grpc-api / grpc-context / grpc-util 由 grpc-stub / grpc-protobuf 传递依赖
 grpc-stub = { module = "io.grpc:grpc-stub", version.ref = "grpc" }
 grpc-protobuf = { module = "io.grpc:grpc-protobuf", version.ref = "grpc" }
+protobuf-java = { module = "com.google.protobuf:protobuf-java", version.ref = "protobuf" }
 grpc-netty-shaded = { module = "io.grpc:grpc-netty-shaded", version.ref = "grpc" }
 grpc-kotlin-stub = { module = "io.grpc:grpc-kotlin-stub", version.ref = "grpc-kotlin" }
 protobuf-kotlin-lite = { module = "com.google.protobuf:protobuf-kotlin-lite", version.ref = "protobuf" }
