@@ -139,6 +139,7 @@ object TableHandler {
                 conn.createStatement().use { it.execute(stmt) }
             }
 
+            DataHandler.invalidateColumnTypeCache(config.driver, config.database, schema, req.tableName)
             tableCreateResponse { created = req.tableName }
         }
     }
@@ -183,6 +184,7 @@ object TableHandler {
             }
 
             conn.createStatement().use { it.execute(sql) }
+            DataHandler.invalidateColumnTypeCache(config.driver, config.database, schema, req.tableName)
             tableUpdateResponse {
                 tableName = req.tableName
                 operation = req.operation
@@ -211,6 +213,7 @@ object TableHandler {
             val ifClause = if (req.hasIfExists() && req.ifExists) "IF EXISTS " else ""
             val sql = "DROP TABLE ${ifClause}${dialect.quoteIdentifier(req.tableName)}"
             conn.createStatement().use { it.execute(sql) }
+            DataHandler.invalidateColumnTypeCache(config.driver, config.database, schema, req.tableName)
             tableDeleteResponse { deleted = req.tableName }
         }
     }
@@ -226,6 +229,8 @@ object TableHandler {
         val dialect = DialectLoader.getDialect(config.driver)
         return@withContext connection.use { conn ->
             dialect.renameTable(conn, oldName, req.newName)
+            DataHandler.invalidateColumnTypeCache(config.driver, config.database, schema, oldName)
+            DataHandler.invalidateColumnTypeCache(config.driver, config.database, schema, req.newName)
             tableRenameResponse {
                 renamed = oldName
                 newName = req.newName
@@ -242,6 +247,7 @@ object TableHandler {
 
         return@withContext connection.use { conn ->
             dialect.truncateTable(conn, req.tableName)
+            DataHandler.invalidateColumnTypeCache(config.driver, config.database, schema, req.tableName)
             tableTruncateResponse { truncated = req.tableName }
         }
     }

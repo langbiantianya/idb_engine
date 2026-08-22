@@ -3,6 +3,7 @@ package com.kxxnzstdsw.ipc
 import com.kxxnzstdsw.ipc.impl.NamedPipeIpcTransport
 import com.kxxnzstdsw.ipc.impl.TcpIpcTransport
 import com.kxxnzstdsw.ipc.impl.UnixSocketIpcTransport
+import com.kxxnzstdsw.testutil.TestIds
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.condition.EnabledOnOs
 import org.junit.jupiter.api.condition.OS
@@ -37,7 +38,7 @@ class IpcTransportTest {
     @Test
     @EnabledOnOs(OS.LINUX, OS.MAC, OS.FREEBSD)
     fun `UnixSocketIpcTransport exposes unix scheme on POSIX`() {
-        val path = System.getProperty("java.io.tmpdir") + "/idb-engine-test-${System.nanoTime()}.sock"
+        val path = System.getProperty("java.io.tmpdir") + "/" + TestIds.uniqueName("idb-engine-test") + ".sock"
         val t = UnixSocketIpcTransport(IpcConfig(kind = IpcKind.UNIX, udsPath = path))
         try {
             assertEquals("unix", t.scheme())
@@ -53,7 +54,7 @@ class IpcTransportTest {
     @Test
     fun `NamedPipeIpcTransport exposes pipe scheme but serverBuilder throws (grpc limitation)`() {
         val t = NamedPipeIpcTransport(
-            IpcConfig(kind = IpcKind.PIPE, pipeName = "test-${System.nanoTime()}")
+            IpcConfig(kind = IpcKind.PIPE, pipeName = TestIds.uniqueName("test"))
         )
         assertEquals("pipe", t.scheme())
         assertTrue(t.displayTarget().startsWith("pipe:"))

@@ -8,7 +8,6 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import java.sql.Connection
 import java.sql.DriverManager
-import java.util.UUID
 
 /**
  * H2 测试基础类 — 为每个测试提供独立 in-memory H2 数据库。
@@ -36,7 +35,7 @@ import java.util.UUID
 abstract class H2Fixture {
 
     protected val dialect = H2Dialect()
-    protected val dbName: String = "test_${UUID.randomUUID().toString().replace("-", "")}"
+    protected val dbName: String = TestIds.uniqueName("test")
     protected val config: ConnectionConfig = ConnectionConfig.newBuilder()
         .setDriver("H2")
         .setHost("mem")

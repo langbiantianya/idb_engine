@@ -10,7 +10,9 @@ import com.kxxnzstdsw.grpc.row
 import com.kxxnzstdsw.loader.DialectLoader
 import com.kxxnzstdsw.pool.PoolManager
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
@@ -42,31 +44,52 @@ object GenerateHandler {
     )
     private val ALPHANUMERIC = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
+    /** 单批 INSERT 行数 — addBatch/executeBatch 减少往返 */
+    private const val BATCH_SIZE = 100
+
+    /** Lua 回调与 collector 之间传递进度帧的通道容量 */
+    private const val PROGRESS_CHANNEL_CAPACITY = 1024
+
     /**
-     * 造数状态：跨 insert() / lastId() 共享的可变上下文
+     * 造数状态：跨 insert() / lastId() 共享的可变上下文。
+     *
+     * 注：[onProgress] 不再使用 — 进度通过 [progressChannel] trySend 传给 collector,
+     * 避免 JFunction 内 runBlocking { } 每行分配一个 EventLoop(1M 行 = 1M EventLoop)。
      */
     private class GenerateState(
         val conn: Connection,
         val dialect: DatabaseDialect,
         val scriptIndex: Int,
         val totalScripts: Int,
-        val onProgress: (suspend (GenerateProgressFrame) -> Unit)?,
+        val progressChannel: Channel<GenerateProgressFrame>,
         var currentTable: String = "",
         var currentStmt: PreparedStatement? = null,
         var currentColumns: List<String>? = null,
         var currentSql: String = "",
         var totalInserted: Long = 0,
         var scriptInserted: Long = 0,
-        var lastGeneratedId: Long? = null
+        var lastGeneratedId: Long? = null,
+        var batchPending: Int = 0
     ) {
         fun closeStmt() {
+            // 关闭前 flush 当前批 — 否则最后 < BATCH_SIZE 行的 INSERT 不会执行
+            if (batchPending > 0) {
+                flushBatch(this, final = true)
+            }
             currentStmt?.close()
             currentStmt = null
+            currentColumns = null
+            batchPending = 0
         }
     }
 
     /**
      * 流式造数：每条 INSERT 实时通过 [onProgress] 回调一帧 [GenerateProgressFrame]。
+     *
+     * 性能优化(v2.8+):
+     * - JFunction 内不再 runBlocking 桥接 suspend,而是 [Channel.trySend] 到一个
+     *   独立 collector 协程 — 消除每行 EventLoop 分配。
+     * - INSERT 用 addBatch + executeBatch,每 BATCH_SIZE 行一次往返。
      */
     suspend fun execute(
         config: ConnectionConfig,
@@ -82,20 +105,40 @@ object GenerateHandler {
 
         connection.use { conn ->
             for ((index, tableConfig) in req.tablesList.withIndex()) {
+                val channel = Channel<GenerateProgressFrame>(
+                    capacity = PROGRESS_CHANNEL_CAPACITY,
+                    onBufferOverflow = BufferOverflow.DROP_OLDEST
+                )
                 val state = GenerateState(
                     conn = conn, dialect = dialect,
                     scriptIndex = index, totalScripts = req.tablesList.size,
-                    onProgress = onProgress
+                    progressChannel = channel
                 )
 
-                createLuaEngine(req.luaVersion.ifBlank { "luajit" }).use { L ->
-                    L.openLibraries()
-                    applySandbox(L)
-                    registerHelpers(L, state)
-                    L.run(tableConfig.script)
+                // Collector: 从 channel 读帧,调用 caller 提供的 onProgress 回调
+                val collectorJob = launch(Dispatchers.IO) {
+                    for (frame in channel) {
+                        try {
+                            onProgress?.invoke(frame)
+                        } catch (e: Exception) {
+                            logger.warn("Progress callback failed: ${e.message}")
+                        }
+                    }
                 }
 
-                state.closeStmt()
+                try {
+                    createLuaEngine(req.luaVersion.ifBlank { "luajit" }).use { L ->
+                        L.openLibraries()
+                        applySandbox(L)
+                        registerHelpers(L, state)
+                        L.run(tableConfig.script)
+                    }
+                    state.closeStmt()
+                } finally {
+                    // 关闭通道让 collector 退出
+                    channel.close()
+                    collectorJob.join()
+                }
             }
         }
     }
@@ -161,18 +204,39 @@ object GenerateHandler {
         }
     }
 
+    /** 表/列变化或批满时调用 — flush 当前批,可选地重建 stmt */
+    private fun flushBatch(state: GenerateState, final: Boolean = false) {
+        val stmt = state.currentStmt ?: return
+        if (state.batchPending == 0) return
+        stmt.executeBatch()
+        state.batchPending = 0
+        // 取最后一条的 generated key (lastId 仍只关心最后一张表)
+        if (final) {
+            try {
+                stmt.generatedKeys.use { rs ->
+                    var last: Long? = null
+                    while (rs.next()) last = rs.getLong(1)
+                    if (last != null) state.lastGeneratedId = last
+                }
+            } catch (e: Exception) {
+                logger.debug("Could not retrieve generated key: ${e.message}")
+            }
+        }
+    }
+
     private fun registerHelpers(L: Lua, state: GenerateState) {
 
-        // ── insert(tableName, rowTable) — 逐条插入 + 实时流式回报 ──
+        // ── insert(tableName, rowTable) — 逐条绑定 + addBatch + 流式回报 ──
         L.push(JFunction { lua ->
             if (!lua.isTable(2)) return@JFunction 0
 
             val tableName = lua.toString(1) ?: return@JFunction 0
             val row = readLuaTable(lua, 2)
 
-            // 表名或列结构变化时重建 PreparedStatement
+            // 表名或列结构变化时 flush 当前批 + 重建 PreparedStatement
             val columns = state.currentColumns
             if (tableName != state.currentTable || columns == null || row.keys.toList() != columns) {
+                flushBatch(state, final = false)
                 state.closeStmt()
                 val cols = row.keys.toList()
                 val colList = cols.joinToString(", ") { state.dialect.quoteIdentifier(it) }
@@ -185,48 +249,41 @@ object GenerateHandler {
             }
 
             bindRow(state.currentStmt!!, state.currentColumns!!, row)
-            state.currentStmt!!.executeUpdate()
+            state.currentStmt!!.addBatch()
+            state.batchPending++
 
-            // 获取自增 ID
-            try {
-                state.currentStmt!!.generatedKeys.use { rs ->
-                    if (rs.next()) state.lastGeneratedId = rs.getLong(1)
-                }
-            } catch (e: Exception) {
-                logger.debug("Could not retrieve generated key: ${e.message}")
+            // 批满 flush
+            if (state.batchPending >= BATCH_SIZE) {
+                flushBatch(state, final = false)
             }
 
             state.totalInserted++
             state.scriptInserted++
 
-            // 实时流式回报（包含 SQL 和实际插入的数据）
-            state.onProgress?.let { cb ->
-                runBlocking {
-                    val rowProto = row {
-                        row.forEach { (k, v) ->
-                            val value = when (v) {
-                                null -> PayloadAdapter.toValue(JsonNull)
-                                is Long -> PayloadAdapter.toValue(JsonPrimitive(v))
-                                is Double -> PayloadAdapter.toValue(JsonPrimitive(v))
-                                is Boolean -> PayloadAdapter.toValue(JsonPrimitive(v))
-                                else -> PayloadAdapter.toValue(JsonPrimitive(v.toString()))
-                            }
-                            values.put(k, value)
-                        }
+            // 非阻塞 trySend — JFunction 内不分配 EventLoop
+            val rowProto = row {
+                row.forEach { (k, v) ->
+                    val value = when (v) {
+                        null -> PayloadAdapter.toValue(JsonNull)
+                        is Long -> PayloadAdapter.toValue(JsonPrimitive(v))
+                        is Double -> PayloadAdapter.toValue(JsonPrimitive(v))
+                        is Boolean -> PayloadAdapter.toValue(JsonPrimitive(v))
+                        else -> PayloadAdapter.toValue(JsonPrimitive(v.toString()))
                     }
-                    cb(
-                        generateProgressFrame {
-                            table = state.currentTable
-                            inserted = state.totalInserted
-                            scriptInserted = state.scriptInserted
-                            scriptIndex = state.scriptIndex + 1
-                            totalScripts = state.totalScripts
-                            sql = state.currentSql
-                            data = rowProto
-                        }
-                    )
+                    values.put(k, value)
                 }
             }
+            val frame = generateProgressFrame {
+                table = state.currentTable
+                inserted = state.totalInserted
+                scriptInserted = state.scriptInserted
+                scriptIndex = state.scriptIndex + 1
+                totalScripts = state.totalScripts
+                sql = state.currentSql
+                data = rowProto
+            }
+            state.progressChannel.trySend(frame)
+
             0
         })
         L.setGlobal("insert")
@@ -307,7 +364,10 @@ object GenerateHandler {
 
         L.push(JFunction { lua ->
             val pfx = listOf("138","139","150","151","152","186","187","188","135","136")
-            lua.push(pfx[Random.nextInt(pfx.size)] + (1..8).joinToString("") { "${Random.nextInt(10)}" })
+            // 用 CharArray 避免每字符 toString() 分配
+            val digits = CharArray(8)
+            for (i in 0 until 8) digits[i] = ('0' + Random.nextInt(10))
+            lua.push(pfx[Random.nextInt(pfx.size)] + String(digits))
             1
         })
         L.setGlobal("random_phone")

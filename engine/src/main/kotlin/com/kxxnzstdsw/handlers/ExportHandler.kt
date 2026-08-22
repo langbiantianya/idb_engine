@@ -19,7 +19,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -99,6 +98,8 @@ object ExportHandler {
             val exportRequest = parseExportRequest(runReq)
             withContext(Dispatchers.IO) {
                 ExportEngine.export(config, exportRequest) { progress ->
+                    // 直接 emit — lambda 本就是 suspend,无需 runBlocking 桥接
+                    // (旧实现 runBlocking { emit } 每帧分配一个 EventLoop)
                     val data = buildJsonObject {
                         put("exportedRows", progress.exportedRows)
                         put("columnCount", progress.columnCount)
@@ -106,17 +107,15 @@ object ExportHandler {
                         if (progress.filePath != null) put("filePath", progress.filePath)
                         if (progress.error != null) put("error", progress.error)
                     }
-                    runBlocking {
-                        emit(
-                            exportHubResponse {
-                                this.id = id
-                                success = true
-                                stream = true
-                                end = progress.completed
-                                this.data = PayloadAdapter.toValue(data)
-                            }
-                        )
-                    }
+                    emit(
+                        exportHubResponse {
+                            this.id = id
+                            success = true
+                            stream = true
+                            end = progress.completed
+                            this.data = PayloadAdapter.toValue(data)
+                        }
+                    )
                 }
             }
         } catch (e: Exception) {

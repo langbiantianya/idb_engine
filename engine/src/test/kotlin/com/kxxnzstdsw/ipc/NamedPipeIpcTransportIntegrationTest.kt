@@ -6,11 +6,11 @@ import com.kxxnzstdsw.grpc.IdbEngineGrpc
 import com.kxxnzstdsw.grpc.Request
 import com.kxxnzstdsw.grpc.Response
 import com.kxxnzstdsw.ipc.impl.NamedPipeIpcTransport
+import com.kxxnzstdsw.testutil.TestIds
 import io.grpc.stub.StreamObserver
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertTimeout
 import java.time.Duration
-import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
@@ -31,7 +31,7 @@ class NamedPipeIpcTransportIntegrationTest {
 
     @Test
     fun `client can construct channel builder for pipe name`() {
-        val name = "idb-test-${UUID.randomUUID().toString().take(8)}"
+        val name = TestIds.uniqueName("idb-test")
         val transport = NamedPipeIpcTransport(IpcConfig(kind = IpcKind.PIPE, pipeName = name))
         transport.prepare()
         val channelBuilder = transport.channelBuilder()
@@ -42,7 +42,7 @@ class NamedPipeIpcTransportIntegrationTest {
     @Test
     fun `server builder throws UnsupportedOperationException documenting grpc limitation`() {
         assertTimeout(Duration.ofSeconds(2)) {
-            val name = "idb-test-${UUID.randomUUID().toString().take(8)}"
+            val name = TestIds.uniqueName("idb-test")
             val transport = NamedPipeIpcTransport(IpcConfig(kind = IpcKind.PIPE, pipeName = name))
             try {
                 transport.serverBuilder()

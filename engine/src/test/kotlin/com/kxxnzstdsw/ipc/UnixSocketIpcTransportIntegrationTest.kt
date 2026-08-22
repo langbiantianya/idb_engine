@@ -6,6 +6,7 @@ import com.kxxnzstdsw.grpc.IdbEngineGrpc
 import com.kxxnzstdsw.grpc.Request
 import com.kxxnzstdsw.grpc.Response
 import com.kxxnzstdsw.ipc.impl.UnixSocketIpcTransport
+import com.kxxnzstdsw.testutil.TestIds
 import io.grpc.stub.StreamObserver
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
@@ -14,7 +15,6 @@ import org.junit.jupiter.api.condition.EnabledOnOs
 import org.junit.jupiter.api.condition.OS
 import java.io.File
 import java.time.Duration
-import java.util.UUID
 import java.util.concurrent.TimeUnit
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -30,7 +30,7 @@ class UnixSocketIpcTransportIntegrationTest {
 
     private val sockFile = File(
         System.getProperty("java.io.tmpdir"),
-        "idb-engine-test-${UUID.randomUUID()}.sock"
+        TestIds.uniqueName("idb-engine-test") + ".sock"
     )
 
     private val transport = UnixSocketIpcTransport(

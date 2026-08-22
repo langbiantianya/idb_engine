@@ -48,29 +48,20 @@ class PostgreSQLDialect : DatabaseDialect {
         }
     }
 
+    override fun buildSetSearchPathSql(schema: String): String? {
+        if (schema.isBlank()) return null
+        return "SET search_path TO ${quoteIdentifier(schema)}"
+    }
+
     // region companion object — 预编译正则与常量集合
 
     companion object {
-        /** 去除单引号字符串内容（含转义引号 '' ） */
-        private val QUOTED_STRING_REGEX = Regex("'(?:[^']|'')*'")
+        /** ORDER BY 格式校验：标识符可用双引号包裹，后跟可选 ASC/DESC（v2.9 #16 用 DialectUtil 工厂生成） */
+        private val ORDER_BY_REGEX = DialectUtil.orderByRegex('"')
 
-        /** ORDER BY 格式校验：标识符可用双引号包裹，后跟可选 ASC/DESC */
-        private val ORDER_BY_REGEX = Regex(
-            """^\s*"?[\w]+"?(\s+(ASC|DESC))?(\s*,\s*"?[\w]+"?(\s+(ASC|DESC))?)?\s*$""",
-            RegexOption.IGNORE_CASE
-        )
-
-        /** 危险关键词集合（PG 额外禁止 COPY/DO） */
-        private val DANGEROUS_KEYWORDS = setOf(
-            "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE",
-            "UNION", "EXEC", "EXECUTE", "TRUNCATE", "GRANT", "REVOKE",
-            "COPY", "DO"
-        )
-
-        /** 每个关键词预编译为 \bKW\b 正则 */
-        private val DANGEROUS_KEYWORD_REGEXES: List<Regex> = DANGEROUS_KEYWORDS.map { kw ->
-            Regex("\\b$kw\\b", RegexOption.IGNORE_CASE)
-        }
+        /** 危险关键词列表（PG 额外禁止 COPY/DO，v2.9 #16 用 DialectUtil 工厂生成） */
+        private val DANGEROUS_KEYWORD_REGEXES: List<Regex> =
+            DialectUtil.buildDangerousKeywordRegexes(setOf("COPY", "DO"))
 
         /** 可带 size 后缀的类型 */
         private val SIZABLE_TYPES = setOf("VARCHAR", "CHAR", "VARBINARY", "BINARY")
@@ -367,10 +358,8 @@ class PostgreSQLDialect : DatabaseDialect {
     // region 标识符引用
 
     // 转义标识符内部的双引号（" → ""），防止跳出引用
-    override fun quoteIdentifier(identifier: String): String {
-        val escaped = identifier.replace("\"", "\"\"")
-        return "\"$escaped\""
-    }
+    override fun quoteIdentifier(identifier: String): String =
+        DialectUtil.quoteWith(identifier, '"')
 
     private fun sanitizeIdentifier(name: String, label: String): String {
         if (name.isBlank()) throw IllegalArgumentException("$label cannot be empty")
@@ -649,26 +638,14 @@ class PostgreSQLDialect : DatabaseDialect {
      * 校验 SQL 片段的安全性
      */
     override fun validateSqlFragment(sql: String, label: String) {
-        if (sql.contains(' ')) throw IllegalArgumentException("$label 包含空字节")
-        val bare = sql.replace(QUOTED_STRING_REGEX, "")
-        if (bare.contains(';')) throw IllegalArgumentException("$label 包含非法字符 ';'")
-        if (bare.contains("--") || bare.contains("/*")) throw IllegalArgumentException("$label 包含非法注释")
-        val upper = bare.uppercase()
-        for (regex in DANGEROUS_KEYWORD_REGEXES) {
-            if (regex.containsMatchIn(upper)) {
-                val kw = regex.pattern.substringAfter("\\b").substringBefore("\\b")
-                throw IllegalArgumentException("$label 包含禁止关键词: $kw")
-            }
-        }
+        DialectUtil.validateSqlFragment(sql, label, DANGEROUS_KEYWORD_REGEXES)
     }
 
     /**
      * 校验 ORDER BY 子句格式
      */
     override fun validateOrderBy(sql: String) {
-        if (!ORDER_BY_REGEX.matches(sql)) {
-            throw IllegalArgumentException("无效的 ORDER BY 格式: $sql")
-        }
+        DialectUtil.validateOrderBy(sql, ORDER_BY_REGEX)
     }
 
     // endregion

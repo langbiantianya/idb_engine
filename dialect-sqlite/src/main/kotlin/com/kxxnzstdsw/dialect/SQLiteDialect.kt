@@ -87,9 +87,8 @@ class SQLiteDialect : DatabaseDialect {
     }
 
     override fun quoteIdentifier(identifier: String): String {
-        // SQLite 支持双引号或反引号包裹；标准 SQL 双引号即可
-        val escaped = identifier.replace("\"", "\"\"")
-        return "\"$escaped\""
+        // SQLite 支持双引号（v2.9 #16 转 DialectUtil.quoteWith）
+        return DialectUtil.quoteWith(identifier, '"')
     }
 
     // region Schema / Database 导航
@@ -342,23 +341,11 @@ class SQLiteDialect : DatabaseDialect {
     // region SQL 安全校验
 
     override fun validateSqlFragment(sql: String, label: String) {
-        if (sql.contains(' ')) throw IllegalArgumentException("$label 包含空字节")
-        val bare = sql.replace(QUOTED_STRING_REGEX, "")
-        if (bare.contains(';')) throw IllegalArgumentException("$label 包含非法字符 ';'")
-        if (bare.contains("--") || bare.contains("/*")) throw IllegalArgumentException("$label 包含非法注释")
-        val upper = bare.uppercase()
-        for (regex in DANGEROUS_KEYWORD_REGEXES) {
-            if (regex.containsMatchIn(upper)) {
-                val kw = regex.pattern.substringAfter("\\b").substringBefore("\\b")
-                throw IllegalArgumentException("$label 包含禁止关键词: $kw")
-            }
-        }
+        DialectUtil.validateSqlFragment(sql, label, DANGEROUS_KEYWORD_REGEXES)
     }
 
     override fun validateOrderBy(sql: String) {
-        if (!ORDER_BY_REGEX.matches(sql)) {
-            throw IllegalArgumentException("无效的 ORDER BY 格式: $sql")
-        }
+        DialectUtil.validateOrderBy(sql, ORDER_BY_REGEX)
     }
 
     // endregion
@@ -771,23 +758,12 @@ class SQLiteDialect : DatabaseDialect {
     }
 
     companion object {
-        private val QUOTED_STRING_REGEX = Regex("'(?:[^']|'')*'")
+        /** ORDER BY 校验（v2.9 #16 用 DialectUtil 工厂） */
+        private val ORDER_BY_REGEX = DialectUtil.orderByRegex('"')
 
-        private val ORDER_BY_REGEX = Regex(
-            """^\s*"?[\w]+"?(\s+(ASC|DESC))?(\s*,\s*"?[\w]+"?(\s+(ASC|DESC))?)?\s*$""",
-            RegexOption.IGNORE_CASE
-        )
-
-        /** SQLite 危险关键词：通用集合 + SQLite 特有的 ATTACH/DETACH/PRAGMA/REPLACE */
-        private val DANGEROUS_KEYWORDS = setOf(
-            "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE",
-            "UNION", "EXEC", "EXECUTE", "TRUNCATE", "GRANT", "REVOKE",
-            "ATTACH", "DETACH", "PRAGMA", "REPLACE", "VACUUM", "REINDEX"
-        )
-
-        private val DANGEROUS_KEYWORD_REGEXES: List<Regex> = DANGEROUS_KEYWORDS.map { kw ->
-            Regex("\\b$kw\\b", RegexOption.IGNORE_CASE)
-        }
+        /** SQLite 危险关键词（v2.9 #16 用 DialectUtil 工厂） */
+        private val DANGEROUS_KEYWORD_REGEXES: List<Regex> =
+            DialectUtil.buildDangerousKeywordRegexes(setOf("ATTACH", "DETACH", "PRAGMA", "REPLACE", "VACUUM", "REINDEX"))
 
         /** SQLite 可带 size 后缀的类型 */
         private val SIZABLE_TYPES = setOf("VARCHAR", "CHAR", "NVARCHAR", "NCHAR", "DECIMAL", "NUMERIC")

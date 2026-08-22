@@ -8,6 +8,7 @@ import com.kxxnzstdsw.grpc.Request
 import com.kxxnzstdsw.grpc.dataGenerateRequest
 import com.kxxnzstdsw.grpc.generateTable
 import com.kxxnzstdsw.testutil.H2Fixture
+import com.kxxnzstdsw.testutil.TestIds
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
@@ -24,7 +25,7 @@ class DataGenerateIntegrationTest : H2Fixture() {
     private fun request(
         configure: Request.Builder.() -> Unit
     ): Request = Request.newBuilder()
-        .setId("r-gen-${System.nanoTime()}")
+        .setId(TestIds.next("r-gen"))
         .setCategory(Category.DATA)
         .setAction(Action.GENERATE)
         .setConnection(config)
@@ -33,7 +34,7 @@ class DataGenerateIntegrationTest : H2Fixture() {
 
     @Test
     fun `DATA GENERATE inserts rows via Lua script`() = runBlocking {
-        val tableName = "gen_${System.nanoTime()}"
+        val tableName = TestIds.nextSql("gen")
         // setup target table
         executeUpdate("CREATE TABLE $tableName (id INT PRIMARY KEY, name VARCHAR(64))")
 

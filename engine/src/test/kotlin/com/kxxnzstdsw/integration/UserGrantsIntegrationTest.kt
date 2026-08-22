@@ -7,6 +7,7 @@ import com.kxxnzstdsw.grpc.Request
 import com.kxxnzstdsw.grpc.UserRequest
 import com.kxxnzstdsw.grpc.userGrantsRequest
 import com.kxxnzstdsw.testutil.H2Fixture
+import com.kxxnzstdsw.testutil.TestIds
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
@@ -27,7 +28,7 @@ class UserGrantsIntegrationTest : H2Fixture() {
         action: Action,
         configure: Request.Builder.() -> Unit = {}
     ): Request = Request.newBuilder()
-        .setId("r-grants-${System.nanoTime()}")
+        .setId(TestIds.next("r-grants"))
         .setCategory(category)
         .setAction(action)
         .setConnection(config)
@@ -38,7 +39,7 @@ class UserGrantsIntegrationTest : H2Fixture() {
     fun `USER GRANTS routes through dispatcher and wraps H2 limitation as error`() = runBlocking {
         // H2 的 INFORMATION_SCHEMA 没有 SCHEMA_PRIVILEGES 表 — H2 dialect 的 grants 查询会失败
         // 验证 dispatcher 正确捕获异常并包装为 success=false Response（不向上冒泡）
-        executeUpdate("CREATE TABLE _grants_test_${System.nanoTime().toString().takeLast(8)} (id INT)")
+        executeUpdate("CREATE TABLE ${TestIds.nextSql("_grants_test")} (id INT)")
         val resp = RequestDispatcher.dispatch(
             request(Category.USER, Action.GRANTS) {
                 setUserRequest(UserRequest.newBuilder()

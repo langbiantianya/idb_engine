@@ -117,6 +117,19 @@ interface DatabaseDialect {
     }
 
     /**
+     * 构建 "SET search_path / SET SCHEMA" SQL 字符串（供 HikariCP connectionInitSql 使用）。
+     * 返回 null 表示该方言不支持 schema（MySQL / SQLite 默认）。
+     * 默认实现：null。PG / H2 / DuckDB 各自覆盖。
+     *
+     * 此方法用于解决 HikariCP close() 不重置 session 变量的污染问题 —— 每次新建连接时
+     * 自动跑 connectionInitSql 还原到正确 schema 上下文。
+     *
+     * @param schema schema 名称
+     * @return SET 语句的 SQL 字符串，无需 SET 时返回 null
+     */
+    fun buildSetSearchPathSql(schema: String): String? = null
+
+    /**
      * 列出所有 database（导航第一级：MySQL 的 SHOW DATABASES / PG 的 pg_database / H2 的 [config.database]）。
      *
      * MySQL 默认过滤掉 information_schema / mysql / performance_schema / sys 等系统库。

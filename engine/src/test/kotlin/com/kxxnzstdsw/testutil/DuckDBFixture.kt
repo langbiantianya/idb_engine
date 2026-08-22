@@ -10,7 +10,6 @@ import org.junit.jupiter.api.BeforeEach
 import java.io.File
 import java.nio.file.Files
 import java.sql.Connection
-import java.util.UUID
 
 /**
  * DuckDB 测试基础类 — 为每个测试提供独立的临时 `.duckdb` 文件。
@@ -91,7 +90,8 @@ abstract class DuckDBFixture {
      * 创建一个唯一的 .duckdb 路径（用于并发测试避免共享）
      */
     protected fun newTempDbPath(): String {
-        return Files.createTempFile("duckdb-it-${UUID.randomUUID()}-", ".duckdb").toFile().apply {
+        val prefix = TestIds.uniqueName("duckdb-it")
+        return Files.createTempFile("$prefix-", ".duckdb").toFile().apply {
             deleteOnExit()
         }.absolutePath
     }

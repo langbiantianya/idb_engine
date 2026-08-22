@@ -33,8 +33,24 @@ import java.sql.Types
 import java.time.OffsetDateTime
 import java.time.OffsetTime
 import java.time.format.DateTimeFormatter
+import org.slf4j.LoggerFactory
+import java.util.concurrent.ConcurrentHashMap
 
 object DataHandler {
+    private val logger = LoggerFactory.getLogger(DataHandler::class.java)
+    private val LOB_TYPES = setOf("BLOB", "LONGTEXT", "BYTEA", "TEXT")
+
+    /**
+     * 流式 fetch size (JDBC 游标行数)
+     */
+    private const val STREAM_FETCH_SIZE = 100
+
+    /**
+     * 列类型缓存 — 每次 create/update/delete 都查方言 listColumns 是浪费
+     * key: "driver|database|schema|table"
+     * TableHandler.create/update/delete 时通过 [invalidateColumnTypeCache] 失效
+     */
+    private val columnTypeCache = ConcurrentHashMap<String, Map<String, String>>()
     /**
      * 流式模式（req.hasPageSize() && req.pageSize == 0）通过 [onRow] 每行回调一次；
      * 否则返回分页 [DataListPagedResponse]。
@@ -84,7 +100,7 @@ object DataHandler {
                         ResultSet.TYPE_FORWARD_ONLY,
                         ResultSet.CONCUR_READ_ONLY
                     ).use { stmt ->
-                        stmt.fetchSize = 100
+                        stmt.fetchSize = STREAM_FETCH_SIZE
                         stmt.executeQuery().use { rs ->
                             while (rs.next()) {
                                 onRow(
@@ -141,7 +157,7 @@ object DataHandler {
             for (i in 1..columnCount) {
                 val columnName = metaData.getColumnName(i)
                 val columnType = metaData.getColumnTypeName(i)
-                val value: Value = if (columnType in listOf("BLOB", "LONGTEXT", "BYTEA", "TEXT")) {
+                val value: Value = if (columnType in LOB_TYPES) {
                     PayloadAdapter.toValue(JsonPrimitive("[LOB Data]"))
                 } else {
                     PayloadAdapter.toValue(JsonPrimitive(rs.getString(i)))
@@ -228,6 +244,8 @@ object DataHandler {
 
     /**
      * 通过方言的 listColumns SPI 获取表的列类型映射（columnName -> TYPE_NAME）。
+     * 带缓存 — 高频 create/update/delete 调用避免每次都查元数据。
+     * TableHandler 应在 create/update/delete 后调用 [invalidateColumnTypeCache] 失效。
      */
     private fun loadColumnTypes(
         conn: java.sql.Connection,
@@ -236,7 +254,10 @@ object DataHandler {
         schema: String,
         tableName: String
     ): Map<String, String> {
-        return try {
+        val cacheKey = columnTypeCacheKey(driver, database, schema, tableName)
+        columnTypeCache[cacheKey]?.let { return it }
+
+        val types = try {
             val dialect = com.kxxnzstdsw.loader.DialectLoader.getDialect(driver)
             val cols = kotlinx.coroutines.runBlocking {
                 dialect.listColumns(conn, database ?: "", schema, tableName)
@@ -246,9 +267,24 @@ object DataHandler {
                 val type = col["type"] as? String ?: return@mapNotNull null
                 name.lowercase() to type
             }.toMap()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            // 不能确定列类型时,绑定回退到 setString() — 但需记录,避免静默丢错
+            // (可能错类型写入 — 列类型探测失败时记录以便诊断)
+            logger.warn("loadColumnTypes failed for driver=$driver table=$tableName: ${e.message}", e)
             emptyMap()
         }
+        columnTypeCache[cacheKey] = types
+        return types
+    }
+
+    private fun columnTypeCacheKey(driver: String, database: String?, schema: String, table: String): String =
+        "$driver|${database ?: ""}|$schema|$table"
+
+    /**
+     * 失效表的列类型缓存 — 由 TableHandler 在 CREATE/ADD_COLUMN/DROP_COLUMN/MODIFY_COLUMN/RENAME/DROP/TRUNCATE 后调用。
+     */
+    fun invalidateColumnTypeCache(driver: String, database: String?, schema: String, table: String) {
+        columnTypeCache.remove(columnTypeCacheKey(driver, database, schema, table))
     }
 
     private fun bindTemporal(

@@ -7,6 +7,7 @@ import com.kxxnzstdsw.grpc.Request
 import com.kxxnzstdsw.grpc.SqlRequest
 import com.kxxnzstdsw.grpc.sqlExplainRequest
 import com.kxxnzstdsw.testutil.H2Fixture
+import com.kxxnzstdsw.testutil.TestIds
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
@@ -22,7 +23,7 @@ import kotlin.test.assertTrue
 class SqlExplainRouteIntegrationTest : H2Fixture() {
 
     private fun explainRequest(sql: String): Request = Request.newBuilder()
-        .setId("r-explain-${System.nanoTime()}")
+        .setId(TestIds.next("r-explain"))
         .setCategory(Category.SQL)
         .setAction(Action.EXPLAIN)
         .setConnection(config)
@@ -33,7 +34,7 @@ class SqlExplainRouteIntegrationTest : H2Fixture() {
 
     @Test
     fun `SQL EXPLAIN is routed via dispatcher and returns non-blank rows`() = runBlocking {
-        executeUpdate("CREATE TABLE t_explain_${System.nanoTime().toString().takeLast(8)} (id INT, name VARCHAR(64))")
+        executeUpdate("CREATE TABLE ${TestIds.nextSql("t_explain")} (id INT, name VARCHAR(64))")
         val resp = RequestDispatcher.dispatch(
             explainRequest("SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME LIKE 'T_EXPLAIN_%'")
         ).toList()

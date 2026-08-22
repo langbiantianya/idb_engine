@@ -9,6 +9,7 @@ import com.kxxnzstdsw.grpc.Request
 import com.kxxnzstdsw.grpc.RequestOptions
 import com.kxxnzstdsw.grpc.TableRequest
 import com.kxxnzstdsw.testutil.H2Fixture
+import com.kxxnzstdsw.testutil.TestIds
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
@@ -31,7 +32,7 @@ class EnvelopeOptionsIntegrationTest : H2Fixture() {
         action: Action,
         configure: Request.Builder.() -> Unit
     ): Request = Request.newBuilder()
-        .setId("r-env-${System.nanoTime()}")
+        .setId(TestIds.next("r-env"))
         .setCategory(category)
         .setAction(action)
         .setConnection(config)
@@ -40,7 +41,7 @@ class EnvelopeOptionsIntegrationTest : H2Fixture() {
 
     @Test
     fun `dryRun short-circuits TABLE CREATE without executing`() = runBlocking {
-        val tableName = "dryrun_${System.nanoTime()}"
+        val tableName = TestIds.nextSql("dryrun")
         val resp = RequestDispatcher.dispatch(
             baseRequest(Category.TABLE, Action.CREATE) {
                 setOptions(RequestOptions.newBuilder().setDryRun(true).build())
@@ -77,7 +78,7 @@ class EnvelopeOptionsIntegrationTest : H2Fixture() {
 
     @Test
     fun `dryRun on DATA CREATE inserts nothing`() = runBlocking {
-        val tableName = "dryrun_data_${System.nanoTime()}"
+        val tableName = TestIds.nextSql("dryrun_data")
         executeUpdate("CREATE TABLE $tableName (id INT PRIMARY KEY, name VARCHAR(64))")
         val resp = RequestDispatcher.dispatch(
             baseRequest(Category.DATA, Action.CREATE) {

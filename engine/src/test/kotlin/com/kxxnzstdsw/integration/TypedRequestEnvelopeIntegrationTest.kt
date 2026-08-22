@@ -12,6 +12,7 @@ import com.kxxnzstdsw.grpc.SqlRequest
 import com.kxxnzstdsw.grpc.SystemRequest
 import com.kxxnzstdsw.grpc.TableRequest
 import com.kxxnzstdsw.testutil.H2Fixture
+import com.kxxnzstdsw.testutil.TestIds
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.intOrNull
@@ -103,7 +104,7 @@ class TypedRequestEnvelopeIntegrationTest : H2Fixture() {
 
     @Test
     fun `TABLE CREATE then LIST and DELETE via typed envelope`() = runBlocking {
-        val tableName = "users_${System.nanoTime()}"
+        val tableName = TestIds.nextSql("users")
         // CREATE
         val createResp = RequestDispatcher.dispatch(
             request(Category.TABLE, Action.CREATE) {
@@ -151,7 +152,7 @@ class TypedRequestEnvelopeIntegrationTest : H2Fixture() {
 
     @Test
     fun `DATA CREATE then LIST paged via typed envelope`() = runBlocking {
-        val tableName = "data_${System.nanoTime()}"
+        val tableName = TestIds.nextSql("data")
         // CREATE TABLE
         executeUpdate("CREATE TABLE $tableName (id INT PRIMARY KEY, name VARCHAR(255))")
         // DATA CREATE
@@ -194,7 +195,7 @@ class TypedRequestEnvelopeIntegrationTest : H2Fixture() {
             request(Category.SQL, Action.EXECUTE) {
                 setSqlRequest(SqlRequest.newBuilder()
                     .setExecute(com.kxxnzstdsw.grpc.SqlExecuteRequest.newBuilder()
-                        .setSql("CREATE TABLE t_${System.nanoTime()} (id INT)")
+                        .setSql("CREATE TABLE ${TestIds.nextSql("t")} (id INT)")
                         .build())
                     .build())
             }

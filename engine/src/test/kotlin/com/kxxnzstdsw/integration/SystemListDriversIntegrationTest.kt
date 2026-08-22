@@ -96,8 +96,10 @@ class SystemListDriversIntegrationTest {
         assertFalse(h2.supportsUser)
         assertTrue(h2.supportsSchema)
         assertTrue(h2.capabilitiesList.contains("EMBEDDED_MODE"))
-        // H2 不支持用户/权限/触发器
-        assertFalse(h2.capabilitiesList.contains("USERS"))
+        // H2 完整实现用户/权限管理（CREATE/DELETE USER, GRANT/REVOKE, INFORMATION_SCHEMA.USERS）
+        assertTrue(h2.capabilitiesList.contains("USERS"))
+        assertTrue(h2.capabilitiesList.contains("PRIVILEGES"))
+        // H2 不支持触发器
         assertFalse(h2.capabilitiesList.contains("TRIGGERS"))
     }
 

@@ -84,7 +84,8 @@ object ExportProcessManager {
      * @param jarPath idb-engine.jar 路径
      */
     fun start(jarPath: String): Int {
-        if (_isRunning.get()) {
+        // 原子抢占 — 防止两个 caller 同时启动两个子进程
+        if (!_isRunning.compareAndSet(false, true)) {
             logger.warn("Export subprocess already running")
             return hubPort
         }
@@ -168,7 +169,6 @@ object ExportProcessManager {
             }
             commandObserver = stub.stream(responseObserver)
 
-            _isRunning.set(true)
             logger.info("Export subprocess started (ExportHub on :$hubPort, connected)")
         } catch (e: Exception) {
             logger.error("Failed to start export subprocess", e)

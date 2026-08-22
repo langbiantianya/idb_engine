@@ -86,10 +86,14 @@ class DuckDBDialect : DatabaseDialect {
         }
     }
 
+    override fun buildSetSearchPathSql(schema: String): String? {
+        if (schema.isBlank()) return null
+        return "SET schema = ${quoteIdentifier(schema)}"
+    }
+
     override fun quoteIdentifier(identifier: String): String {
-        // DuckDB 使用双引号包裹标识符（标准 SQL）
-        val escaped = identifier.replace("\"", "\"\"")
-        return "\"$escaped\""
+        // DuckDB 使用双引号包裹（v2.9 #16 转 DialectUtil.quoteWith）
+        return DialectUtil.quoteWith(identifier, '"')
     }
 
     // region Schema / Database 导航
@@ -502,23 +506,11 @@ class DuckDBDialect : DatabaseDialect {
     // region SQL 安全校验
 
     override fun validateSqlFragment(sql: String, label: String) {
-        if (sql.contains(' ')) throw IllegalArgumentException("$label 包含空字节")
-        val bare = sql.replace(QUOTED_STRING_REGEX, "")
-        if (bare.contains(';')) throw IllegalArgumentException("$label 包含非法字符 ';'")
-        if (bare.contains("--") || bare.contains("/*")) throw IllegalArgumentException("$label 包含非法注释")
-        val upper = bare.uppercase()
-        for (regex in DANGEROUS_KEYWORD_REGEXES) {
-            if (regex.containsMatchIn(upper)) {
-                val kw = regex.pattern.substringAfter("\\b").substringBefore("\\b")
-                throw IllegalArgumentException("$label 包含禁止关键词: $kw")
-            }
-        }
+        DialectUtil.validateSqlFragment(sql, label, DANGEROUS_KEYWORD_REGEXES)
     }
 
     override fun validateOrderBy(sql: String) {
-        if (!ORDER_BY_REGEX.matches(sql)) {
-            throw IllegalArgumentException("无效的 ORDER BY 格式: $sql")
-        }
+        DialectUtil.validateOrderBy(sql, ORDER_BY_REGEX)
     }
 
     // endregion
@@ -730,7 +722,7 @@ class DuckDBDialect : DatabaseDialect {
         val match = Regex("""(?i)CREATE\s+(?:OR\s+REPLACE\s+)?(MACRO|FUNCTION|PROCEDURE)\s+(\w+)(?:\.(\w+))?""").find(normalized)
             ?: throw IllegalArgumentException("无法从 DDL 中解析对象类型/名称")
         val objType = match.groupValues[1].uppercase()
-        if (objType == "PROCEDURE") throw IllegalOperationException("Duckdb 不支持存储过程 (PROCEDURE)")
+        if (objType == "PROCEDURE") throw UnsupportedOperationException("Duckdb 不支持存储过程 (PROCEDURE)")
         true
     }
 
@@ -1237,25 +1229,12 @@ class DuckDBDialect : DatabaseDialect {
     }
 
     companion object {
-        /** 去除单引号字符串内容 */
-        private val QUOTED_STRING_REGEX = Regex("'(?:[^']|'')*'")
+        /** ORDER BY 校验 —— DuckDB 支持双引号包裹（v2.9 #16 用 DialectUtil 工厂） */
+        private val ORDER_BY_REGEX = DialectUtil.orderByRegex('"')
 
-        /** ORDER BY 校验 —— DuckDB 支持双引号包裹标识符（标准 SQL） */
-        private val ORDER_BY_REGEX = Regex(
-            """^\s*"?[\w]+"?(\s+(ASC|DESC))?(\s*,\s*"?[\w]+"?(\s+(ASC|DESC))?)?\s*$""",
-            RegexOption.IGNORE_CASE
-        )
-
-        /** DuckDB 危险关键词：复用 PG/H2 集合 + DuckDB 特有的 INSTALL/LOAD/ATTACH/DETACH/COPY/EXPORT */
-        private val DANGEROUS_KEYWORDS = setOf(
-            "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE",
-            "UNION", "EXEC", "EXECUTE", "TRUNCATE", "GRANT", "REVOKE",
-            "MERGE", "INSTALL", "LOAD", "ATTACH", "DETACH", "COPY", "EXPORT"
-        )
-
-        private val DANGEROUS_KEYWORD_REGEXES: List<Regex> = DANGEROUS_KEYWORDS.map { kw ->
-            Regex("\\b$kw\\b", RegexOption.IGNORE_CASE)
-        }
+        /** DuckDB 危险关键词（v2.9 #16 用 DialectUtil 工厂） */
+        private val DANGEROUS_KEYWORD_REGEXES: List<Regex> =
+            DialectUtil.buildDangerousKeywordRegexes(setOf("MERGE", "INSTALL", "LOAD", "ATTACH", "DETACH", "COPY", "EXPORT"))
 
         /** DuckDB 可带 size 后缀的类型 */
         private val SIZABLE_TYPES = setOf("VARCHAR", "CHAR", "VARBINARY", "BINARY", "DECIMAL", "NUMERIC")
@@ -1269,6 +1248,3 @@ class DuckDBDialect : DatabaseDialect {
 
     // endregion
 }
-
-/** 自定义异常 — 区分 "不支持" 和 "非法 SQL" */
-private class IllegalOperationException(msg: String) : RuntimeException(msg)

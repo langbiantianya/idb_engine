@@ -8,6 +8,7 @@ import com.kxxnzstdsw.grpc.Request
 import com.kxxnzstdsw.grpc.functionCreateRequest
 import com.kxxnzstdsw.grpc.functionGetDdlRequest
 import com.kxxnzstdsw.testutil.H2Fixture
+import com.kxxnzstdsw.testutil.TestIds
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
@@ -28,7 +29,7 @@ class FunctionGetDdlIntegrationTest : H2Fixture() {
         action: Action,
         configure: Request.Builder.() -> Unit
     ): Request = Request.newBuilder()
-        .setId("r-fng-${System.nanoTime()}")
+        .setId(TestIds.next("r-fng"))
         .setCategory(Category.FUNCTION)
         .setAction(action)
         .setConnection(config)
@@ -41,7 +42,7 @@ class FunctionGetDdlIntegrationTest : H2Fixture() {
             request(Action.GET_DDL) {
                 setFunctionRequest(FunctionRequest.newBuilder()
                     .setGetDdl(functionGetDdlRequest {
-                        name = "anyFunctionName_${System.nanoTime()}"
+                        name = TestIds.nextSql("anyFunctionName")
                     })
                     .build())
             }
@@ -59,7 +60,7 @@ class FunctionGetDdlIntegrationTest : H2Fixture() {
     @Test
     fun `FUNCTION CREATE returns success for valid H2 alias ddl`() = runBlocking {
         // 单独测 CREATE 路径（不依赖 GET_DDL 回环） — 验证 CREATE 在 dispatcher 中可达
-        val funcName = "fn_${System.nanoTime()}"
+        val funcName = TestIds.nextSql("fn")
         val ddl = "CREATE ALIAS $funcName FOR \"java.lang.Integer.parseInt(java.lang.String)\""
         val resp = RequestDispatcher.dispatch(
             request(Action.CREATE) {

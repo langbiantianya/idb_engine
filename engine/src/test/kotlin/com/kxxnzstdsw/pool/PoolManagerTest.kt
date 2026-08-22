@@ -5,8 +5,8 @@ import com.kxxnzstdsw.grpc.ConnectionConfig
 import com.kxxnzstdsw.loader.DialectLoader
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
+import com.kxxnzstdsw.testutil.TestIds
 import org.junit.jupiter.api.Test
-import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
@@ -22,7 +22,7 @@ import kotlin.test.assertTrue
 class PoolManagerTest {
 
     private lateinit var h2: H2Dialect
-    private val dbName: String = "pmtest_${UUID.randomUUID().toString().replace("-", "")}"
+    private val dbName: String = TestIds.uniqueName("pmtest")
 
     @BeforeEach
     fun setUp() {
