@@ -1,4 +1,4 @@
-# 📖 Kotlin 数据库管理端后端架构设计文档 (V2.6)
+# 📖 Kotlin 数据库管理端后端架构设计文档 (V2.7)
 
 ## 1. 架构总览 (Architecture Overview)
 
@@ -12,7 +12,7 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 - `unix` — Unix Domain Socket，Linux/macOS/BSD，Linux 使用 epoll native，macOS/BSD 走 NIO
 - `pipe` — Windows 命名管道（grpc-java 1.76 客户端支持；服务端暂未开放公共 API，抛 `UnsupportedOperationException`）
 
-> **架构升级**：自 v2.0 起，引擎以 gRPC 服务端方式运行（默认 `:50051`，可通过 `--port` 覆盖）。客户端通过 gRPC streaming 调用 `IdbEngine.Handle(Request)`，接收 `stream<Response>`（流式响应使用 `stream`/`end` 字段分帧）。自 v2.2 起，所有 `Request.payload` / `Response.data` 字段都已替换为强类型 per-Category protobuf 消息（`oneof body`）。自 v2.3 起，13 个业务 handler 全部接收 typed per-Category proto 消息、返回 typed `<Category><Action>Response` 消息；`TypedRequestMapper` / `TypedResponseMapper` 已删除，业务层不再经过 `JsonObject` 转换。自 v2.4 起，列表项 envelope 也已 typed（per-list `*ListItem` 消息 + typed `Row` wrapper）；仅方言差异显著的 item shape（`USER.LIST` overloaded、FUNCTION.CALL/INFO、SYSTEM.SERVER_INFO extras）保留 `google.protobuf.Value`。旧的 stdin/stdout 长度前缀 Protobuf 帧协议已彻底移除。自 v2.5 起，gRPC 依赖从 `1.68.0` 升至 `1.76.0`，并接入 `grpc-kotlin` 协程 stub（`IdbEngineCoroutineImplBase`）+ Kotlin DSL 生成器（`protobuf-kotlin-lite`）；13 个 handler + `RequestDispatcher` + 11 个集成测试全部以 Kotlin DSL 形态（`xxxRequest { ... }` / `xxxResponse { ... }` / `xxxItem { ... }` / `request { ... }` / `response { ... }`）编写，业务层无 `Request.newBuilder()...build()` 残留。自 v2.6 起，`RequestDispatcher` 重构为表驱动（`Map<Pair<Category, Action>, Route>`），新增跨切面 `RequestOptions { trace_id, dry_run, timeout_ms }`，新增 `SQL.EXPLAIN` 路由、`if_exists` / `if_not_exists` 贯通到 SCHEMA/TABLE/INDEX/FOREIGN_KEY。
+> **架构升级**：自 v2.0 起，引擎以 gRPC 服务端方式运行（默认 `:50051`，可通过 `--port` 覆盖）。客户端通过 gRPC streaming 调用 `IdbEngine.Handle(Request)`，接收 `stream<Response>`（流式响应使用 `stream`/`end` 字段分帧）。自 v2.2 起，所有 `Request.payload` / `Response.data` 字段都已替换为强类型 per-Category protobuf 消息（`oneof body`）。自 v2.3 起，13 个业务 handler 全部接收 typed per-Category proto 消息、返回 typed `<Category><Action>Response` 消息；`TypedRequestMapper` / `TypedResponseMapper` 已删除，业务层不再经过 `JsonObject` 转换。自 v2.4 起，列表项 envelope 也已 typed（per-list `*ListItem` 消息 + typed `Row` wrapper）；仅方言差异显著的 item shape（`USER.LIST` overloaded、FUNCTION.CALL/INFO、SYSTEM.SERVER_INFO extras）保留 `google.protobuf.Value`。旧的 stdin/stdout 长度前缀 Protobuf 帧协议已彻底移除。自 v2.5 起，gRPC 依赖从 `1.68.0` 升至 `1.76.0`，并接入 `grpc-kotlin` 协程 stub（`IdbEngineCoroutineImplBase`）+ Kotlin DSL 生成器（`protobuf-kotlin-lite`）；13 个 handler + `RequestDispatcher` + 11 个集成测试全部以 Kotlin DSL 形态（`xxxRequest { ... }` / `xxxResponse { ... }` / `xxxItem { ... }` / `request { ... }` / `response { ... }`）编写，业务层无 `Request.newBuilder()...build()` 残留。自 v2.6 起，`RequestDispatcher` 重构为表驱动（`Map<Pair<Category, Action>, Route>`），新增跨切面 `RequestOptions { trace_id, dry_run, timeout_ms }`，新增 `SQL.EXPLAIN` 路由、`if_exists` / `if_not_exists` 贯通到 SCHEMA/TABLE/INDEX/FOREIGN_KEY。自 v2.7 起，新增 `dialect-duckdb` 模块（第 4 个方言，本地嵌入式 OLAP）：驱动 `org.duckdb.DuckDBDriver` 1.5.5.1，连接目标支持内存 / `.duckdb` / `.csv` / `.parquet` / `.json` / `.xlsx`（Excel 走 POI 预转换）；自增主键走 `SEQUENCE + DEFAULT nextval`；FK 走 table-rebuild；新增 SPI 钩子 `buildPreCreateStatements` 用于 CREATE TABLE 前的预创建语句；gRPC 依赖升至 `1.83.1`，`grpc-kotlin-stub` 升至 `1.5.0`，`protobuf-kotlin-lite` 升至 `4.35.1`。
 >
 > **性能隔离**：数据导出模块运行在独立的子进程中，通过 `ExportProcessManager` 管理（同样通过 gRPC 连接到主进程的 side server），防止大数据量导出时 OOM 影响主进程稳定性。
 
@@ -20,9 +20,9 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 
 - **核心语言**：Kotlin 2.4.0 / JDK 25
 - **异步框架**：kotlinx-coroutines 1.11.0
-- **gRPC**：grpc-netty-shaded 1.76.0 + grpc-stub + grpc-protobuf + grpc-kotlin-stub 1.4.1（Kotlin 协程服务端 + Kotlin DSL 生成）
-- **Protobuf**：com.google.protobuf:protobuf-kotlin-lite 3.25.8（生成 *Kt DSL builder）+ protoc 3.25.5 + protoc-gen-grpc-java 1.68.0 + protoc-gen-grpc-kotlin 1.4.1（proto3 + 强类型 per-Category 消息 + 强类型 per-list-item 消息（v2.4）；少量遗留字段如 `MemoryInfo.extras` 仍使用 `google.protobuf.Value` 包装方言特定扩展；业务层全部以 Kotlin DSL 形态编写（v2.5））
-- **数据库驱动**：MySQL Connector/J 9.7.0、PostgreSQL JDBC Driver 42.7.11、H2 2.3.232
+- **gRPC**：grpc-netty-shaded 1.83.1 + grpc-stub + grpc-protobuf + grpc-kotlin-stub 1.5.0（Kotlin 协程服务端 + Kotlin DSL 生成）
+- **Protobuf**：com.google.protobuf:protobuf-kotlin-lite 4.35.1（生成 *Kt DSL builder）+ protoc 3.25.5 + protoc-gen-grpc-java 1.68.0 + protoc-gen-grpc-kotlin 1.4.1（proto3 + 强类型 per-Category 消息 + 强类型 per-list-item 消息（v2.4）；少量遗留字段如 `MemoryInfo.extras` 仍使用 `google.protobuf.Value` 包装方言特定扩展；业务层全部以 Kotlin DSL 形态编写（v2.5））
+- **数据库驱动**：MySQL Connector/J 9.7.0、PostgreSQL JDBC Driver 42.7.11、H2 2.3.232、**DuckDB JDBC 1.5.5.1（v2.7 新增）**
 - **连接池管理**：HikariCP 7.0.2
 - **数据序列化**：kotlinx-serialization-json 1.11.0（业务层）
 - **日志框架**：SLF4J 2.0.18 + Logback 1.5.13
@@ -1055,7 +1055,7 @@ for {
 - **表驱动 RequestDispatcher（v2.6）**：9 个 `handleX` 函数 + 11 个 `wrapTypedResponse` `when` 分支 → 单个 typed `routes` map（`Pair<Category, Action>` → `Route{invoke, wrap}`）；新 (Category, Action) 仅需一个 map 条目；消除 `wrapTypedResponse` 中静默 `else -> {}` 兜底；`SQL.EXPLAIN` 路由打通（之前 `SqlEngineHandler.explain` 已实现但 dispatcher 从未路由）
 - **跨切面 Envelope Options（v2.6）**：新增 `RequestOptions { trace_id, dry_run, timeout_ms }` 跨切面；MDC 注入 `trace_id`；`dryRun=true` + write action 直接短路返回 success（不修改数据库）；`timeoutMs > 0` 包 `withTimeoutOrNull`，超时返回 `success=false, error="timeout"`
 - **`if_exists` / `if_not_exists` 贯通（v2.6）**：SCHEMA/TABLE/INDEX/FOREIGN_KEY 路径全部支持 `optional bool if_exists` / `optional bool if_not_exists`；方言层 SPI 与 handler 实现已贯通
-- 数据库方言抽象层（DatabaseDialect SPI + MySQL/PostgreSQL/H2 插件，**所有 SPI 方法三个方言均完整实现**）
+- 数据库方言抽象层（DatabaseDialect SPI + MySQL/PostgreSQL/H2/DuckDB 插件，**所有 SPI 方法四个方言均完整实现**（v2.7））
 - 连接池管理（HikariCP + SHA-256 缓存，key 包含 password）
 - 13 个 handler 全部使用 suspend 协程
 - 流式大数据输出（DATA LIST pageSize=0 / SQL SELECT / DATA GENERATE / EXPORT，JDBC 游标防 OOM）
@@ -1076,9 +1076,11 @@ for {
 - 触发器管理（LIST / GET_DDL）
 - 数据导出引擎（5 种格式：CSV / JSON Lines / SQL INSERT / Excel / Parquet，独立子进程隔离）
 - 跨平台 IPC 传输抽象（IpcTransport SPI + TCP / UDS / Named Pipe 三实现 + Linux epoll native，CLI 参数切换）
-- 191 个测试全通过，0 失败 / 0 错误：
+- **DuckDB 方言插件（v2.7 新增）**：第 4 个方言 `Duckdb`，仅本地嵌入式（内存 / `.duckdb` / `.csv` / `.parquet` / `.json` / `.xlsx`）。Excel 走 Apache POI 5.5.1 预转换为临时 DuckDB。自增主键用 `SEQUENCE + DEFAULT nextval + 表级 PRIMARY KEY` 兜底（因 DuckDB 1.5.5.1 不接受 IDENTITY+表级 PK 组合，也不支持 `INTEGER PRIMARY KEY` ROWID 自填充）。FK 走 table-rebuild（因 DuckDB 不支持 `ALTER TABLE ADD/DROP CONSTRAINT` + 忽略 `CONSTRAINT fk_name`）。用户/权限/触发器抛 `UnsupportedOperationException`。
+- 299 个测试全通过，0 失败 / 0 错误：
   - `:dialect-h2:test` — H2 方言 63 测试
-  - `:engine:test` — 128 测试
+  - `:dialect-duckdb:test` — DuckDB 方言 81 测试（v2.7 新增）
+  - `:engine:test` — 155 测试（含 27 个 `DuckDBHandlerIntegrationTest`，v2.7 新增）
     - `pool/PoolManagerTest` — 11
     - `loader/DialectLoaderTest` — 5
     - `ipc/IpcConfigTest` — 20
@@ -1093,6 +1095,7 @@ for {
     - `integration/FunctionGetDdlIntegrationTest` — 2（FUNCTION.GET_DDL dispatcher 路由 + H2 限制）
     - `integration/SqlExplainRouteIntegrationTest` — 2（SQL.EXPLAIN 端到端路由，v2.6 之前未实现）
     - `integration/EnvelopeOptionsIntegrationTest` — 4（dryRun / timeoutMs envelope 跨切面）
+    - `integration/DuckDBHandlerIntegrationTest` — 27（DuckDB 端到端：SCHEMA/TABLE/DATA/SQL/VIEW/INDEX/FK/FUNCTION/SYSTEM/LOCAL FILES/EXPORT）
 
 ⏳ 待扩展：
 - GraalVM Native Image 编译
@@ -1111,4 +1114,5 @@ for {
 | v2.3 | gRPC + 强类型 Handlers end-to-end | 13 个业务 handler 全部接收 typed per-Category proto 消息、返回 typed `<Category><Action>Response` 消息；`TypedRequestMapper` / `TypedResponseMapper` 删除（67 个对应测试一并删除）；`RequestDispatcher` 简化为 (Category, Action) → handler 的薄路由层；11 个 handler 集成测试改用 typed proto builders；179 个测试全通过（116 engine + 63 H2） |
 | v2.4 | gRPC + 强类型 per-list-item 消息 | 8 个 typed per-list-item 消息（`TableListItem` / `ViewListItem` / `IndexListItem` / `ForeignKeyListItem` / `TriggerListItem` / `FunctionListItem` / `FunctionDebugItem` / `UserGrantItem`）取代 list/response 中遗留的 `repeated google.protobuf.Value`；动态行使用 typed `Row { map<string, Value> values }` wrapper；方言差异显著的 item shape（USER.LIST overloaded、FUNCTION.CALL/INFO、SYSTEM.SERVER_INFO extras）保留 `google.protobuf.Value`；11 个 handler 集成测试改用 typed accessor（`item.name` 替代 `item.structValue.fieldsMap["name"]?.stringValue`）；179 个测试全通过 |
 | v2.5 | gRPC 1.76 + grpc-kotlin 协程服务端 + Kotlin DSL end-to-end | gRPC 依赖 `1.68.0` → `1.76.0`，接入 `grpc-kotlin-stub 1.4.1`；服务端 `IdbEngineImpl : IdbEngineGrpcKt.IdbEngineCoroutineImplBase()`（suspend `handle()` → `Flow<Response>`）；protoc 工具链锁定 `protoc 3.25.5` + `protoc-gen-grpc-java 1.68.0` + `protoc-gen-grpc-kotlin 1.4.1`；启用 `protobuf-kotlin-lite` 生成 Kotlin DSL（`xxxRequest { ... }` / `xxxResponse { ... }` / `xxxItem { ... }` / `request { ... }` / `response { ... }`）；13 个 handler + `RequestDispatcher` + 11 个集成测试全部切到 DSL，业务层无 `Request.newBuilder()...build()` 残留；移除 `grpc-core` / `protobuf-java-util` / `ksp` / `kotlinx-serialization-protobuf` 等无用依赖；179 个测试全通过 |
-| **v2.6 (当前)** | **表驱动 Dispatcher + 跨切面 Envelope Options** | `RequestDispatcher` 重构：9 个 `handleX` 函数 + 11 个 `wrapTypedResponse` `when` 分支 → 单个 typed `routes` map（`Pair<Category, Action>` → `Route{invoke, wrap}`）；新 (Category, Action) 仅需一个 map 条目；消除 `wrapTypedResponse` 中静默 `else -> {}` 兜底；`SQL.EXPLAIN` 路由打通（之前 `SqlEngineHandler.explain` 已实现但 dispatcher 从未路由）。新增 `RequestOptions { trace_id, dry_run, timeout_ms }`：MDC 注入 `trace_id`；`dryRun=true` + write action 短路返回 success（不修改数据库）；`timeoutMs > 0` 用 `withTimeoutOrNull` 包 handler 调用，超时返回 `success=false, error="timeout"`。`if_exists` / `if_not_exists` 在 SCHEMA/TABLE/INDEX/FOREIGN_KEY 路径下贯通（v2.6 之前仅 VIEW/FUNCTION.DELETE 支持）。191 测试全通过（128 engine + 63 H2） |
+| v2.6 | 表驱动 Dispatcher + 跨切面 Envelope Options | `RequestDispatcher` 重构：9 个 `handleX` 函数 + 11 个 `wrapTypedResponse` `when` 分支 → 单个 typed `routes` map（`Pair<Category, Action>` → `Route{invoke, wrap}`）；新 (Category, Action) 仅需一个 map 条目；消除 `wrapTypedResponse` 中静默 `else -> {}` 兜底；`SQL.EXPLAIN` 路由打通（之前 `SqlEngineHandler.explain` 已实现但 dispatcher 从未路由）。新增 `RequestOptions { trace_id, dry_run, timeout_ms }`：MDC 注入 `trace_id`；`dryRun=true` + write action 短路返回 success（不修改数据库）；`timeoutMs > 0` 用 `withTimeoutOrNull` 包 handler 调用，超时返回 `success=false, error="timeout"`。`if_exists` / `if_not_exists` 在 SCHEMA/TABLE/INDEX/FOREIGN_KEY 路径下贯通（v2.6 之前仅 VIEW/FUNCTION.DELETE 支持）。191 测试全通过（128 engine + 63 H2） |
+| **v2.7 (当前)** | **DuckDB 方言插件（v2.7 新增）** | 新增 `dialect-duckdb` 模块（driver 名 `"Duckdb"`，JDBC `org.duckdb.DuckDBDriver` 1.5.5.1），仅本地嵌入式（内存 / `.duckdb` / `.csv` / `.parquet` / `.json` / `.xlsx`）；host/port 完全忽略，`database` 字段即路径。Excel 走 Apache POI 5.5.1 预转换为临时 DuckDB（`ExcelToDuckDbCache` 缓存避免重复转换）。自增主键用 `SEQUENCE + DEFAULT nextval + 表级 PRIMARY KEY` 兜底（因 DuckDB 1.5.5.1 不接受 IDENTITY+表级 PK 组合，也不支持 `INTEGER PRIMARY KEY` ROWID 自填充）。FK 走 table-rebuild（因 DuckDB 不支持 `ALTER TABLE ADD/DROP CONSTRAINT` + 忽略 `CONSTRAINT fk_name`，自动生成 `<table>_<cols>_fkey`）。`SHOW CREATE TABLE/VIEW` 解析失败 → 手动从 `information_schema` 重建 DDL。`duckdb_functions()` MACRO 列名 `macro_definition`（不是 `definition`/`description`）。`duckdb_constraints()` 无 `column_name`，只有 `constraint_column_names` (LIST)。FK `ON DELETE/UPDATE CASCADE/SET NULL/SET DEFAULT` 不支持 → 全部改写为 `NO ACTION`。同文件不同连接配置冲突 → 测试 fixture 强制走 `PoolManager`（不混用 DriverManager）。新 SPI 方法 `DatabaseDialect.buildPreCreateStatements(tableName, autoIncrementColumns): List<String>`（默认空实现）。299 测试全通过（81 DuckDB + 63 H2 + 155 engine） |

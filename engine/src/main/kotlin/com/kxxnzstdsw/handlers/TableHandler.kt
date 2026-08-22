@@ -107,6 +107,13 @@ object TableHandler {
             val primaryKeys = req.columnsList.mapNotNull { col ->
                 if (col.isPrimaryKey) col.name else null
             }
+            val autoIncrementColumns = req.columnsList.mapNotNull { col ->
+                if (col.isPrimaryKey && col.autoIncrement) col.name else null
+            }
+
+            for (stmt in dialect.buildPreCreateStatements(dialect.quoteIdentifier(req.tableName), autoIncrementColumns)) {
+                conn.createStatement().use { it.execute(stmt) }
+            }
 
             val sql = buildString {
                 append("CREATE TABLE ")

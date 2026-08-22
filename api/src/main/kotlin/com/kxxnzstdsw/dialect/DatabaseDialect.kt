@@ -245,6 +245,15 @@ interface DatabaseDialect {
     fun buildPostCreateStatements(tableName: String, options: Map<String, String>): List<String>
 
     /**
+     * 构建 CREATE TABLE 之前需要单独执行的语句（如 DuckDB 的 CREATE SEQUENCE）。
+     * 默认空实现 —— 需要时由方言（如 DuckDB）覆盖。
+     * @param tableName 表名（已由方言引用）
+     * @param autoIncrementColumns 需要预创建序列的自增主键列名列表（每个元素: 列名）
+     * @return 需要执行的 SQL 语句列表，无需时返回空列表
+     */
+    fun buildPreCreateStatements(tableName: String, autoIncrementColumns: List<String>): List<String> = emptyList()
+
+    /**
      * 校验原始 SQL 片段（WHERE 条件等）的安全性。
      * 去除引号内容后，按方言规则扫描危险关键词、分号、注释符。
      */

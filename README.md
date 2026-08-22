@@ -1,18 +1,19 @@
 # IDB Engine — Database Management Backend
 
-A headless, cross-platform database management engine written in Kotlin. Exposes a **gRPC** API (HTTP/2 + strongly-typed per-Category protobuf messages) over a configurable **IPC transport** (TCP loopback / Unix Domain Socket / Windows Named Pipe). Designed to be embedded in a Wails (Go) host with three pluggable dialects: MySQL, PostgreSQL, H2.
+A headless, cross-platform database management engine written in Kotlin. Exposes a **gRPC** API (HTTP/2 + strongly-typed per-Category protobuf messages) over a configurable **IPC transport** (TCP loopback / Unix Domain Socket / Windows Named Pipe). Designed to be embedded in a Wails (Go) host with four pluggable dialects: MySQL, PostgreSQL, H2, **DuckDB (v2.7 新增)**.
 
-> **Current version: v2.6**
+> **Current version: v2.7**
 > - gRPC server on `:50051` by default (`--port <int>` override)
 > - IPC transport selected via `--ipc <tcp|unix|pipe>` CLI flag (default auto-detected per OS)
 > - Pluggable dialect architecture (add a new DB by implementing `DatabaseDialect` and dropping a JAR in `dialects/`)
-> - **gRPC 1.76 + grpc-kotlin coroutine server** — server extends `IdbEngineCoroutineImplBase` (suspend `handle()` → `Flow<Response>`); proto toolchain locked: `protoc 3.25.5` + `protoc-gen-grpc-java 1.68.0` + `protoc-gen-grpc-kotlin 1.4.1`
+> - **gRPC 1.83 + grpc-kotlin coroutine server** — server extends `IdbEngineCoroutineImplBase` (suspend `handle()` → `Flow<Response>`); proto toolchain locked: `protoc 3.25.5` + `protoc-gen-grpc-java 1.68.0` + `protoc-gen-grpc-kotlin 1.4.1`; `protobuf-kotlin-lite` 4.35.1
 > - **Handlers are strongly-typed end-to-end** — no `JsonObject` round-trip; dispatcher routes typed per-Category proto to typed handler methods returning typed `<Category><Action>Response` messages
 > - **Business layer in Kotlin DSL (v2.5)** — all 13 handlers + `RequestDispatcher` + 11 integration tests use generated Kotlin DSL builders (`xxxRequest { ... }` / `xxxResponse { ... }` / `xxxItem { ... }` / `request { ... }` / `response { ... }`); only `google.protobuf.Value` (Well-Known Type) still uses `Value.newBuilder()`
 > - **Typed list-item envelopes** — `TableListItem` / `ViewListItem` / `IndexListItem` / `ForeignKeyListItem` / `TriggerListItem` / `FunctionListItem` / `FunctionDebugItem` / `UserGrantItem` / typed `Row` for dynamic rows; only genuinely dialect-specific shapes (USER.LIST overloaded, FUNCTION.CALL/INFO, SYSTEM.SERVER_INFO extras) keep `google.protobuf.Value`
-> - 191 tests passing across engine + H2 dialect modules (128 engine + 63 H2 dialect)
+> - 299 tests passing across engine + dialect modules (155 engine + 81 DuckDB + 63 H2 dialect)
 > - **Cross-cutting request options (v2.6)** — `Request.options { traceId, dryRun, timeoutMs }` envelope uniformly applied to all (Category, Action) routes; `traceId` propagates via SLF4J MDC; `dryRun` short-circuits write actions without invoking handlers or modifying DB; `timeoutMs > 0` wraps handler call in `withTimeoutOrNull` and returns `success=false, error="timeout"` on expiry
 > - **Table-driven dispatcher (v2.6)** — `RequestDispatcher` replaced 9 `handleX` functions + 11 `wrapTypedResponse` `when` blocks with a single typed `routes` map; new (Category, Action) is one map entry; silent `else -> {}` fallbacks eliminated (impossible — table lookup either finds the entry or throws `UnsupportedOperationException`); `SQL.EXPLAIN` now routed (previously handler existed but dispatcher never invoked it)
+> - **DuckDB dialect (v2.7)** — 4th dialect plugin for **local embedded** OLAP workloads (in-memory / `.duckdb` / `.csv` / `.parquet` / `.json` / `.xlsx` via POI pre-conversion); driver `Duckdb` (JDBC `org.duckdb.DuckDBDriver` 1.5.5.1); `host`/`port` ignored, `database` is the path; auto-increment PK uses `SEQUENCE + DEFAULT nextval + 表级 PRIMARY KEY` (DuckDB rejects `IDENTITY + 表级 PK`); FK uses table-rebuild (no `ALTER TABLE ADD/DROP CONSTRAINT`); user/privilege/trigger raise `UnsupportedOperationException`
 
 ---
 
@@ -24,6 +25,7 @@ idb_engine/
 ├── dialect-mysql/        MySQL 方言插件 JAR
 ├── dialect-postgresql/   PostgreSQL 方言插件 JAR
 ├── dialect-h2/           H2 方言插件 JAR（嵌入式数据库 + 测试）
+├── dialect-duckdb/        DuckDB 方言插件 JAR（v2.7 新增 — 本地嵌入式 OLAP）
 └── engine/               主引擎
     ├── proto/            idb_engine.proto（gRPC service + message schemas）
     ├── server/           gRPC 服务端（IdbEngineServer + IdbEngineImpl）
@@ -49,8 +51,8 @@ idb_engine/
 ```
 idb-engine.jar          主引擎瘦包（Main-Class: com.kxxnzstdsw.MainKt）
 libs/                   运行时依赖（gRPC、HikariCP、LuaJIT、POI、Parquet…）
-drivers/                JDBC 驱动（MySQL / PostgreSQL / H2）
-dialects/               方言插件（idb-dialect-{mysql,postgresql,h2}.jar）
+drivers/                JDBC 驱动（MySQL / PostgreSQL / H2 / DuckDB）
+dialects/               方言插件（idb-dialect-{mysql,postgresql,h2,duckdb}.jar）
 ```
 
 ### 运行
@@ -460,7 +462,7 @@ SYSTEM 还支持 `TEST_CONNECTION` 和 `SERVER_INFO`（表中未列出）。
 // Response: {"affectedRows":1}
 ```
 
-> `Action.EXPLAIN` 已在 proto 中定义但 dispatcher 暂未实现；执行计划请用 `SQL.EXECUTE` 直接提交 `EXPLAIN <sql>`。
+> `Action.EXPLAIN` 已在 proto 中定义，**v2.6 起已由 dispatcher 路由**；可走 `SQL.EXPLAIN` 或 `SQL.EXECUTE` 直接提交 `EXPLAIN <sql>`。
 
 ---
 
@@ -717,7 +719,7 @@ SYSTEM 还支持 `TEST_CONNECTION` 和 `SERVER_INFO`（表中未列出）。
 
 ## 测试
 
-**191 个测试全通过（0 失败，0 错误）**：
+**299 个测试全通过（0 失败，0 错误）**：
 
 ```bash
 ./gradlew test
@@ -726,11 +728,13 @@ SYSTEM 还支持 `TEST_CONNECTION` 和 `SERVER_INFO`（表中未列出）。
 测试报告：
 - `engine/build/reports/tests/test/index.html`
 - `dialect-h2/build/reports/tests/test/index.html`
+- `dialect-duckdb/build/reports/tests/test/index.html`
 
 | 模块 / 套件 | 测试数 | 范围 |
 |---|---|---|
 | `dialect-h2:test` | 63 | H2 方言 SPI 方法全量 |
-| `engine:test` | 116 | — |
+| `dialect-duckdb:test` | 81 | DuckDB 方言 SPI 方法全量（v2.7 新增） |
+| `engine:test` | 155 | — |
 | └ `ipc/IpcConfigTest` | 20 | CLI 参数解析 + 自动平台检测 + 错误路径 |
 | └ `ipc/IpcTransportTest` | 7 | SPI 各实现构造 |
 | └ `ipc/TcpIpcTransportIntegrationTest` | 1 | TCP loopback + gRPC round-trip |
@@ -740,6 +744,12 @@ SYSTEM 还支持 `TEST_CONNECTION` 和 `SERVER_INFO`（表中未列出）。
 | └ `loader/DialectLoaderTest` | 5 | SPI 自动发现 |
 | └ `integration/*HandlerIntegrationTest` | 60 | 11 个 handler × H2Fixture（typed proto builders 直接调 handler） |
 | └ `integration/TypedRequestEnvelopeIntegrationTest` | 7 | 端到端 typed Request → dispatcher → typed Response |
+| └ `integration/UserGrantsIntegrationTest` | 2 | USER.GRANTS 路由，H2 限制场景 |
+| └ `integration/DataGenerateIntegrationTest` | 2 | DATA.GENERATE 流式进度 + 错误路径 |
+| └ `integration/FunctionGetDdlIntegrationTest` | 2 | FUNCTION.GET_DDL dispatcher 路由 + H2 限制 |
+| └ `integration/SqlExplainRouteIntegrationTest` | 2 | SQL.EXPLAIN 端到端路由（v2.6 之前未实现） |
+| └ `integration/EnvelopeOptionsIntegrationTest` | 4 | dryRun / timeoutMs envelope 跨切面 |
+| └ `integration/DuckDBHandlerIntegrationTest` | 27 | DuckDB 端到端：SCHEMA/TABLE/DATA/SQL/VIEW/INDEX/FK/FUNCTION/SYSTEM/LOCAL FILES/EXPORT（v2.7 新增） |
 
 ---
 
@@ -750,6 +760,28 @@ SYSTEM 还支持 `TEST_CONNECTION` 和 `SERVER_INFO`（表中未列出）。
 3. 在 `src/main/resources/META-INF/services/com.kxxnzstdsw.dialect.DatabaseDialect` 中写入实现类全限定名
 4. 构建后将 JAR 放入 `engine/build/libs/dialects/` 目录
 5. 重启引擎即自动加载，无需修改主引擎代码
+
+**DuckDB 连接示例**（v2.7 新增 — 仅本地嵌入式，`host`/`port` 完全忽略，`database` 字段就是路径）：
+
+```json
+// 内存模式
+{"connection": {"driver":"Duckdb", "database":""}}
+
+// .duckdb 文件
+{"connection": {"driver":"Duckdb", "database":"/data/analytics.duckdb"}}
+
+// CSV 直查（无需 ETL；DuckDB 自动 attach）
+{"connection": {"driver":"Duckdb", "database":"/data/events.csv"}}
+
+// Parquet / JSON
+{"connection": {"driver":"Duckdb", "database":"/data/events.parquet"}}
+{"connection": {"driver":"Duckdb", "database":"/data/payload.json"}}
+
+// Excel 走 Apache POI 预转换 → 临时 DuckDB（缓存避免重复转换）
+{"connection": {"driver":"Duckdb", "database":"/data/report.xlsx"}}
+```
+
+DuckDB 方言支持：SCHEMA / TABLE（含自增 PK 走 `SEQUENCE + DEFAULT nextval`）/ DATA CRUD / SQL EXECUTE+EXPLAIN / VIEW / INDEX / FOREIGN_KEY（table-rebuild）/ FUNCTION（仅 MACRO）/ SYSTEM / EXPORT（5 种格式全链路透传）。**不支持**：USER / PRIVILEGE / TRIGGER（抛 `UnsupportedOperationException`）；FK `ON DELETE/UPDATE CASCADE/SET NULL/SET DEFAULT`（自动改写 `NO ACTION`）；PG/MySQL 风格 `$$ ... $$` 函数体。
 
 ---
 
@@ -776,16 +808,16 @@ SYSTEM 还支持 `TEST_CONNECTION` 和 `SERVER_INFO`（表中未列出）。
 ## 技术栈
 
 - Kotlin 2.4.0 / JDK 25
-- grpc-netty-shaded 1.76.0 + grpc-stub + grpc-protobuf + grpc-kotlin-stub 1.4.1（协程服务端 + Kotlin DSL 生成）
-- protoc 3.25.5 + protoc-gen-grpc-java 1.68.0 + protoc-gen-grpc-kotlin 1.4.1（工具链锁定，protobuf-java 强制 3.25.8）
+- grpc-netty-shaded 1.83.1 + grpc-stub + grpc-protobuf + grpc-kotlin-stub 1.5.0（协程服务端 + Kotlin DSL 生成）
+- protoc 3.25.5 + protoc-gen-grpc-java 1.68.0 + protoc-gen-grpc-kotlin 1.4.1（工具链锁定）
 - kotlinx-coroutines 1.11.0
 - kotlinx-serialization-json 1.11.0
-- protobuf-kotlin-lite 3.25.8（生成 *Kt DSL builder：`xxxRequest { ... }` / `xxxResponse { ... }` / `xxxItem { ... }`）
+- protobuf-kotlin-lite 4.35.1（生成 *Kt DSL builder：`xxxRequest { ... }` / `xxxResponse { ... }` / `xxxItem { ... }`）
 - HikariCP 7.0.2
-- MySQL Connector/J 9.7.0 / PostgreSQL JDBC 42.7.11 / H2 2.3.232
+- MySQL Connector/J 9.7.0 / PostgreSQL JDBC 42.7.11 / H2 2.3.232 / **DuckDB JDBC 1.5.5.1（v2.7 新增）**
 - SLF4J 2.0.18 + Logback 1.5.13
 - LuaJIT 4.1.0（luajava）
-- Apache POI 5.5.1（poi-ooxml — Excel 流式导出）
+- Apache POI 5.5.1（poi-ooxml — Excel 流式导出 + DuckDB Excel 预转换）
 - Apache Parquet 1.17.1 + Hadoop 3.5.0
 
 ---
@@ -801,4 +833,5 @@ SYSTEM 还支持 `TEST_CONNECTION` 和 `SERVER_INFO`（表中未列出）。
 | v2.3 | gRPC + 强类型 Handlers end-to-end | 13 个 handler 全部接收 typed proto 消息、返回 typed `<Category><Action>Response` 消息；`TypedRequestMapper` / `TypedResponseMapper` 删除；`RequestDispatcher` 简化为薄路由层；179 测试全通过 |
 | v2.4 | gRPC + 强类型 per-list-item 消息 | 8 个 typed per-list-item 消息（`TableListItem` 等）取代遗留 `repeated google.protobuf.Value`；动态行用 typed `Row` wrapper |
 | v2.5 | gRPC 1.76 + grpc-kotlin 协程服务端 + Kotlin DSL end-to-end | gRPC 依赖 `1.68.0` → `1.76.0`，接入 `grpc-kotlin-stub 1.4.1`；服务端 `IdbEngineCoroutineImplBase`（suspend `handle()` → `Flow<Response>`）；protoc 工具链锁定 `protoc 3.25.5` + `protoc-gen-grpc-java 1.68.0` + `protoc-gen-grpc-kotlin 1.4.1`；启用 `protobuf-kotlin-lite` 生成 Kotlin DSL；13 个 handler + `RequestDispatcher` + 11 个集成测试全部切到 DSL 形态；移除 `grpc-core` / `protobuf-java-util` / `ksp` / `kotlinx-serialization-protobuf` 无用依赖；179 测试全通过 |
-| **v2.6 (当前)** | **表驱动 Dispatcher + 跨切面 Envelope Options** | `RequestDispatcher` 重构：9 个 `handleX` 函数 + 11 个 `wrapTypedResponse` when 分支 → 单个 typed `routes` map（`Pair<Category, Action>` → `Route`）；新 (Category, Action) 仅需一个 map 条目；消除 `wrapTypedResponse` 中静默 `else -> {}` 兜底；`SQL.EXPLAIN` 路由打通（之前 handler 存在但 dispatcher 未路由）。新增 `RequestOptions { trace_id, dry_run, timeout_ms }`：MDC 注入 `trace_id`；`dryRun=true` + write action 直接短路返回 success（不修改数据库）；`timeoutMs>0` 包 `withTimeoutOrNull` 超时返回 `error="timeout"`。`if_exists` / `if_not_exists` 在 SCHEMA/TABLE/INDEX/FOREIGN_KEY 路径下贯通（v2.6 之前仅 VIEW/FUNCTION.DELETE 支持）。191 测试全通过（128 engine + 63 H2）|
+| v2.6 | 表驱动 Dispatcher + 跨切面 Envelope Options | `RequestDispatcher` 重构：9 个 `handleX` 函数 + 11 个 `wrapTypedResponse` when 分支 → 单个 typed `routes` map（`Pair<Category, Action>` → `Route`）；新 (Category, Action) 仅需一个 map 条目；消除 `wrapTypedResponse` 中静默 `else -> {}` 兜底；`SQL.EXPLAIN` 路由打通（之前 handler 存在但 dispatcher 未路由）。新增 `RequestOptions { trace_id, dry_run, timeout_ms }`：MDC 注入 `trace_id`；`dryRun=true` + write action 直接短路返回 success（不修改数据库）；`timeoutMs>0` 包 `withTimeoutOrNull` 超时返回 `error="timeout"`。`if_exists` / `if_not_exists` 在 SCHEMA/TABLE/INDEX/FOREIGN_KEY 路径下贯通（v2.6 之前仅 VIEW/FUNCTION.DELETE 支持）。191 测试全通过（128 engine + 63 H2）|
+| **v2.7 (当前)** | **DuckDB 方言插件（本地嵌入式 OLAP）** | 新增 `dialect-duckdb` 模块（driver `Duckdb`，JDBC `org.duckdb.DuckDBDriver` 1.5.5.1），仅本地嵌入式（内存 / `.duckdb` / `.csv` / `.parquet` / `.json` / `.xlsx`）；`host`/`port` 完全忽略，`database` 字段即路径。Excel 走 Apache POI 5.5.1 预转换为临时 DuckDB（`ExcelToDuckDbCache` 缓存避免重复转换）。**自增主键**用 `SEQUENCE + DEFAULT nextval + 表级 PRIMARY KEY` 兜底（因 DuckDB 1.5.5.1 不接受 `IDENTITY`+表级 PK 组合，也不支持 `INTEGER PRIMARY KEY` ROWID 自填充）。**FK** 走 table-rebuild（因 DuckDB 不支持 `ALTER TABLE ADD/DROP CONSTRAINT` + 忽略 `CONSTRAINT fk_name`，自动生成 `<table>_<cols>_fkey`）。`SHOW CREATE TABLE/VIEW` 解析失败 → 手动从 `information_schema` 重建 DDL。`duckdb_functions()` MACRO 列名 `macro_definition`（不是 `definition`/`description`）。`duckdb_constraints()` 无 `column_name`，只有 `constraint_column_names` (LIST)。FK `ON DELETE/UPDATE CASCADE/SET NULL/SET DEFAULT` 不支持 → 全部改写为 `NO ACTION`。同文件不同连接配置冲突 → 测试 fixture 强制走 `PoolManager`（不混用 `DriverManager`）。**新 SPI 方法** `DatabaseDialect.buildPreCreateStatements(tableName, autoIncrementColumns): List<String>`（默认空实现）。gRPC 依赖 `1.76.0` → `1.83.1`，`grpc-kotlin-stub` `1.4.1` → `1.5.0`，`protobuf-kotlin-lite` `3.25.8` → `4.35.1`。299 测试全通过（81 DuckDB + 63 H2 + 155 engine）|
