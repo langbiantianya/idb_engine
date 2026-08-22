@@ -8,6 +8,25 @@ class MySQLDialect : DatabaseDialect {
     override val driverName = "Mysql"
     override val jdbcDriverClassName = "com.mysql.cj.jdbc.Driver"
 
+    // v2.8: 前端连接表单元数据
+    override val displayName = "MySQL"
+    override val connectionType = ConnectionType.CLIENT_SERVER
+    override val defaultPort = 3306
+    override val supportsSchema = false            // MySQL 的 schema == database，无二级导航
+    override val supportsCrossDatabase = false     // MySQL 单连接单库
+    override val jdbcUrlExample = "jdbc:mysql://127.0.0.1:3306/mydb"
+    override val capabilities = setOf(
+        DialectCapability.USERS,
+        DialectCapability.PRIVILEGES,
+        DialectCapability.ROUTINES,
+        DialectCapability.VIEWS,
+        DialectCapability.INDEXES,
+        DialectCapability.FOREIGN_KEYS,
+        DialectCapability.TRIGGERS,
+        DialectCapability.EXPORT,
+        DialectCapability.DDL_TRANSACTION,
+    )
+
     override fun buildJdbcUrl(host: String, port: Int, database: String): String {
         return "jdbc:mysql://$host:$port/$database?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
     }

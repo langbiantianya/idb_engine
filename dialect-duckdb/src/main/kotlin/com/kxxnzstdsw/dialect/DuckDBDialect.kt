@@ -37,6 +37,26 @@ class DuckDBDialect : DatabaseDialect {
     override val driverName = "Duckdb"
     override val jdbcDriverClassName = "org.duckdb.DuckDBDriver"
 
+    // v2.8: 前端连接表单元数据
+    override val displayName = "DuckDB (Embedded OLAP)"
+    override val connectionType = ConnectionType.EMBEDDED
+    override val requiresHost = false
+    override val requiresPort = false
+    override val supportsUser = false
+    override val supportsPassword = false
+    override val supportsSchema = true
+    override val supportsCrossDatabase = true      // ATTACH 多文件
+    override val jdbcUrlExample = "jdbc:duckdb:/path/to/data.duckdb  (or :memory: / .csv / .parquet / .json / .xlsx)"
+    override val capabilities = setOf(
+        DialectCapability.ROUTINES,
+        DialectCapability.VIEWS,
+        DialectCapability.INDEXES,
+        DialectCapability.FOREIGN_KEYS,
+        DialectCapability.MULTI_SCHEMA,
+        DialectCapability.EXPORT,
+        DialectCapability.EMBEDDED_MODE,
+    )
+
     override fun buildJdbcUrl(host: String, port: Int, database: String): String {
         // host/port 完全忽略；database 承载 DuckDB URL 主体
         val resolved = if (database.isBlank()) "" else resolveLocalFile(database)

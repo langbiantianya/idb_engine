@@ -1,18 +1,18 @@
-# 📖 Kotlin 数据库管理端后端架构设计文档 (V2.7)
+# 📖 Kotlin 数据库管理端后端架构设计文档 (V2.8)
 
 ## 1. 架构总览 (Architecture Overview)
 
 Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)** 的底层"数据库算力引擎"。它不暴露网络端口，完全依附于 Wails 主进程的生命周期，通过 **gRPC over IPC 抽象层** 接收指令并返回结果。
 
 **系统拓扑流（gRPC 模式）：**
-`[前端 Webview]` ↔ `[Wails Go 主进程]` ↔ `(gRPC HTTP/2 + Protobuf)` ↔ `[Kotlin 引擎进程]` ↔ `[MySQL / PostgreSQL / H2]`
+`[前端 Webview]` ↔ `[Wails Go 主进程]` ↔ `(gRPC HTTP/2 + Protobuf)` ↔ `[Kotlin 引擎进程]` ↔ `[MySQL / PostgreSQL / H2 / DuckDB / SQLite]`
 
 **IPC 传输抽象**（v2.1 起新增，详见 §3.6）：引擎与 Wails 主进程之间的 gRPC 通信可通过 CLI 参数 `--ipc` 在三种传输间切换：
 - `tcp`（默认） — TCP loopback `localhost:<port>`，跨平台
 - `unix` — Unix Domain Socket，Linux/macOS/BSD，Linux 使用 epoll native，macOS/BSD 走 NIO
 - `pipe` — Windows 命名管道（grpc-java 1.76 客户端支持；服务端暂未开放公共 API，抛 `UnsupportedOperationException`）
 
-> **架构升级**：自 v2.0 起，引擎以 gRPC 服务端方式运行（默认 `:50051`，可通过 `--port` 覆盖）。客户端通过 gRPC streaming 调用 `IdbEngine.Handle(Request)`，接收 `stream<Response>`（流式响应使用 `stream`/`end` 字段分帧）。自 v2.2 起，所有 `Request.payload` / `Response.data` 字段都已替换为强类型 per-Category protobuf 消息（`oneof body`）。自 v2.3 起，13 个业务 handler 全部接收 typed per-Category proto 消息、返回 typed `<Category><Action>Response` 消息；`TypedRequestMapper` / `TypedResponseMapper` 已删除，业务层不再经过 `JsonObject` 转换。自 v2.4 起，列表项 envelope 也已 typed（per-list `*ListItem` 消息 + typed `Row` wrapper）；仅方言差异显著的 item shape（`USER.LIST` overloaded、FUNCTION.CALL/INFO、SYSTEM.SERVER_INFO extras）保留 `google.protobuf.Value`。旧的 stdin/stdout 长度前缀 Protobuf 帧协议已彻底移除。自 v2.5 起，gRPC 依赖从 `1.68.0` 升至 `1.76.0`，并接入 `grpc-kotlin` 协程 stub（`IdbEngineCoroutineImplBase`）+ Kotlin DSL 生成器（`protobuf-kotlin-lite`）；13 个 handler + `RequestDispatcher` + 11 个集成测试全部以 Kotlin DSL 形态（`xxxRequest { ... }` / `xxxResponse { ... }` / `xxxItem { ... }` / `request { ... }` / `response { ... }`）编写，业务层无 `Request.newBuilder()...build()` 残留。自 v2.6 起，`RequestDispatcher` 重构为表驱动（`Map<Pair<Category, Action>, Route>`），新增跨切面 `RequestOptions { trace_id, dry_run, timeout_ms }`，新增 `SQL.EXPLAIN` 路由、`if_exists` / `if_not_exists` 贯通到 SCHEMA/TABLE/INDEX/FOREIGN_KEY。自 v2.7 起，新增 `dialect-duckdb` 模块（第 4 个方言，本地嵌入式 OLAP）：驱动 `org.duckdb.DuckDBDriver` 1.5.5.1，连接目标支持内存 / `.duckdb` / `.csv` / `.parquet` / `.json` / `.xlsx`（Excel 走 POI 预转换）；自增主键走 `SEQUENCE + DEFAULT nextval`；FK 走 table-rebuild；新增 SPI 钩子 `buildPreCreateStatements` 用于 CREATE TABLE 前的预创建语句；gRPC 依赖升至 `1.83.1`，`grpc-kotlin-stub` 升至 `1.5.0`，`protobuf-kotlin-lite` 升至 `4.35.1`。
+> **架构升级**：自 v2.0 起，引擎以 gRPC 服务端方式运行（默认 `:50051`，可通过 `--port` 覆盖）。客户端通过 gRPC streaming 调用 `IdbEngine.Handle(Request)`，接收 `stream<Response>`（流式响应使用 `stream`/`end` 字段分帧）。自 v2.2 起，所有 `Request.payload` / `Response.data` 字段都已替换为强类型 per-Category protobuf 消息（`oneof body`）。自 v2.3 起，13 个业务 handler 全部接收 typed per-Category proto 消息、返回 typed `<Category><Action>Response` 消息；`TypedRequestMapper` / `TypedResponseMapper` 已删除，业务层不再经过 `JsonObject` 转换。自 v2.4 起，列表项 envelope 也已 typed（per-list `*ListItem` 消息 + typed `Row` wrapper）；仅方言差异显著的 item shape（`USER.LIST` overloaded、FUNCTION.CALL/INFO、SYSTEM.SERVER_INFO extras）保留 `google.protobuf.Value`。旧的 stdin/stdout 长度前缀 Protobuf 帧协议已彻底移除。自 v2.5 起，gRPC 依赖从 `1.68.0` 升至 `1.76.0`，并接入 `grpc-kotlin` 协程 stub（`IdbEngineCoroutineImplBase`）+ Kotlin DSL 生成器（`protobuf-kotlin-lite`）；13 个 handler + `RequestDispatcher` + 11 个集成测试全部以 Kotlin DSL 形态（`xxxRequest { ... }` / `xxxResponse { ... }` / `xxxItem { ... }` / `request { ... }` / `response { ... }`）编写，业务层无 `Request.newBuilder()...build()` 残留。自 v2.6 起，`RequestDispatcher` 重构为表驱动（`Map<Pair<Category, Action>, Route>`），新增跨切面 `RequestOptions { trace_id, dry_run, timeout_ms }`，新增 `SQL.EXPLAIN` 路由、`if_exists` / `if_not_exists` 贯通到 SCHEMA/TABLE/INDEX/FOREIGN_KEY。自 v2.7 起，新增 `dialect-duckdb` 模块（第 4 个方言，本地嵌入式 OLAP）：驱动 `org.duckdb.DuckDBDriver` 1.5.5.1，连接目标支持内存 / `.duckdb` / `.csv` / `.parquet` / `.json` / `.xlsx`（Excel 走 POI 预转换）；自增主键走 `SEQUENCE + DEFAULT nextval`；FK 走 table-rebuild；新增 SPI 钩子 `buildPreCreateStatements` 用于 CREATE TABLE 前的预创建语句；gRPC 依赖升至 `1.83.1`，`grpc-kotlin-stub` 升至 `1.5.0`，`protobuf-kotlin-lite` 升至 `4.35.1`。自 v2.8 起，新增 `dialect-sqlite` 模块（第 5 个方言，本地嵌入式关系型数据库）：驱动 `org.sqlite.JDBC` 3.46.1.3，连接目标支持 `:memory:` / `.db` 文件；自增主键走 `INTEGER PRIMARY KEY AUTOINCREMENT`（inline，必须 `INTEGER` 类型）；不暴露用户/权限/触发器/存储过程（抛 `UnsupportedOperationException`）；FK 走 table-rebuild（SQLite 不支持 `ALTER TABLE DROP CONSTRAINT`）；多 database 走 `ATTACH/DETACH`；新增 SPI 元数据扩展（`displayName` / `connectionType` / `requiresHost` / `requiresPort` / `defaultPort` / `supportsUser` / `supportsPassword` / `supportsSchema` / `supportsCrossDatabase` / `jdbcUrlExample` / `capabilities`），全部以 SPI 默认实现提供，向后兼容；新增 SYSTEM.`LIST_DRIVERS` action（Action 18），返回所有已加载方言的连接元数据列表供前端动态渲染连接表单；新增 `ConnectionType` 枚举（`CLIENT_SERVER` / `EMBEDDED` / `FILE_BASED` / `IN_MEMORY`）+ `DialectCapability` 枚举（`USERS` / `PRIVILEGES` / `ROUTINES` / `VIEWS` / `INDEXES` / `FOREIGN_KEYS` / `TRIGGERS` / `CROSS_DATABASE` / `MULTI_SCHEMA` / `EXPORT` / `DDL_TRANSACTION` / `EMBEDDED_MODE`）；5 个方言全部声明各自元数据。
 >
 > **性能隔离**：数据导出模块运行在独立的子进程中，通过 `ExportProcessManager` 管理（同样通过 gRPC 连接到主进程的 side server），防止大数据量导出时 OOM 影响主进程稳定性。
 
@@ -22,7 +22,7 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 - **异步框架**：kotlinx-coroutines 1.11.0
 - **gRPC**：grpc-netty-shaded 1.83.1 + grpc-stub + grpc-protobuf + grpc-kotlin-stub 1.5.0（Kotlin 协程服务端 + Kotlin DSL 生成）
 - **Protobuf**：com.google.protobuf:protobuf-kotlin-lite 4.35.1（生成 *Kt DSL builder）+ protoc 3.25.5 + protoc-gen-grpc-java 1.68.0 + protoc-gen-grpc-kotlin 1.4.1（proto3 + 强类型 per-Category 消息 + 强类型 per-list-item 消息（v2.4）；少量遗留字段如 `MemoryInfo.extras` 仍使用 `google.protobuf.Value` 包装方言特定扩展；业务层全部以 Kotlin DSL 形态编写（v2.5））
-- **数据库驱动**：MySQL Connector/J 9.7.0、PostgreSQL JDBC Driver 42.7.11、H2 2.3.232、**DuckDB JDBC 1.5.5.1（v2.7 新增）**
+- **数据库驱动**：MySQL Connector/J 9.7.0、PostgreSQL JDBC Driver 42.7.11、H2 2.3.232、DuckDB JDBC 1.5.5.1（v2.7 新增）、**SQLite JDBC 3.46.1.3（v2.8 新增，driver 名 `Sqlite`）**
 - **连接池管理**：HikariCP 7.0.2
 - **数据序列化**：kotlinx-serialization-json 1.11.0（业务层）
 - **日志框架**：SLF4J 2.0.18 + Logback 1.5.13
@@ -30,7 +30,7 @@ Kotlin 后端被设计为一个**无头 (Headless)**、**无状态 (Stateless)**
 - **脚本引擎**：LuaJIT 4.1.0 + Lua 5.1~5.5 via luajava
 - **Excel 导出**：Apache POI 5.5.1（poi-ooxml SXSSF 流式 API）
 - **Parquet 导出**：Apache Parquet 1.17.1 + Hadoop 3.5.0
-- **测试框架**：JUnit 5 + kotlin.test — 191 测试全量通过（0 失败 / 0 错误），其中 H2 dialect 63 项 + engine 128 项
+- **测试框架**：JUnit 5 + kotlin.test — 376 测试全量通过（0 失败 / 0 错误，1 个 IpcConfigTest 用例在 Windows-only 环境 skip），其中 H2 dialect 63 项 + DuckDB dialect 81 项 + SQLite dialect 62 项 + engine 170 项
 
 ## 3. 核心机制设计 (Core Mechanisms)
 
@@ -154,7 +154,7 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 |---|---|---|
 | `id` | `string` | 请求唯一 ID |
 | `category` | `enum Category` | `SCHEMA` / `USER` / `TABLE` / `DATA` / `SQL` / `SYSTEM` / `FUNCTION` / `EXPORT` / `VIEW` / `INDEX` / `FOREIGN_KEY` / `TRIGGER` |
-| `action` | `enum Action` | `LIST` / `CREATE` / `UPDATE` / `DELETE` / `EXECUTE` / `GET_DDL` / `INFO` / `GRANTS` / `GENERATE` / `DEBUG` / `CALL` / `RUN_EXPORT` / `RENAME` / `TRUNCATE` / `TEST_CONNECTION` / `SERVER_INFO` |
+| `action` | `enum Action` | `LIST` / `CREATE` / `UPDATE` / `DELETE` / `EXECUTE` / `GET_DDL` / `INFO` / `GRANTS` / `GENERATE` / `DEBUG` / `CALL` / `RUN_EXPORT` / `RENAME` / `TRUNCATE` / `TEST_CONNECTION` / `SERVER_INFO` / `LIST_DRIVERS` |
 | `connection` | `ConnectionConfig` | 见下表 |
 | `body` | `oneof` | per-Category typed 消息（`schema_request`/`user_request`/.../`export_request`），见下方表格 |
 
@@ -164,7 +164,7 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 | Category | Request body | 关键字段 |
 |---|---|---|
-| `SYSTEM` | `SystemRequest` | （无字段；INFO/TEST_CONNECTION/SERVER_INFO 均无 payload） |
+| `SYSTEM` | `SystemRequest` | （无字段；INFO/TEST_CONNECTION/SERVER_INFO/LIST_DRIVERS 均无 payload） |
 | `SCHEMA` | `SchemaRequest` | `list { level, database }` / `create { name, options }` / `delete { name }` |
 | `USER` | `UserRequest` | `list { user, host }` / `create { user, password, host }` / `update { user, password, host, schema, privileges[], is_grant, table_name, with_grant_option }` / `delete { user, host }` / `grants { user, host }` |
 | `TABLE` | `TableRequest` | `list { schema }` / `column_list { table_name, schema }` / `create { table_name, columns[], options, schema }` / `update { table_name, operation, column, column_name, schema }` / `get_ddl { table_name, schema }` / `rename { old_name, table_name, new_name, schema }` / `delete { table_name, schema }` / `truncate { table_name, schema }` |
@@ -188,7 +188,7 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `driver` | `string` | `Mysql` / `Postgresql` / `H2` |
+| `driver` | `string` | `Mysql` / `Postgresql` / `H2` / `Duckdb` / `Sqlite` |
 | `host` | `string` | 数据库主机 |
 | `port` | `int32` | 数据库端口 |
 | `user` | `string` | 用户名 |
@@ -218,7 +218,7 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 | `TABLE` | `TableResponse` | `list { items[] }` / `columns { items[] }` / `create { created }` / `update { table_name, operation }` / `get_ddl { ddl }` / `rename { renamed, new_name }` / `delete { deleted }` / `truncate { truncated }` |
 | `DATA` | `DataResponse` | `list { total, page, page_size, rows[] }` / `create { affected_rows }` / `update { affected_rows }` / `delete { affected_rows }` |
 | `SQL` | `SqlResponse` | `execute { affected_rows }` / `explain { rows[] }` |
-| `SYSTEM` | `SystemResponse` | `info { jvm_version, ..., memory { max, total, used, free }, uptime, pid }` / `test_connection { ok, driver, host, port, database, error }` / `server_info { version, catalog, current_database, mode, extras }` |
+| `SYSTEM` | `SystemResponse` | `info { jvm_version, ..., memory { max, total, used, free }, uptime, pid }` / `test_connection { ok, driver, host, port, database, error }` / `server_info { version, catalog, current_database, mode, extras }` / `list_drivers { items[] }` |
 | `FUNCTION` | `FunctionResponse` | `list { items[] }` / `info { info }` / `get_ddl { ddl }` / `create { success, message }` / `delete { success, message, name, routine_type }` / `call { result }` / `debug { items[] }` / `update { valid, message }` |
 | `VIEW` | `ViewResponse` | `list { items[] }` / `create { created }` / `delete { deleted }` / `get_ddl { ddl }` |
 | `INDEX` | `IndexResponse` | `list { items[] }` / `create { created, table_name }` / `delete { deleted }` |
@@ -250,17 +250,17 @@ Kotlin 进程不维护"当前选中的数据库"等业务状态。**每一次**�
 | `DATA.GENERATE` | **流式** | 每条 INSERT 回报一次进度 |
 | `EXPORT.RUN_EXPORT` | **流式** | 进度帧 throttled（每 1000 行或每 200ms） |
 | 其它所有 `(Category, Action)` | 单次 | 一次性 Response |
-| `SQL.EXPLAIN`（Action 15） | 未路由 | proto 定义但 dispatcher 未实现 — 调用会抛 `UnsupportedOperationException` |
+| `SQL.EXPLAIN`（Action 15） | 单次 | 由 `SqlEngineHandler.explain` → `RequestDispatcher` 路由（v2.6 起打通） |
 
 ## 5. 功能模块详细设计 (Feature Modules)
 
 采用 **方言抽象层 (Dialect Abstraction Layer) + SPI 插件动态加载** 设计模式：
 
-- **DatabaseDialect SPI**（`api` 模块）：定义所有数据库特定操作的抽象方法
-- **MySQLDialect / PostgreSQLDialect / H2Dialect**（独立插件模块）：具体方言实现
-- **DialectLoader**（`engine` 模块）：启动时扫描 `dialects/` 目录，通过 `ServiceLoader<DatabaseDialect>` 自动发现并注册
+- **DatabaseDialect SPI**（`api` 模块）：定义所有数据库特定操作的抽象方法 + 连接元数据扩展（v2.8）
+- **MySQLDialect / PostgreSQLDialect / H2Dialect / DuckDBDialect（v2.7）/ SQLiteDialect（v2.8）**（独立插件模块）：具体方言实现
+- **DialectLoader**（`engine` 模块）：启动时扫描 `dialects/` 目录，通过 `ServiceLoader<DatabaseDialect>` 自动发现并注册；提供 `getAllDialects()` 返回所有已加载方言供 `SYSTEM.LIST_DRIVERS` 路由使用
 
-**关键事实**（v2.1 验证）：三个方言均完整实现了 SPI 接口的**全部方法**（`listRoutines`、`getRoutineInfo`、`callRoutine`、`validateRoutineDDL`、`debugRoutine`、`createRoutine`、`dropRoutine` 等），不再有占位实现。
+**关键事实**（v2.8）：五个方言均完整实现了 SPI 接口的**全部方法**（`listRoutines`、`getRoutineInfo`、`callRoutine`、`validateRoutineDDL`、`debugRoutine`、`createRoutine`、`dropRoutine` 等），不再有占位实现；并且**全部声明**各自连接元数据（`displayName` / `connectionType` / `requiresHost` / `defaultPort` / `capabilities` 等）。
 
 ### 5.1 架构管理 (Schema Management) — `category: "SCHEMA"`
 
@@ -576,7 +576,7 @@ MySQL 用 `SHOW CREATE TABLE`；PG 从 `information_schema` + `pg_catalog` 重�
 
 ### 5.6 系统信息 (System Info) — `category: "SYSTEM"`
 
-**支持的 Action**：`INFO` / `TEST_CONNECTION` / `SERVER_INFO`
+**支持的 Action**：`INFO` / `TEST_CONNECTION` / `SERVER_INFO` / `LIST_DRIVERS`
 
 #### INFO — JVM 运行时信息（无需 connection，字段被忽略）
 
@@ -611,7 +611,48 @@ MySQL 用 `SHOW CREATE TABLE`；PG 从 `information_schema` + `pg_catalog` 重�
 // PG Response: {"version":"PostgreSQL 16.0 ...","current_database":"myapp_db",...}
 // MySQL Response: {"version":"8.0.36","catalog":"def",...}
 // H2 Response: {"version":"2.3.232","mode":"REGULAR",...}
+// DuckDB Response: {"version":"v1.5.5","mode":"embedded",...}
+// SQLite Response: {"version":"3.46.1","mode":"embedded","product":"SQLite",...}
 ```
+
+#### LIST_DRIVERS — 枚举已加载方言的连接元数据（v2.8 起新增，无需 connection）
+
+返回所有 `DialectLoader` 注册的方言的连接配置元数据，**供前端动态渲染"新建连接"表单**——不需要硬编码 driver / port / 是否需要 user 等信息。
+
+```json
+{"id":"r27","category":"SYSTEM","action":"LIST_DRIVERS","connection":{},"payload":{}}
+// Response data: { items: [ DialectInfo, DialectInfo, ... ] }
+```
+
+`DialectInfo` 字段（proto3 `message DialectInfo`）：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `driver_name` | `string` | 后端 driver 名（如 `"Mysql"` / `"Sqlite"`），用于 `ConnectionConfig.driver` |
+| `display_name` | `string` | 前端展示用名（如 `"MySQL"` / `"SQLite (Embedded)"`） |
+| `jdbc_driver_class_name` | `string` | JDBC driver 类全名（如 `"com.mysql.cj.jdbc.Driver"`） |
+| `jdbc_url_example` | `string` | 示例 JDBC URL，用于前端 placeholder |
+| `connection_type` | `string` | `CLIENT_SERVER` / `EMBEDDED` / `FILE_BASED` / `IN_MEMORY` |
+| `requires_host` | `bool` | 是否需要 `host` 字段 |
+| `requires_port` | `bool` | 是否需要 `port` 字段 |
+| `default_port` | `int32` | 默认端口（0 = 无） |
+| `supports_user` | `bool` | 是否需要 `user` / `password` |
+| `supports_password` | `bool` | 是否需要 `password` |
+| `supports_schema` | `bool` | 是否需要 `schema` 字段（PG/H2 = true） |
+| `supports_cross_database` | `bool` | 是否支持多 database 切换（PG = true） |
+| `capabilities` | `repeated string` | 方言能力标签（`USERS` / `VIEWS` / `INDEXES` / `ROUTINES` / `TRIGGERS` / `FOREIGN_KEYS` / `EXPORT` / `EMBEDDED_MODE` / `MULTI_SCHEMA` / `CROSS_DATABASE` / `DDL_TRANSACTION` / `PRIVILEGES`） |
+
+**5 个方言的元数据快照**：
+
+| driver_name | display_name | connection_type | default_port | requiresHost | supportsUser | supportsSchema | 关键 capabilities |
+|---|---|---|---|---|---|---|---|
+| `Mysql` | `MySQL` | `CLIENT_SERVER` | 3306 | ✓ | ✓ | ✗ | `USERS, PRIVILEGES, ROUTINES, VIEWS, INDEXES, FOREIGN_KEYS, TRIGGERS, EXPORT, DDL_TRANSACTION` |
+| `Postgresql` | `PostgreSQL` | `CLIENT_SERVER` | 5432 | ✓ | ✓ | ✓ | `+ MULTI_SCHEMA, CROSS_DATABASE` |
+| `H2` | `H2 (In-Memory)` | `IN_MEMORY` | 0 | ✗ | ✗ | ✓ | `+ EMBEDDED_MODE` (无 `USERS`/`TRIGGERS`) |
+| `Duckdb` | `DuckDB (Embedded OLAP)` | `EMBEDDED` | 0 | ✗ | ✗ | ✓ | `VIEWS, INDEXES, FOREIGN_KEYS, MULTI_SCHEMA, EXPORT, EMBEDDED_MODE` (无 `USERS`/`TRIGGERS`/`ROUTINES`) |
+| `Sqlite` | `SQLite (Embedded)` | `FILE_BASED` | 0 | ✗ | ✗ | ✗ | `VIEWS, INDEXES, FOREIGN_KEYS, EXPORT, EMBEDDED_MODE` (无 `USERS`/`TRIGGERS`/`ROUTINES`) |
+
+返回顺序按 `driverName` 字典序升序，确保前端渲染顺序稳定。
 
 ### 5.7 造数引擎 (Data Generation) — `category: "DATA"`, `action: "GENERATE"`
 
@@ -884,6 +925,61 @@ MySQL 用 `SHOW CREATE TABLE`；PG 从 `information_schema` + `pg_catalog` 重�
 
 被取消的导出任务返回 `{"success": false, "error": "Export cancelled by user"}`。
 
+### 5.14 SQLite 嵌入式关系型数据库 (v2.8 新增) — `driver: "Sqlite"`
+
+**支持的 Action**：与 MySQL/PG 对齐（SCHEMA / TABLE / DATA / SQL / VIEW / INDEX / FOREIGN_KEY / FUNCTION / TRIGGER / EXPORT / SYSTEM），**不暴露** USER/GRANTS（抛 `UnsupportedOperationException`）；FUNCTION/TRIGGER 因 SQLite 无过程/函数概念而抛 `UnsupportedOperationException`。
+
+#### 连接约定
+
+`host` / `port` / `user` / `password` / `use_ssl` 字段全部忽略——SQLite 是嵌入式方言，**仅由 `database` 字段承载路径**：
+
+| `database` 取值 | 实际 JDBC URL | 用途 |
+|---|---|---|
+| `""` 或 `":memory:"` | `jdbc:sqlite::memory:` | 进程内内存数据库（每连接私有） |
+| `"/path/to/data.db"` | `jdbc:sqlite:/path/to/data.db` | 本地 SQLite 文件（多连接共享，文件锁） |
+
+> 注意：SQLite 内存模式每连接私有，PoolManager 多连接不共享同一实例。集成测试一律走**临时 `.db` 文件**。
+
+#### 方言特性
+
+- **默认 schema**：SQLite 只有内置 `main` / `temp` schema，业务层不暴露 schema 字段
+- **自增主键**：`INTEGER PRIMARY KEY AUTOINCREMENT`（必须 `INTEGER` 类型，必须 inline 在列定义里）。**`TableHandler.create` 检测到 `autoIncrementColumns.isNotEmpty()` 时不再追加表级 `PRIMARY KEY (cols)`，避免 SQLite "more than one primary key" 错误**
+- **多 database**：`ATTACH DATABASE '<path>' AS <alias>`；删除走 `DETACH`
+- **DDL 重建**：`getCreateTableDDL` 直接读取 `sqlite_master.sql` 原文（用户当时建的原样）
+- **修改列**：仅支持 `RENAME COLUMN`（SQLite 不支持 `ALTER COLUMN` 类型/默认值/可空性变更）
+- **FK 管理**：SQLite 不支持 `ALTER TABLE ADD/DROP CONSTRAINT`；通过 **table-rebuild** 路径（CREATE temp AS SELECT → DROP → CREATE with FK → INSERT → DROP temp）
+- **视图**：直接读 `sqlite_master.sql`；DROP/GET_DDL 完整支持
+- **索引**：`sqlite_master` + 解析 DDL 提取列名 + UNIQUE 判定
+- **TRUNCATE**：用 `DELETE FROM <table>` + `DELETE FROM sqlite_sequence WHERE name = '<table>` 模拟
+
+#### 不支持的能力
+
+| 操作 | 抛出的异常 |
+|---|---|
+| `USER.LIST` / `USER.CREATE` / `USER.UPDATE` / `USER.DELETE` / `USER.GRANTS` | `UnsupportedOperationException("Sqlite 不支持...")` |
+| `FUNCTION.*`（routines 概念） | `UnsupportedOperationException("Sqlite 不支持函数/存储过程")` |
+| `TRIGGER.LIST` / `TRIGGER.GET_DDL` | `UnsupportedOperationException`（SPI 默认） |
+
+#### SQL 危险关键词（方言层 `validateSqlFragment` 禁用）
+
+通用集合 + SQLite 特有：`ATTACH` / `DETACH` / `PRAGMA` / `REPLACE` / `VACUUM` / `REINDEX`。
+
+#### DialectInfo 元数据
+
+| 字段 | 取值 |
+|---|---|
+| `driver_name` | `"Sqlite"` |
+| `display_name` | `"SQLite (Embedded)"` |
+| `connection_type` | `FILE_BASED` |
+| `requires_host` | `false` |
+| `requires_port` | `false` |
+| `default_port` | `0` |
+| `supports_user` | `false` |
+| `supports_password` | `false` |
+| `supports_schema` | `false` |
+| `supports_cross_database` | `false` |
+| `capabilities` | `VIEWS, INDEXES, FOREIGN_KEYS, EXPORT, EMBEDDED_MODE` |
+
 ## 6. 安全与健壮性保障 (Security & Reliability)
 
 1. **防进程孤儿 (Graceful Shutdown)**：引擎由 `IdbEngineServer` 阻塞在 `server.awaitTermination()`；JVM Shutdown Hook 在终止时调用 `transport.cleanup()` + `PoolManager.closeAll()` + `DriverLoader.closeAll()` + `DialectLoader.closeAll()`。
@@ -908,6 +1004,10 @@ idb_engine/                          Gradle 多模块项目
 ├── dialect-postgresql/              PostgreSQL 方言插件
 ├── dialect-h2/                      H2 方言插件（嵌入式 + 测试）
 │   └── src/test/kotlin/com/kxxnzstdsw/dialect/H2DialectTest.kt   (63 tests)
+├── dialect-duckdb/                  DuckDB 方言插件（v2.7 新增，嵌入式 OLAP）
+│   └── src/test/kotlin/com/kxxnzstdsw/dialect/DuckDBDialectTest.kt  (81 tests)
+├── dialect-sqlite/                  SQLite 方言插件（v2.8 新增，嵌入式关系型）
+│   └── src/test/kotlin/com/kxxnzstdsw/dialect/SQLiteDialectTest.kt   (62 tests)
 │
 └── engine/                          主引擎模块
     └── src/main/kotlin/com/kxxnzstdsw/
@@ -938,7 +1038,7 @@ idb_engine/                          Gradle 多模块项目
         │   ├── FunctionHandler.kt
         │   ├── UserHandler.kt
         │   ├── SqlEngineHandler.kt
-        │   ├── SystemHandler.kt     含 TEST_CONNECTION / SERVER_INFO
+        │   ├── SystemHandler.kt     含 TEST_CONNECTION / SERVER_INFO / LIST_DRIVERS（v2.8）
         │   ├── ExportHandler.kt
         │   ├── ViewHandler.kt
         │   ├── IndexHandler.kt
@@ -953,24 +1053,34 @@ idb_engine/                          Gradle 多模块项目
     └── src/main/proto/
         └── idb_engine.proto         gRPC service + Request/Response/ConnectionConfig + Category/Action enums
 
-    └── src/test/kotlin/com/kxxnzstdsw/   96 tests
+    └── src/test/kotlin/com/kxxnzstdsw/   170 tests
         ├── ipc/
-        │   ├── IpcConfigTest.kt                  (9)
+        │   ├── IpcConfigTest.kt                  (20)
         │   ├── IpcTransportTest.kt               (7)
         │   ├── TcpIpcTransportIntegrationTest.kt (1)
         │   ├── UnixSocketIpcTransportIntegrationTest.kt (2)
         │   └── NamedPipeIpcTransportIntegrationTest.kt   (2)
         ├── pool/PoolManagerTest.kt               (11)
         ├── loader/DialectLoaderTest.kt           (5)
-        └── integration/                          (60, 11 个 handler × H2)
+        ├── integration/                          (122, 12 个 handler × H2 + DuckDB + SQLite + Envelope/Route/System/DuckDB/SQLite)
+        │   ├── *HandlerIntegrationTest.kt        (60, 11 个 handler × H2)
+        │   ├── DuckDBHandlerIntegrationTest.kt   (27, DuckDB 端到端)
+        │   ├── SQLiteHandlerIntegrationTest.kt   (7, SQLite 端到端)
+        │   ├── TypedRequestEnvelopeIntegrationTest (7, typed envelope)
+        │   ├── UserGrantsIntegrationTest         (2)
+        │   ├── DataGenerateIntegrationTest       (2)
+        │   ├── FunctionGetDdlIntegrationTest     (2)
+        │   ├── SqlExplainRouteIntegrationTest    (2)
+        │   ├── EnvelopeOptionsIntegrationTest    (4)
+        │   └── SystemListDriversIntegrationTest  (8, LIST_DRIVERS 元数据, v2.8 新增)
 ```
 
 构建产物结构（`engine/build/libs/`）：
 ```
 idb-engine.jar       主引擎瘦包
 libs/                运行时依赖（Kotlin、gRPC、HikariCP、日志、api、LuaJIT）
-drivers/             JDBC 驱动（mysql-connector-j、postgresql、h2）
-dialects/            方言插件（SPI 动态加载）
+drivers/             JDBC 驱动（mysql-connector-j、postgresql、h2、duckdb_jdbc、sqlite-jdbc）
+dialects/            方言插件（SPI 动态加载，5 个：idb-dialect-{mysql,postgresql,h2,duckdb,sqlite}）
 ```
 
 ## 8. 构建与部署 (Build & Deploy)
@@ -1055,7 +1165,9 @@ for {
 - **表驱动 RequestDispatcher（v2.6）**：9 个 `handleX` 函数 + 11 个 `wrapTypedResponse` `when` 分支 → 单个 typed `routes` map（`Pair<Category, Action>` → `Route{invoke, wrap}`）；新 (Category, Action) 仅需一个 map 条目；消除 `wrapTypedResponse` 中静默 `else -> {}` 兜底；`SQL.EXPLAIN` 路由打通（之前 `SqlEngineHandler.explain` 已实现但 dispatcher 从未路由）
 - **跨切面 Envelope Options（v2.6）**：新增 `RequestOptions { trace_id, dry_run, timeout_ms }` 跨切面；MDC 注入 `trace_id`；`dryRun=true` + write action 直接短路返回 success（不修改数据库）；`timeoutMs > 0` 包 `withTimeoutOrNull`，超时返回 `success=false, error="timeout"`
 - **`if_exists` / `if_not_exists` 贯通（v2.6）**：SCHEMA/TABLE/INDEX/FOREIGN_KEY 路径全部支持 `optional bool if_exists` / `optional bool if_not_exists`；方言层 SPI 与 handler 实现已贯通
-- 数据库方言抽象层（DatabaseDialect SPI + MySQL/PostgreSQL/H2/DuckDB 插件，**所有 SPI 方法四个方言均完整实现**（v2.7））
+- 数据库方言抽象层（DatabaseDialect SPI + MySQL/PostgreSQL/H2/DuckDB/SQLite 插件，**所有 SPI 方法五个方言均完整实现**（v2.8））
+- **SPI 连接元数据扩展（v2.8）**：`DatabaseDialect` 新增 `displayName` / `connectionType` / `requiresHost` / `requiresPort` / `defaultPort` / `supportsUser` / `supportsPassword` / `supportsSchema` / `supportsCrossDatabase` / `jdbcUrlExample` / `capabilities` 11 个属性（默认实现，**完全向后兼容**）；新增 `ConnectionType` 枚举（`CLIENT_SERVER` / `EMBEDDED` / `FILE_BASED` / `IN_MEMORY`）+ `DialectCapability` 枚举（`USERS` / `PRIVILEGES` / `ROUTINES` / `VIEWS` / `INDEXES` / `FOREIGN_KEYS` / `TRIGGERS` / `CROSS_DATABASE` / `MULTI_SCHEMA` / `EXPORT` / `DDL_TRANSACTION` / `EMBEDDED_MODE`）；5 个方言全部声明各自元数据
+- **`SYSTEM.LIST_DRIVERS` action（v2.8 新增）**：枚举所有已加载方言并返回 `repeated DialectInfo` 元数据，供前端**动态渲染"新建连接"表单**（无需硬编码 driver/port/是否需要 user）；`RequestDispatcher` 表驱动新增 `(SYSTEM, LIST_DRIVERS) → Route` 一条；`DialectLoader.getAllDialects()` 提供枚举入口
 - 连接池管理（HikariCP + SHA-256 缓存，key 包含 password）
 - 13 个 handler 全部使用 suspend 协程
 - 流式大数据输出（DATA LIST pageSize=0 / SQL SELECT / DATA GENERATE / EXPORT，JDBC 游标防 OOM）
@@ -1077,13 +1189,15 @@ for {
 - 数据导出引擎（5 种格式：CSV / JSON Lines / SQL INSERT / Excel / Parquet，独立子进程隔离）
 - 跨平台 IPC 传输抽象（IpcTransport SPI + TCP / UDS / Named Pipe 三实现 + Linux epoll native，CLI 参数切换）
 - **DuckDB 方言插件（v2.7 新增）**：第 4 个方言 `Duckdb`，仅本地嵌入式（内存 / `.duckdb` / `.csv` / `.parquet` / `.json` / `.xlsx`）。Excel 走 Apache POI 5.5.1 预转换为临时 DuckDB。自增主键用 `SEQUENCE + DEFAULT nextval + 表级 PRIMARY KEY` 兜底（因 DuckDB 1.5.5.1 不接受 IDENTITY+表级 PK 组合，也不支持 `INTEGER PRIMARY KEY` ROWID 自填充）。FK 走 table-rebuild（因 DuckDB 不支持 `ALTER TABLE ADD/DROP CONSTRAINT` + 忽略 `CONSTRAINT fk_name`）。用户/权限/触发器抛 `UnsupportedOperationException`。
-- 299 个测试全通过，0 失败 / 0 错误：
+- **SQLite 方言插件（v2.8 新增）**：第 5 个方言 `Sqlite`，仅本地嵌入式（`:memory:` / `.db` 文件）。host/port/user/password 全部忽略。JDBC 驱动 `org.sqlite.JDBC` 3.46.1.3。自增主键用 `INTEGER PRIMARY KEY AUTOINCREMENT`（必须 INTEGER 类型，必须 inline 在列定义里；`TableHandler.create` 检测到 `autoIncrementColumns.isNotEmpty()` 时跳过表级 `PRIMARY KEY` 子句以避免 SQLite "more than one primary key"）。FK 走 table-rebuild（CREATE temp AS SELECT → DROP → CREATE with FK → INSERT → DROP temp），`addForeignKey` 不支持 CONSTRAINT 子句名（SQLite CREATE TABLE 语法限制）。MODIFY_COLUMN 仅支持 RENAME（SQLite 无 ALTER COLUMN）。TRUNCATE 用 `DELETE FROM` + 重置 `sqlite_sequence`。多 database 用 `ATTACH/DETACH`。用户/权限/触发器/存储过程抛 `UnsupportedOperationException`。SQL 危险关键词额外禁用 `ATTACH/DETACH/PRAGMA/REPLACE/VACUUM/REINDEX`。
+- **376 个测试全通过，0 失败 / 0 错误**（1 个 Windows-only IpcConfigTest 用例跳过）：
   - `:dialect-h2:test` — H2 方言 63 测试
   - `:dialect-duckdb:test` — DuckDB 方言 81 测试（v2.7 新增）
-  - `:engine:test` — 155 测试（含 27 个 `DuckDBHandlerIntegrationTest`，v2.7 新增）
+  - `:dialect-sqlite:test` — SQLite 方言 62 测试（v2.8 新增）
+  - `:engine:test` — 170 测试（含 27 个 `DuckDBHandlerIntegrationTest` + 7 个 `SQLiteHandlerIntegrationTest` + 8 个 `SystemListDriversIntegrationTest`，v2.8 新增）
     - `pool/PoolManagerTest` — 11
     - `loader/DialectLoaderTest` — 5
-    - `ipc/IpcConfigTest` — 20
+    - `ipc/IpcConfigTest` — 20（1 个 Windows-only 跳过）
     - `ipc/IpcTransportTest` — 7
     - `ipc/TcpIpcTransportIntegrationTest` — 1
     - `ipc/UnixSocketIpcTransportIntegrationTest` — 2（`@EnabledOnOs(LINUX, MAC, FREEBSD)`）
@@ -1096,10 +1210,12 @@ for {
     - `integration/SqlExplainRouteIntegrationTest` — 2（SQL.EXPLAIN 端到端路由，v2.6 之前未实现）
     - `integration/EnvelopeOptionsIntegrationTest` — 4（dryRun / timeoutMs envelope 跨切面）
     - `integration/DuckDBHandlerIntegrationTest` — 27（DuckDB 端到端：SCHEMA/TABLE/DATA/SQL/VIEW/INDEX/FK/FUNCTION/SYSTEM/LOCAL FILES/EXPORT）
+    - `integration/SQLiteHandlerIntegrationTest` — 7（SQLite 端到端：SCHEMA/TABLE/DATA/VIEW/INDEX/SYSTEM，v2.8 新增）
+    - `integration/SystemListDriversIntegrationTest` — 8（LIST_DRIVERS 元数据枚举 + 5 个方言分别验证，v2.8 新增）
 
 ⏳ 待扩展：
 - GraalVM Native Image 编译
-- 更多数据库方言插件（Oracle, SQL Server, SQLite — 实现 SPI 接口即可）
+- 更多数据库方言插件（Oracle, SQL Server — 实现 SPI 接口即可；SQLite 已于 v2.8 完成）
 - 性能监控与指标上报
 - Windows 命名管道服务端（需 JNA + Win32 CreateNamedPipe 自实现）
 
@@ -1115,4 +1231,5 @@ for {
 | v2.4 | gRPC + 强类型 per-list-item 消息 | 8 个 typed per-list-item 消息（`TableListItem` / `ViewListItem` / `IndexListItem` / `ForeignKeyListItem` / `TriggerListItem` / `FunctionListItem` / `FunctionDebugItem` / `UserGrantItem`）取代 list/response 中遗留的 `repeated google.protobuf.Value`；动态行使用 typed `Row { map<string, Value> values }` wrapper；方言差异显著的 item shape（USER.LIST overloaded、FUNCTION.CALL/INFO、SYSTEM.SERVER_INFO extras）保留 `google.protobuf.Value`；11 个 handler 集成测试改用 typed accessor（`item.name` 替代 `item.structValue.fieldsMap["name"]?.stringValue`）；179 个测试全通过 |
 | v2.5 | gRPC 1.76 + grpc-kotlin 协程服务端 + Kotlin DSL end-to-end | gRPC 依赖 `1.68.0` → `1.76.0`，接入 `grpc-kotlin-stub 1.4.1`；服务端 `IdbEngineImpl : IdbEngineGrpcKt.IdbEngineCoroutineImplBase()`（suspend `handle()` → `Flow<Response>`）；protoc 工具链锁定 `protoc 3.25.5` + `protoc-gen-grpc-java 1.68.0` + `protoc-gen-grpc-kotlin 1.4.1`；启用 `protobuf-kotlin-lite` 生成 Kotlin DSL（`xxxRequest { ... }` / `xxxResponse { ... }` / `xxxItem { ... }` / `request { ... }` / `response { ... }`）；13 个 handler + `RequestDispatcher` + 11 个集成测试全部切到 DSL，业务层无 `Request.newBuilder()...build()` 残留；移除 `grpc-core` / `protobuf-java-util` / `ksp` / `kotlinx-serialization-protobuf` 等无用依赖；179 个测试全通过 |
 | v2.6 | 表驱动 Dispatcher + 跨切面 Envelope Options | `RequestDispatcher` 重构：9 个 `handleX` 函数 + 11 个 `wrapTypedResponse` `when` 分支 → 单个 typed `routes` map（`Pair<Category, Action>` → `Route{invoke, wrap}`）；新 (Category, Action) 仅需一个 map 条目；消除 `wrapTypedResponse` 中静默 `else -> {}` 兜底；`SQL.EXPLAIN` 路由打通（之前 `SqlEngineHandler.explain` 已实现但 dispatcher 从未路由）。新增 `RequestOptions { trace_id, dry_run, timeout_ms }`：MDC 注入 `trace_id`；`dryRun=true` + write action 短路返回 success（不修改数据库）；`timeoutMs > 0` 用 `withTimeoutOrNull` 包 handler 调用，超时返回 `success=false, error="timeout"`。`if_exists` / `if_not_exists` 在 SCHEMA/TABLE/INDEX/FOREIGN_KEY 路径下贯通（v2.6 之前仅 VIEW/FUNCTION.DELETE 支持）。191 测试全通过（128 engine + 63 H2） |
-| **v2.7 (当前)** | **DuckDB 方言插件（v2.7 新增）** | 新增 `dialect-duckdb` 模块（driver 名 `"Duckdb"`，JDBC `org.duckdb.DuckDBDriver` 1.5.5.1），仅本地嵌入式（内存 / `.duckdb` / `.csv` / `.parquet` / `.json` / `.xlsx`）；host/port 完全忽略，`database` 字段即路径。Excel 走 Apache POI 5.5.1 预转换为临时 DuckDB（`ExcelToDuckDbCache` 缓存避免重复转换）。自增主键用 `SEQUENCE + DEFAULT nextval + 表级 PRIMARY KEY` 兜底（因 DuckDB 1.5.5.1 不接受 IDENTITY+表级 PK 组合，也不支持 `INTEGER PRIMARY KEY` ROWID 自填充）。FK 走 table-rebuild（因 DuckDB 不支持 `ALTER TABLE ADD/DROP CONSTRAINT` + 忽略 `CONSTRAINT fk_name`，自动生成 `<table>_<cols>_fkey`）。`SHOW CREATE TABLE/VIEW` 解析失败 → 手动从 `information_schema` 重建 DDL。`duckdb_functions()` MACRO 列名 `macro_definition`（不是 `definition`/`description`）。`duckdb_constraints()` 无 `column_name`，只有 `constraint_column_names` (LIST)。FK `ON DELETE/UPDATE CASCADE/SET NULL/SET DEFAULT` 不支持 → 全部改写为 `NO ACTION`。同文件不同连接配置冲突 → 测试 fixture 强制走 `PoolManager`（不混用 DriverManager）。新 SPI 方法 `DatabaseDialect.buildPreCreateStatements(tableName, autoIncrementColumns): List<String>`（默认空实现）。299 测试全通过（81 DuckDB + 63 H2 + 155 engine） |
+| **v2.7** | **DuckDB 方言插件（v2.7 新增）** | 新增 `dialect-duckdb` 模块（driver 名 `"Duckdb"`，JDBC `org.duckdb.DuckDBDriver` 1.5.5.1），仅本地嵌入式（内存 / `.duckdb` / `.csv` / `.parquet` / `.json` / `.xlsx`）；host/port 完全忽略，`database` 字段即路径。Excel 走 Apache POI 5.5.1 预转换为临时 DuckDB（`ExcelToDuckDbCache` 缓存避免重复转换）。自增主键用 `SEQUENCE + DEFAULT nextval + 表级 PRIMARY KEY` 兜底（因 DuckDB 1.5.5.1 不接受 IDENTITY+表级 PK 组合，也不支持 `INTEGER PRIMARY KEY` ROWID 自填充）。FK 走 table-rebuild（因 DuckDB 不支持 `ALTER TABLE ADD/DROP CONSTRAINT` + 忽略 `CONSTRAINT fk_name`，自动生成 `<table>_<cols>_fkey`）。`SHOW CREATE TABLE/VIEW` 解析失败 → 手动从 `information_schema` 重建 DDL。`duckdb_functions()` MACRO 列名 `macro_definition`（不是 `definition`/`description`）。`duckdb_constraints()` 无 `column_name`，只有 `constraint_column_names` (LIST)。FK `ON DELETE/UPDATE CASCADE/SET NULL/SET DEFAULT` 不支持 → 全部改写为 `NO ACTION`。同文件不同连接配置冲突 → 测试 fixture 强制走 `PoolManager`（不混用 DriverManager）。新 SPI 方法 `DatabaseDialect.buildPreCreateStatements(tableName, autoIncrementColumns): List<String>`（默认空实现）。299 测试全通过（81 DuckDB + 63 H2 + 155 engine） |
+| **v2.8 (当前)** | **SQLite 方言插件 + SPI 连接元数据扩展 + SYSTEM.LIST_DRIVERS** | 新增 `dialect-sqlite` 模块（driver 名 `"Sqlite"`，JDBC `org.sqlite.JDBC` 3.46.1.3），仅本地嵌入式（`:memory:` / `.db` 文件）；host/port/user/password 全部忽略，`database` 字段即路径。自增主键 `INTEGER PRIMARY KEY AUTOINCREMENT`（inline，**`TableHandler.create` 检测到 autoIncrementColumns 时跳过表级 `PRIMARY KEY`**）。FK 走 table-rebuild（CREATE temp AS SELECT → DROP → CREATE with FK → INSERT → DROP temp），`addForeignKey` 不支持 CONSTRAINT 子句名（SQLite 语法）。MODIFY_COLUMN 仅 RENAME。TRUNCATE 走 `DELETE FROM` + 重置 `sqlite_sequence`。多 database 走 `ATTACH/DETACH`。用户/权限/触发器/存储过程抛 `UnsupportedOperationException`。**SPI 元数据扩展**：`DatabaseDialect` 新增 `displayName` / `connectionType` / `requiresHost` / `requiresPort` / `defaultPort` / `supportsUser` / `supportsPassword` / `supportsSchema` / `supportsCrossDatabase` / `jdbcUrlExample` / `capabilities` 11 个属性（默认实现，**完全向后兼容**）。新增 `ConnectionType` 枚举（`CLIENT_SERVER` / `EMBEDDED` / `FILE_BASED` / `IN_MEMORY`）+ `DialectCapability` 枚举（`USERS` / `PRIVILEGES` / `ROUTINES` / `VIEWS` / `INDEXES` / `FOREIGN_KEYS` / `TRIGGERS` / `CROSS_DATABASE` / `MULTI_SCHEMA` / `EXPORT` / `DDL_TRANSACTION` / `EMBEDDED_MODE`）。**SYSTEM.LIST_DRIVERS action（Action 18）**：枚举所有已加载方言并返回 `repeated DialectInfo` 元数据（`driver_name` / `display_name` / `jdbc_driver_class_name` / `jdbc_url_example` / `connection_type` / `requires_host` / `requires_port` / `default_port` / `supports_user` / `supports_password` / `supports_schema` / `supports_cross_database` / `capabilities[]`），供前端**动态渲染"新建连接"表单**；`RequestDispatcher` 表驱动新增 `(SYSTEM, LIST_DRIVERS) → Route` 一条；`DialectLoader.getAllDialects()` 提供枚举入口。`DialectInfo.items` 按 `driverName` 字典序升序。**376 测试全通过（1 个 Windows-only skip），0 失败 / 0 错误**（62 SQLite + 81 DuckDB + 63 H2 + 170 engine） |

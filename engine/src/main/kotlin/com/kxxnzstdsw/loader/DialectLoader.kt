@@ -82,6 +82,17 @@ object DialectLoader {
     }
 
     /**
+     * 列出所有已加载的方言实例（v2.8 新增 — 用于前端动态渲染连接表单）。
+     *
+     * 返回的是当前快照，按 driverName 排序保证稳定顺序。
+     * 调用方不应持有此集合后假设它永远不会变（loadFromDir 可累积注册）；
+     * 每次调用都会拿到最新注册表。
+     */
+    fun getAllDialects(): List<DatabaseDialect> {
+        return dialects.values.sortedBy { it.driverName }
+    }
+
+    /**
      * 直接注册一个方言实例（用于测试 — 跳过 SPI 扫描）。
      */
     fun registerForTesting(driverName: String, dialect: DatabaseDialect) {

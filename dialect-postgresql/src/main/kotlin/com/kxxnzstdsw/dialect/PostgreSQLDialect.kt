@@ -10,6 +10,27 @@ class PostgreSQLDialect : DatabaseDialect {
     override val driverName = "Postgresql"
     override val jdbcDriverClassName = "org.postgresql.Driver"
 
+    // v2.8: 前端连接表单元数据
+    override val displayName = "PostgreSQL"
+    override val connectionType = ConnectionType.CLIENT_SERVER
+    override val defaultPort = 5432
+    override val supportsSchema = true
+    override val supportsCrossDatabase = true      // PG 同连接可跨 database 查询
+    override val jdbcUrlExample = "jdbc:postgresql://127.0.0.1:5432/mydb"
+    override val capabilities = setOf(
+        DialectCapability.USERS,
+        DialectCapability.PRIVILEGES,
+        DialectCapability.ROUTINES,
+        DialectCapability.VIEWS,
+        DialectCapability.INDEXES,
+        DialectCapability.FOREIGN_KEYS,
+        DialectCapability.TRIGGERS,
+        DialectCapability.CROSS_DATABASE,
+        DialectCapability.MULTI_SCHEMA,
+        DialectCapability.EXPORT,
+        DialectCapability.DDL_TRANSACTION,
+    )
+
     override fun buildJdbcUrl(host: String, port: Int, database: String): String {
         return "jdbc:postgresql://$host:$port/$database"
     }

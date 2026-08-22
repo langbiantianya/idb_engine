@@ -122,16 +122,19 @@ dependencies {
     jdbcDrivers(libs.postgresql)
     jdbcDrivers(libs.h2)
     jdbcDrivers(libs.duckdb)
+    jdbcDrivers(libs.sqlite)
 
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.11.4")
     testImplementation(libs.h2)
     testImplementation(libs.duckdb)
+    testImplementation(libs.sqlite)
     // 集成测试需要引用方言 SPI 接口
     testImplementation(project(":dialect-h2"))
     testImplementation(project(":dialect-mysql"))
     testImplementation(project(":dialect-postgresql"))
     testImplementation(project(":dialect-duckdb"))
+    testImplementation(project(":dialect-sqlite"))
 }
 
 protobuf {
@@ -183,7 +186,7 @@ tasks.jar {
 val jdbcDriverNames = configurations.named("jdbcDrivers").map { deps ->
     deps.files.map { it.name }.toSet()
 }
-val dialectProjectNames = setOf("idb-dialect-mysql", "idb-dialect-postgresql", "idb-dialect-h2", "idb-dialect-duckdb")
+val dialectProjectNames = setOf("idb-dialect-mysql", "idb-dialect-postgresql", "idb-dialect-h2", "idb-dialect-duckdb", "idb-dialect-sqlite")
 val copyDeps by tasks.registering(Copy::class) {
     from(configurations.runtimeClasspath) {
         exclude { element ->
@@ -206,6 +209,7 @@ val copyDialects by tasks.registering(Copy::class) {
     from(project(":dialect-postgresql").tasks.named("jar"))
     from(project(":dialect-h2").tasks.named("jar"))
     from(project(":dialect-duckdb").tasks.named("jar"))
+    from(project(":dialect-sqlite").tasks.named("jar"))
     into(layout.buildDirectory.dir("libs/dialects"))
 }
 

@@ -222,6 +222,10 @@ object RequestDispatcher {
             invoke = { c, _ -> SystemHandler.serverInfo(c) },
             wrap = { b, m -> b.system = systemResponse { serverInfo = m as com.kxxnzstdsw.grpc.SystemServerInfoResponse } }
         ))
+        put(Category.SYSTEM to Action.LIST_DRIVERS, Route(
+            invoke = { _, _ -> SystemHandler.listDrivers() },
+            wrap = { b, m -> b.system = systemResponse { listDrivers = m as com.kxxnzstdsw.grpc.SystemListDriversResponse } }
+        ))
 
         // ─────── FUNCTION ───────
         put(Category.FUNCTION to Action.LIST, Route(

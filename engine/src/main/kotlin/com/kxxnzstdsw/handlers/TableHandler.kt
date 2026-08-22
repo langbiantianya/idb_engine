@@ -110,6 +110,9 @@ object TableHandler {
             val autoIncrementColumns = req.columnsList.mapNotNull { col ->
                 if (col.isPrimaryKey && col.autoIncrement) col.name else null
             }
+            // SQLite / DuckDB 等方言在 autoIncrement 主键的列定义里已 inline 输出 PRIMARY KEY，
+            // 此时不能再追加表级 PRIMARY KEY (会触发 "more than one primary key")。
+            val dialectEmitsInlinePK = autoIncrementColumns.isNotEmpty()
 
             for (stmt in dialect.buildPreCreateStatements(dialect.quoteIdentifier(req.tableName), autoIncrementColumns)) {
                 conn.createStatement().use { it.execute(stmt) }
@@ -121,7 +124,7 @@ object TableHandler {
                 append(dialect.quoteIdentifier(req.tableName))
                 append(" (")
                 append(columnDefs.joinToString(", "))
-                if (primaryKeys.isNotEmpty()) {
+                if (primaryKeys.isNotEmpty() && !dialectEmitsInlinePK) {
                     append(", PRIMARY KEY (")
                     append(primaryKeys.joinToString(", ") { dialect.quoteIdentifier(it) })
                     append(")")

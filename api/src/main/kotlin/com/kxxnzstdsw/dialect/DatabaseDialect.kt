@@ -23,6 +23,78 @@ interface DatabaseDialect {
      */
     fun buildJdbcUrl(host: String, port: Int, database: String): String
 
+    // region ─────── 连接元数据（v2.8，前端表单渲染用） ───────
+
+    /**
+     * 面向前端显示的方言名（如 "MySQL" / "PostgreSQL" / "DuckDB (Embedded)"）。
+     * 默认实现：取 driverName。
+     */
+    val displayName: String get() = driverName
+
+    /**
+     * 连接模式 —— 前端用它决定表单字段渲染（host/port 显隐）。
+     *
+     * - [ConnectionType.CLIENT_SERVER]: 需要 host + port + user + password（MySQL/PostgreSQL）
+     * - [ConnectionType.EMBEDDED]: 嵌入式，host/port 忽略，database 即文件路径/内存名（SQLite/DuckDB）
+     * - [ConnectionType.IN_MEMORY]: 嵌入式纯内存变种，database 可空（H2/DuckDB `:memory:`）
+     * - [ConnectionType.FILE_BASED]: 文件型，database 即路径（SQLite）
+     */
+    val connectionType: ConnectionType get() = ConnectionType.CLIENT_SERVER
+
+    /**
+     * `true` 表示连接时 host 字段必须填；`false` 表示方言忽略 host。
+     * 默认：跟 connectionType 一致（CLIENT_SERVER → true，其他 → false）。
+     */
+    val requiresHost: Boolean get() = connectionType == ConnectionType.CLIENT_SERVER
+
+    /**
+     * `true` 表示连接时 port 字段必须填；`false` 表示方言忽略 port。
+     * 默认：跟 connectionType 一致（CLIENT_SERVER → true，其他 → false）。
+     */
+    val requiresPort: Boolean get() = connectionType == ConnectionType.CLIENT_SERVER
+
+    /**
+     * 默认端口（前端表单 placeholder / 默认值）。null 表示无默认。
+     * 默认：null。
+     */
+    val defaultPort: Int? get() = null
+
+    /**
+     * 是否需要/支持 user 字段。
+     * CLIENT_SERVER 默认 true；EMBEDDED/FILE_BASED/IN_MEMORY 默认 false。
+     */
+    val supportsUser: Boolean get() = connectionType == ConnectionType.CLIENT_SERVER
+
+    /**
+     * 是否需要/支持 password 字段（与 supportsUser 同步：大多数服务端数据库要密码）。
+     */
+    val supportsPassword: Boolean get() = supportsUser
+
+    /**
+     * 是否支持 schema 概念。
+     * PG/H2 支持；MySQL 实际 database == schema（双层导航无意义）；DuckDB 有 schema。
+     */
+    val supportsSchema: Boolean get() = false
+
+    /**
+     * 是否支持跨 database 查询。
+     * PG/H2 支持；MySQL 单连接单库（不支持）；SQLite 用 ATTACH。
+     */
+    val supportsCrossDatabase: Boolean get() = false
+
+    /**
+     * 一个示例 JDBC URL（用于前端 placeholder / 文档展示）。
+     */
+    val jdbcUrlExample: String get() = "jdbc:example://host:1234/db"
+
+    /**
+     * 该方言支持的能力集合 —— 前端用此决定哪些按钮/菜单显示/隐藏。
+     */
+    val capabilities: Set<DialectCapability>
+        get() = emptySet()
+
+    // endregion
+
     /**
      * 为流式游标读取配置连接（如 PostgreSQL 需关闭 autoCommit）
      * @return 原始 autoCommit 值，供 restoreConnectionAfterStreaming 恢复
